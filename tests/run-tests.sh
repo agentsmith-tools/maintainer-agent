@@ -2169,6 +2169,55 @@ done
 # The profile's own name must be substituted into the shared doctrine, or the
 # agent is told to protect a repository that is not the one it is reviewing.
 grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+echo "== prompt assembly refuses missing inputs and preserves literal names =="
+# Run the same assembly from an isolated copy, so missing-input cases cannot
+# disturb the checkout. A backend sentinel proves no partial prompt reaches it.
+pf_tree="$stub_dir/prompt-failure-tree"
+pf_bin="$stub_dir/prompt-failure-bin"
+mkdir -p "$pf_tree" "$pf_bin"
+cp -R "$root/lib" "$root/profiles" "$pf_tree/"
+printf '#!/usr/bin/env bash\nprintf called > "%s"; exit 0\n' "$stub_dir/prompt-backend-called" > "$pf_bin/claude"
+chmod +x "$pf_bin/claude"
+pf_run() {
+    PATH="$pf_bin:$stub_dir:$PATH" MAINTAINER_STATE_DIR="$stub_dir/state-root" \
+        bash "$pf_tree/lib/run.sh" --show-prompt sysknife review 2>&1
+}
+pf_task="$pf_tree/profiles/sysknife/prompts/review.md"
+mv "$pf_task" "$pf_task.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_task" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing task prompt stops assembly before the backend"
+else
+    bad "a missing task prompt did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_task.saved" "$pf_task"
+pf_common="$pf_tree/profiles/sysknife/prompts/common-preamble.md"
+mv "$pf_common" "$pf_common.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_common" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing common preamble stops assembly before the backend"
+else
+    bad "a missing common preamble did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_common.saved" "$pf_common"
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="a|b"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'a|b reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a maintainer name containing the sed delimiter reaches the prompt literally"
+else
+    bad "a maintainer name containing the sed delimiter was damaged (rc=$pf_rc)"
+fi
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="Smith \& Sons"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'Smith & Sons reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "an ampersand in the maintainer name is preserved literally"
+else
+    bad "an ampersand in the maintainer name expanded in the prompt (rc=$pf_rc)"
+fi
 echo "== the run stamps its own build into the prompt =="
 # A report is only auditable if it names the build that wrote it, and the
 # doctrine tells the agent to take that from the first line of the prompt.
