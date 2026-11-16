@@ -90,7 +90,7 @@ case_latest_tag() {
     dr_repo release-check
     cz_expect_rc 0
     cz_expect_stdout_has "  last tag: v1.1.0"
-    cz_expect_stdout_has "  commits since: 1"
+    dr_expect_line "  commits since: 1"
 }
 dr_case "release-check: with two tags the nearest one to origin/main is the last tag" case_latest_tag
 
@@ -161,7 +161,7 @@ case_docs_only() {
     rel_change docs/a.md "documentation" "docs: a"
     dr_repo release-check
     cz_expect_rc 0
-    cz_expect_stdout_has "  production files touched:  0"
+    dr_expect_line "  production files touched:  0"
     dr_expect_block stdout "$(tail_lines docs last)"
 }
 dr_case "release-check: only docs changed is 'docs and tests only' with digit last" case_docs_only
@@ -172,7 +172,7 @@ case_docs_security() {
     rel_base
     rel_change CHANGELOG.md "$(rel_changelog $'### Security\n\n- note')" "docs: changelog"
     dr_repo release-check
-    cz_expect_stdout_has "  production files touched:  0"
+    dr_expect_line "  production files touched:  0"
     dr_expect_block stdout "$(tail_lines docs middle)"
 }
 dr_case "release-check: a Security entry with no production file says 'optional' and digit middle (pins current behaviour)" case_docs_security
@@ -184,8 +184,8 @@ case_prod_count() {
     rel_change crates/y/src/deep/m.rs "fn m() {}" "three"
     rel_change crates/y/tests/t.rs "fn t() {}" "four"
     dr_repo release-check
-    cz_expect_stdout_has "  production files touched:  3"
-    cz_expect_stdout_has "  shipped surface touched:    4"
+    dr_expect_line "  production files touched:  3"
+    dr_expect_line "  shipped surface touched:    4"
 }
 dr_case "release-check: PROD_GLOBS and SHIPPED_GLOBS are git pathspecs: * crosses directories and tests/ is outside the first" case_prod_count
 
@@ -197,7 +197,7 @@ case_globs_not_expanded() {
     cz_expect_rc 0
     # The pattern is handed to git as text. Expanded by the shell it would have
     # matched only crates/x/src/lib.rs, which is on disk, and counted 0.
-    cz_expect_stdout_has "  production files touched:  1"
+    dr_expect_line "  production files touched:  1"
 }
 dr_case "release-check: PROD_GLOBS is not expanded by the shell, so a pattern counts files absent from the working tree" case_globs_not_expanded
 
@@ -211,7 +211,7 @@ case_no_prod_globs() {
     cz_expect_rc 0
     cz_expect_stdout_has "  WARNING: this profile declares no PROD_GLOBS, so the production-file"
     cz_expect_stdout_has "           count below is meaningless. Set it in profile.env."
-    cz_expect_stdout_has "  production files touched:  0"
+    dr_expect_line "  production files touched:  0"
     dr_expect_block stdout "$(tail_lines docs last)"
 }
 dr_case "release-check: no PROD_GLOBS warns twice, counts 0 and says 'docs and tests only'" case_no_prod_globs
@@ -235,7 +235,7 @@ case_shipped_zero() {
     rel_change crates/x/src/lib.rs "fn a() { 8 }" "feat"
     cz_set SHIPPED_GLOBS 'apps/*'
     dr_repo release-check
-    cz_expect_stdout_has "  shipped surface touched:    0"
+    dr_expect_line "  shipped surface touched:    0"
     cz_expect_stdout_has "${CONT}nothing that installs has changed since v1.0.0, so a"
     cz_expect_stdout_has "${CONT}release would publish byte-identical artifacts and"
     cz_expect_stdout_has "${CONT}any break named below is in CI, not in the product."
@@ -357,6 +357,7 @@ case_tree_other_file_dirty() {
     cz_write notes.txt "scratch"
     dr_repo release-check
     cz_expect_rc 0
+    cz_expect_stdout_has "  CHANGELOG read from:        the working tree (main)"
     cz_expect_stdout_lacks_tree_notes
 }
 dr_case "release-check: an uncommitted file other than CHANGELOG.md adds no note" case_tree_other_file_dirty
@@ -379,15 +380,25 @@ case_tree_behind() {
     cz_git reset -q --hard v1.0.0
     dr_repo release-check
     cz_expect_rc 0
-    cz_expect_stdout_has "  commits since: 2"
+    dr_expect_line "  commits since: 2"
     cz_expect_stdout_has "    $(cz_git rev-parse --short origin/main) two"
     cz_expect_stdout_has "    $(cz_git rev-parse --short origin/main~1) one"
-    cz_expect_stdout_has "  shipped surface touched:    1"
+    dr_expect_line "  shipped surface touched:    1"
     cz_expect_stdout_has "${CONT}HEAD is 2 commit(s) BEHIND origin/main, so this"
     cz_expect_stdout_has "${CONT}is NOT the CHANGELOG you are about to tag. Pull, then"
     cz_expect_stdout_has "${CONT}run this again; the digit below may be wrong."
 }
 dr_case "release-check: a checkout 2 commits behind origin/main prints the three-line BEHIND warning with the count" case_tree_behind
+
+case_tree_behind_one() {
+    rel_base
+    rel_change crates/x/src/lib.rs "fn a() { 22 }" "one"
+    cz_git reset -q --hard v1.0.0
+    dr_repo release-check
+    cz_expect_rc 0
+    cz_expect_stdout_has "${CONT}HEAD is 1 commit(s) BEHIND origin/main, so this"
+}
+dr_case "release-check: a checkout exactly 1 commit behind origin/main prints the BEHIND warning" case_tree_behind_one
 
 case_tree_uncommitted_wins() {
     rel_base
@@ -412,7 +423,7 @@ case_fetch_fails() {
     cz_expect_rc 0
     cz_expect_stderr_has "fatal:"
     cz_expect_stdout_has "  last tag: v1.0.0"
-    cz_expect_stdout_has "  commits since: 1"
+    dr_expect_line "  commits since: 1"
 }
 dr_case "release-check: an origin that cannot be fetched prints git's error on stderr and the report still prints (pins current behaviour)" case_fetch_fails
 

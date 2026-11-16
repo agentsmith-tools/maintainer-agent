@@ -251,6 +251,16 @@ case_run_instance_darwin() {
 }
 dr_case "deployment: a missing run-instance.sh is fine on Darwin" case_run_instance_darwin
 
+case_run_instance_freebsd() {
+    dr_install
+    dr_os FreeBSD
+    rm -f "$DR_SHARE/run-instance.sh"
+    dr_doctor
+    dr_has_finding ok "run-instance.sh not needed on FreeBSD"
+    dr_lacks "run-instance.sh missing"
+}
+dr_case "deployment: a missing run-instance.sh reads 'not needed on FreeBSD' on any system other than Linux" case_run_instance_freebsd
+
 case_bin_missing() {
     dr_install
     rm -f "$DR_HOME/.local/bin/maintainer"

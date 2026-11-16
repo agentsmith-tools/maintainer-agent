@@ -571,3 +571,10 @@ sys.exit(0 if (sys.argv[2] + "\n") in data else 1)' "$CZ_CASE/$which" "$text"; t
         cz_note_fail "$which lacks the block: $(tr '\n' '|' <<<"$text" | cut -c1-240) (got: $(tr '\n' '|' < "$CZ_CASE/$which" | cut -c1-240))"
     fi
 }
+
+# dr_expect_line TEXT: stdout holds TEXT as a whole line, so "commits since: 1"
+# cannot be satisfied by "commits since: 10".
+dr_expect_line() {
+    grep -qxF -- "$1" "$CZ_CASE/stdout" \
+        || cz_note_fail "stdout has no line '$1': $(tr '\n' '|' < "$CZ_CASE/stdout" | cut -c1-240)"
+}

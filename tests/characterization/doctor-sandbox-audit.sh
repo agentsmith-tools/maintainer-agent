@@ -204,7 +204,10 @@ case_au_writable() {
 dr_case "audit: a writable state directory is ok" case_au_writable
 
 if [ "$DR_ME" = 0 ]; then
-    echo "SKIP  audit: a read-only state directory (root ignores the write bit)"
+    # Root ignores the write bit. The case still runs and counts, so the total is the
+    # same for every uid, and it says what it did not check.
+    case_au_not_writable() { echo "    (running as root: the write bit cannot be tested, nothing asserted)"; }
+    dr_case "audit: a state directory without the write bit is a FAIL with the chown fix (skipped as root)" case_au_not_writable
 else
     case_au_not_writable() {
         dr_install
@@ -233,6 +236,8 @@ case_re_stale() {
 }
 dr_case "receipts: merged and closed pull requests are listed in file-name order, open ones are not" case_re_stale
 
+# Pins current behaviour (fail open): a pull request gh cannot look up is skipped,
+# so its receipt reads as open.
 case_re_lookup_fails() {
     dr_install
     mkdir -p "$CZ_STATE/receipts"
@@ -300,6 +305,25 @@ case_le_unreadable() {
 }
 dr_case "leases: a lease file that is not JSON, lacks 'renewed' or holds a non-number is reported as unreadable" case_le_unreadable
 
+case_le_inside_limit() {
+    dr_install
+    lease 7 11
+    dr_doctor
+    cz_expect_rc 0
+    dr_has_finding ok "no lease has gone 12h without a renewal"
+}
+dr_case "leases: a lease renewed 11h ago is inside the 12h limit and ok" case_le_inside_limit
+
+case_le_null_renewed() {
+    dr_install
+    mkdir -p "$CZ_STATE/leases"
+    printf '{"renewed": null}\n' > "$CZ_STATE/leases/pr-6.json"
+    printf '[]\n' > "$CZ_STATE/leases/pr-8.json"
+    dr_doctor
+    dr_has_finding warn "lease(s) nobody has renewed for over 12h: #6 (unreadable), #8 (unreadable)" "maintainer lease release 6 8 "
+}
+dr_case "leases: a lease with renewed null, or a JSON list, is reported as unreadable" case_le_null_renewed
+
 case_le_other_files() {
     dr_install
     mkdir -p "$CZ_STATE/leases"
@@ -364,6 +388,26 @@ case_tok_clean() {
     dr_has_finding ok "no pinned token left on disk by an earlier run"
 }
 dr_case "token: no file holding the token is ok" case_tok_clean
+
+case_tok_drafts() {
+    dr_install
+    mkdir -p "$CZ_STATE/drafts" "$CZ_STATE/logs"   # logs/ keeps the whole-state-dir fallback out of play
+    printf '%s\n' "$TOKEN" > "$CZ_STATE/drafts/d.md"
+    dr_doctor
+    cz_expect_rc 1
+    dr_has_finding fail "the pinned token is on disk in 1 file(s), starting $CZ_STATE/drafts/d.md" "rotate the token, then: $DR_SHARE/run.sh magent <task> rescrubs on exit"
+}
+dr_case "token: a token in drafts/ is found" case_tok_drafts
+
+case_tok_state() {
+    dr_install
+    mkdir -p "$CZ_STATE/state" "$CZ_STATE/logs"   # logs/ keeps the whole-state-dir fallback out of play
+    printf '%s\n' "$TOKEN" > "$CZ_STATE/state/s.json"
+    dr_doctor
+    cz_expect_rc 1
+    dr_has_finding fail "the pinned token is on disk in 1 file(s), starting $CZ_STATE/state/s.json" "rotate the token, then: $DR_SHARE/run.sh magent <task> rescrubs on exit"
+}
+dr_case "token: a token in state/ is found" case_tok_state
 
 case_tok_binary() {
     dr_install

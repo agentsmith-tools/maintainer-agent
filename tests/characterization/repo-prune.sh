@@ -125,7 +125,7 @@ dr_case "profile: with one deployed profile and no environment the repository an
 # Pins current behaviour: the last command of cmd_prune is
 # `[ "$dry" = 0 ] && { ...; }`. On a dry run (or POST=off) the test is false and
 # its status 1 becomes the program's exit code, so every dry run exits 1 with
-# nothing on stderr. A real run exits 0.-------
+# nothing on stderr. A real run exits 0.
 
 prune_branches() {
     dr_branch feat-merged merged
@@ -287,6 +287,8 @@ case_open_pr_two() {
 }
 dr_case "prune: two open PR heads change nothing either (pins plan decision F5)" case_open_pr_two
 
+# Pins current behaviour (fail open): a failing gh pr list leaves prune with no
+# open heads, and it goes on to delete.
 case_open_pr_fails() {
     prune_setup; prune_branches
     cz_gh pr-list "" 1
@@ -446,6 +448,7 @@ case_stale_worktree_dry() {
     rm -rf "$CZ_CASE/wt"
     dr_repo prune --dry-run
     cz_expect_rc 1
+    cz_expect_stdout "$REMOTE_HDR" "    none" "$LOCAL_HDR" "    none"
     cz_check "worktree records after a dry run" "$(dr_worktrees)" "2"
 }
 dr_case "prune: a dry run leaves the record of a vanished worktree alone" case_stale_worktree_dry

@@ -27,6 +27,7 @@ COMMITTER_RE='testuser <42\+testuser@users\.noreply\.github\.com>'
 
 PATCH_TYPO=$'diff --git a/docs.md b/docs.md\n--- a/docs.md\n+++ b/docs.md\n@@ -1 +1,2 @@\n one\n+two'
 PATCH_COUNT3=$'diff --git a/docs.md b/docs.md\n--- a/docs.md\n+++ b/docs.md\n@@ -1 +1,2 @@\n one\n+there are 3 tests'
+PATCH_COUNT30=$'diff --git a/docs.md b/docs.md\n--- a/docs.md\n+++ b/docs.md\n@@ -1 +1,2 @@\n one\n+there are 30 tests'
 PATCH_COUNT13=$'diff --git a/docs.md b/docs.md\n--- a/docs.md\n+++ b/docs.md\n@@ -1 +1,2 @@\n one\n+there are 13 tests'
 
 # --- the fixture -------------------------------------------------------------------
@@ -73,7 +74,9 @@ PY
     cz_git push -q "$FX_REMOTES/alice/r.git" main || exit 2
     cz_git checkout -q -b fix-1
     cz_write docs.md "one"
-    if [ "${1:-}" = SIGNED ]; then cz_commit $'docs: add one\n\nSigned-off-by: Bob <bob@example.invalid>' FX_F1; else cz_commit "docs: add one" FX_F1; fi
+    if [ "${1:-}" = SIGNED ]; then cz_commit $'docs: add one\n\nSigned-off-by: Bob <bob@example.invalid>' FX_F1
+    elif [ "${1:-}" = MENTION ]; then cz_commit $'docs: add one\n\nreminder: Signed-off-by: is still to come' FX_F1
+    else cz_commit "docs: add one" FX_F1; fi
     cz_git push -q "$FX_REMOTES/alice/r.git" fix-1 || exit 2
     cz_git checkout -q main
     FX_F1S="$(cz_git rev-parse --short "$FX_F1")"
@@ -170,6 +173,16 @@ case_usage_bad_after_good() {
     dr_expect_calls fixup-check
 }
 dr_case "usage: a non-numeric word after a good number cancels it, so '7 abc' is the usage error" case_usage_bad_after_good
+
+case_usage_bad_before_good() {
+    fx_up
+    fx abc 7
+    cz_expect_rc 64
+    cz_expect_stdout_empty
+    cz_expect_stderr "$USAGE"
+    dr_expect_calls fixup-check
+}
+dr_case "usage: a non-numeric word before a good number still ends in the usage error, so 'abc 7' is refused" case_usage_bad_before_good
 
 # Pins current behaviour: with two numbers the last one wins.
 case_usage_last_number() {
@@ -283,6 +296,8 @@ case_acct_switch_fails() {
     cz_gh auth-switch "" 1
     fx 7 --dry-run
     cz_expect_rc 0
+    cz_expect_stdout_has "  plan: typo:docs.md on alice/r fix-1"
+    cz_expect_gh_log "$ACCT_ARGV" "$ME_ARGV" "$AUTHOR_ARGV"
 }
 dr_case "account: a failing gh auth switch is ignored when gh api user answers" case_acct_switch_fails
 
@@ -485,6 +500,16 @@ case_count_mismatch() {
 }
 dr_case "test-count: a patch stating 13 when the command derives 3 is refused (whole-number match)" case_count_mismatch
 
+case_count_mismatch_trailing() {
+    fx_up
+    printf "%s\n" "$PATCH_COUNT30" > "$CZ_CASE/fix.patch"
+    fx_check ready "test-count:docs.md"
+    cz_set FIXUP_COUNT_CMD 'echo 3'
+    fx 7
+    fx_die "the patch does not state 3, the count FIXUP_COUNT_CMD derives; a typed count is refused"
+}
+dr_case "test-count: a patch stating 30 when the command derives 3 is refused (trailing boundary)" case_count_mismatch_trailing
+
 case_count_ok() {
     fx_up
     printf "%s\n" "$PATCH_COUNT3" > "$CZ_CASE/fix.patch"
@@ -602,9 +627,20 @@ dr_case "fixup: when the branch's commits carry Signed-off-by the fixup commit i
 case_no_signoff() {
     fx_up
     fx 7 --dry-run
+    cz_expect_rc 0
+    cz_expect_stdout_has "    fixup: typo from the review"
     cz_expect_lacks stdout "Signed-off-by"
 }
 dr_case "fixup: without Signed-off-by on the branch the fixup commit has none" case_no_signoff
+
+case_signoff_mention_only() {
+    fx_up MENTION
+    fx 7 --dry-run
+    cz_expect_rc 0
+    cz_expect_stdout_has "    fixup: typo from the review"
+    cz_expect_lacks stdout "Signed-off-by: testuser"
+}
+dr_case "fixup: a commit message that only mentions Signed-off-by mid-line does not turn on the sign-off" case_signoff_mention_only
 
 case_kinds_sorted() {
     fx_up

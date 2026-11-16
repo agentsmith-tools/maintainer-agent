@@ -23,6 +23,7 @@ case_ci_none_slug() {
     dr_p_unset REPO_SLUG
     dr_doctor
     cz_expect_rc 0
+    dr_has_finding ok "installed at $DR_SHARE"
     dr_lacks "workflow"
     cz_expect_gh_count "run list" 0
 }
@@ -290,6 +291,8 @@ case_timer_not_soon() {
     dr_install
     dr_ans sc-timers "Mon 3min 5s left maintainer@magent-review.timer maintainer@magent-review.service" 0
     dr_doctor
+    cz_expect_rc 0
+    dr_has_finding ok "1 systemd timer(s) enabled for magent"
     dr_lacks "fires within seconds"
 }
 dr_case "scheduler: a timer due in minutes is not a catch-up warning" case_timer_not_soon
@@ -326,6 +329,10 @@ case_other_os() {
     cz_expect_rc 0
     dr_has_finding warn "FreeBSD: no native scheduler wired" "platform/posix/install-cron.sh"
     dr_expect_calls systemctl
+    # Neither Linux nor Darwin: podman is present and the warm-up unit is not checked.
+    dr_has_finding ok "podman runs from cold"
+    dr_lacks "userns"
+    dr_lacks "podman-userns-warmup"
 }
 dr_case "scheduler: another system is 'no native scheduler wired' and never touches systemctl" case_other_os
 
@@ -543,6 +550,7 @@ case_suite_ignores_other_files() {
     mkdir -p "$DR_SHARE/$V"; printf 'x\n' > "$DR_SHARE/$V/README.md"
     dr_doctor
     cz_expect_rc 0
+    dr_has_finding ok "podman runs from cold"
     dr_lacks "verify suite"
 }
 dr_case "suite image: only *.sh files in verify.d are suites" case_suite_ignores_other_files
