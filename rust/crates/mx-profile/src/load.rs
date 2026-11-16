@@ -296,6 +296,50 @@ pub fn load_profile(proc: &dyn Proc, env: &LoadEnv) -> Load {
     Load { stdout: shown.stdout, stderr: shown.stderr, result }
 }
 
+/// What `bin/maintainer-doctor` does before its first check: source `defaults.env`,
+/// source `profile_env` when it is a file, then apply the `MAINTAINER_<KEY>`
+/// overrides. The doctor names its own profile and tolerates a profile with no
+/// `profile.env`, so it cannot use [`load_profile`], which refuses both.
+///
+/// A missing `defaults.env` and a `defaults.env` whose last command fails are
+/// the two refusals, as for `maintainer_load_defaults`. The five exported names
+/// are not derived: the doctor reads the profile's own variables.
+#[must_use]
+pub fn load_for_doctor(proc: &dyn Proc, env: &LoadEnv, profile_env: &Path) -> Load {
+    let mut shown = Streams::default();
+    let result = resolve_for_doctor(proc, env, profile_env, &mut shown);
+    Load { stdout: shown.stdout, stderr: shown.stderr, result }
+}
+
+fn resolve_for_doctor(
+    proc: &dyn Proc,
+    env: &LoadEnv,
+    profile_env: &Path,
+    shown: &mut Streams,
+) -> Result<Profile, LoadError> {
+    let defaults = defaults_path(env).ok_or(LoadError::DefaultsMissing)?;
+    let first = evaluate(proc, env, std::slice::from_ref(&defaults));
+    let after_defaults = match &first.outcome {
+        Ok(dump) if dump.last_status == 0 => dump.vars.clone(),
+        Ok(dump) => {
+            shown.keep(&first);
+            return Err(LoadError::DefaultsFailed { status: dump.last_status });
+        }
+        Err(error) => {
+            shown.keep(&first);
+            return Err(error.clone());
+        }
+    };
+    let mut vars = if is_file(profile_env) {
+        source(proc, env, &[defaults.clone(), profile_env.to_path_buf()], shown)?
+    } else {
+        shown.keep(&first);
+        after_defaults
+    };
+    apply_overrides(&mut vars, &defaults);
+    Ok(Profile { vars, exported: Vec::new(), deployed_name: None })
+}
+
 /// What the sourced files printed, in the order the bash would have printed it.
 #[derive(Default)]
 struct Streams {

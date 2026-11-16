@@ -14,3 +14,13 @@ Three rules:
 3. `Fact::Unreadable` never becomes `Fact::Absent`. A read that failed is not a read that found nothing.
 
 A binary's `main` restores the default `SIGPIPE` action, because Rust ignores it.
+
+## mx-doctor
+
+`crates/mx-doctor` is `bin/maintainer-doctor` in Rust: the library holds every check as a decision over facts read through the ports, and the binary is named `maintainer-doctor`. Its tests are in `crates/mx-doctor/tests/`:
+
+- `blackbox.sh`: the doctor characterization cases of `tests/characterization/` run against an assembled tree (`rust/scripts/assemble-tree.sh`), three times, with the four pinned differences named in the script.
+- `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit code, the order of every external call and the state tree.
+- `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
+
+The doctor's binary cannot restore the default `SIGPIPE` action without `unsafe`, so a write to a closed pipe ends it with status 141, which is what a shell reports for a process the signal killed.
