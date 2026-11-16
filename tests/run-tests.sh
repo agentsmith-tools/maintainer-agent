@@ -725,6 +725,16 @@ echo "== a failure that retries itself does not raise a critical alert =="
 tn="$stub_dir/toasthome"; rm -rf "$tn"; mkdir -p "$tn"
 tn_repo="$tn/repo"; git init -q -b main "$tn_repo"
 tn_state="$tn/state"; mkdir -p "$tn_state"
+# Lock contention is a transient skip, not a broken run. This drives the
+# lock-timeout branch all the way through run.sh instead of counting its text.
+make_stub flock 'exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_FORCE=1 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a held run lock exits 75 so the next slot can retry" \
+    || bad "lock contention no longer exits 75 (rc=$rc): $out"
+make_stub flock 'exit 0'
 # notify-send records its arguments instead of reaching a desktop.
 cat > "$stub_dir/notify-send" <<'NEOF'
 #!/usr/bin/env bash
@@ -768,6 +778,15 @@ grep -q '^failed review' "$tn/marker.log" \
 grep -q 'could not reach GitHub' "$tn/marker.log" \
     && ok "with the reason the run recorded" \
     || bad "the marker does not carry the reason"
+# A valid first identity check followed by an unreadable pinned-token identity
+# is also transient. The GH_TOKEN check distinguishes the two API calls.
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unresolved pinned-token identity exits 75" \
+    || bad "an unresolved pinned-token identity no longer exits 75 (rc=$rc): $out"
 # A real refusal is NOT transient and must still be critical: a wrong identity is
 # somebody else's name on this account and no retry fixes it.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
@@ -779,11 +798,32 @@ NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=
 grep -q 'u critical' "$tn/notify.log" \
     && ok "a wrong identity is still critical, because no retry fixes it" \
     || bad "the wrong-account refusal was downgraded along with the transient ones"
+# A backend usage-window failure with no report reaches the post-backend
+# transient branch. Keep the helper local and make finish refuse the empty run.
+mkdir -p "$tn/.local/bin"
+cat > "$tn/.local/bin/maintainer" <<'MEOF'
+case "$1" in
+    start) printf '=== start 206-transient ===\n' ;;
+    finish) printf 'no report\n'; exit 1 ;;
+    *) exit 0 ;;
+esac
+MEOF
+chmod +x "$tn/.local/bin/maintainer"
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) echo vladimirrott;; esac'
+make_stub claude 'printf "You\047ve hit your session limit; resets at 10:10pm\\n" >&2; exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      MAINTAINER_SCRIPTS="$tn/no-scripts" \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a transient backend failure without a report exits 75" \
+    || bad "the transient no-report branch no longer exits 75 (rc=$rc): $out"
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 rm -f "$stub_dir/notify-send" "$stub_dir/gh"
 make_stub notify-send 'exit 0'
 # systemd must not fire OnFailure for the transient code either, or the second
 # toast arrives whatever run.sh does about the first.
-grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
+grep -q '^SuccessExitStatus=75$' "$root/platform/linux/maintainer@.service" \
     && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
     || bad "systemd still calls a transient failure a unit failure"
 
@@ -3292,6 +3332,11 @@ left=$(find "$fresh" -type f 2>/dev/null | wc -l)
 check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
+if bash "$suite_root/tests/install-uninstall-artifacts.sh" "$root"; then
+    ok "uninstall removes installed artifacts without a systemd user session"
+else
+    bad "uninstall leaves installed artifacts when systemctl is unavailable"
+fi
 uh="$stub_dir/unin"; mkdir -p "$uh"
 HOME="$uh" "$root/install.sh" >/dev/null 2>&1
 mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
@@ -7397,13 +7442,10 @@ check_transient "$tfix/does-not-exist.log" >/dev/null \
 sc_end; fi
 
 # run.sh has to USE it, on both alert paths, or the classifier is decoration.
-if sc_case 2; then
+if sc_case 1; then
 grep -q 'backend_transient_reason' "$root/lib/run.sh" \
     && ok "run.sh consults the classifier" \
     || bad "the classifier exists and run.sh never calls it"
-n=$(grep -c 'exit 75' "$root/lib/run.sh")
-[ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
-    || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
 sc_end; fi
 
 echo "== the pinned token never survives the run that used it =="
