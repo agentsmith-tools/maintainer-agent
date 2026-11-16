@@ -225,10 +225,13 @@ fcntl.flock(f, fcntl.LOCK_EX)
 open(sys.argv[2], "w").close()
 time.sleep(60)' "$(LOCK_S)" "$ready" &
     pid=$!
-    exe="$(readlink "/proc/$pid/exe")"
-    case "$exe" in *python*) ;; *) cz_note_fail "the lock holder's pid $pid is $exe, not python"; kill "$pid" 2>/dev/null; return ;; esac
+    # The ready file comes first: until python has called execve, /proc/$pid/exe
+    # still names the forking bash, and reading it then failed 5 runs in 24 under
+    # rootless podman. The file exists only after the interpreter took the lock.
     for _ in $(seq 1 50); do [ -e "$ready" ] && break; sleep 0.1; done
     if [ ! -e "$ready" ]; then cz_note_fail "the lock holder never took the lock"; kill "$pid" 2>/dev/null; return; fi
+    exe="$(readlink "/proc/$pid/exe")"
+    case "$exe" in *python*) ;; *) cz_note_fail "the lock holder's pid $pid is $exe, not python"; kill "$pid" 2>/dev/null; return ;; esac
     ci_install
     local rc_busy="$CZ_RC"; cp "$CZ_CASE/stderr" "$CZ_CASE/stderr.busy"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null

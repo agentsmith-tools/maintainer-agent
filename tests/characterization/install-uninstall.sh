@@ -65,6 +65,20 @@ case_guard_refuses() {
 }
 ci_case "uninstall guard: enabled timers exit 3 with the six-line message and remove nothing" case_guard_refuses
 
+# One live timer is enough. Every other guard case lists two.
+case_guard_one_timer() {
+    deployed
+    printf 'maintainer@sysknife-ci.timer   n/a n/a\n' > "$CZ_CASE/systemctl.timers"
+    ci_snap "$CZ_HOME" > "$CZ_CASE/home.before"
+    ci_install --uninstall
+    cz_expect_rc 3
+    cz_expect_stdout_empty
+    cz_expect_stderr_first "install.sh: 1 maintainer timer(s) are enabled on this machine."
+    ci_snap "$CZ_HOME" > "$CZ_CASE/home.after"
+    ci_expect_same_snap "home" "$CZ_CASE/home.before" "$CZ_CASE/home.after"
+}
+ci_case "uninstall guard: a single enabled timer is enough to refuse with exit 3" case_guard_one_timer
+
 case_guard_counts_lines() {
     deployed
     printf 'maintainer@a.timer\nsomething else\nmaintainer@b.timer maintainer@c.timer\n' > "$CZ_CASE/systemctl.timers"
@@ -305,6 +319,32 @@ case_failed_disable() {
   run systemctl --user disable --now maintainer@sysknife-review.timer"
 }
 ci_case "uninstall: failed disable steps are listed on stderr, everything else is still removed, exit 0 (pins current behaviour)" case_failed_disable
+
+# The share directory removal is a recorded step like the disable and cron steps.
+# An rm stub fails only for `rm -rf <share>` and passes every other call to the
+# real rm, so the case does not depend on file permissions or on running as root.
+case_failed_share_removal() {
+    deployed
+    cat > "$CZ_CASE/bin/rm" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = -rf ] && [ "${2:-}" = "${CZ_FAIL_RM_PATH:?}" ]; then
+    echo "stub rm: cannot remove $2" >&2
+    exit 1
+fi
+exec "${CZ_REAL_RM:?}" "$@"
+STUB
+    bash -n "$CZ_CASE/bin/rm"; chmod +x "$CZ_CASE/bin/rm"
+    cz_set CZ_FAIL_RM_PATH "$CZ_SHARE"; cz_set CZ_REAL_RM "$(type -P rm)"
+    ci_install --uninstall
+    cz_expect_rc 0
+    cz_expect_file "$CZ_SHARE/VERSION"
+    cz_expect_no_file "$CZ_HOME/.local/bin/maintainer"
+    cz_expect_no_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
+    cz_expect_stdout_has "  SOME STEPS FAILED. This deployment is part-removed, and that is the"
+    cz_expect_stdout_has "  removed: $CZ_SHARE, the four commands in $CZ_HOME/.local/bin, and every scheduler entry."
+    cz_expect_stderr "stub rm: cannot remove $CZ_SHARE" "" "  run rm -rf $CZ_SHARE"
+}
+ci_case "uninstall: a share directory that cannot be removed is listed as a failed step, the rest is removed, exit 0 (pins current behaviour)" case_failed_share_removal
 
 case_failed_cron() {
     deployed; echo 1 > "$CZ_CASE/crontab.w.rc"

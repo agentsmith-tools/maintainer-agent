@@ -14,9 +14,12 @@
 #           podman, docker, curl, wget, ssh, gh, claude and codex fail the case
 #           when they run.
 #   tools/  symlinks to the few real tools the programs need, and nothing else.
-#           The real systemctl, crontab and launchctl are not reachable, so a
-#           program that skips PATH and names /usr/bin/systemctl is the only
-#           way to touch them, and install-isolation.sh checks that.
+#           The real systemctl, crontab and launchctl are not on that PATH. A
+#           program that names /usr/bin/systemctl by absolute path would still
+#           reach the real one, and no run can detect that after the fact.
+#           install-isolation.sh therefore scans the programs for such a path
+#           (a static check), and the real-host listing comparison in the PR
+#           description covers the rest.
 # The program runs under `env -i`, from the case's home directory.
 #
 # Golden files live in golden/install/. The bash programs produced them and a

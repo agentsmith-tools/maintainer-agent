@@ -229,6 +229,8 @@ case_launchd_remove() {
     cz_expect_file "$CZ_HOME/Library/LaunchAgents/dev.maintainer.magent.review.plist"
     cz_expect_file "$CZ_HOME/Library/LaunchAgents/other.plist"
     cz_check "unload calls" "$(grep -c '^unload ' "$CZ_CASE/launchctl.calls")" "4"
+    local t
+    for t in review issues ci audit; do cz_expect_no_file "$CZ_HOME/Library/LaunchAgents/dev.maintainer.sysknife.$t.plist"; done
 }
 ci_case "launchd remove: unloads and deletes one profile's plists in name order and nothing else" case_launchd_remove
 
@@ -446,7 +448,9 @@ case_inst_no_argument() {
     mkinst
     ci_run "$CZ_CASE/inst/run-instance.sh"
     cz_expect_rc 1
-    cz_expect_stderr_has "usage: run-instance.sh <profile>-<task>"
+    cz_expect_stdout_empty
+    cz_check "stderr after the shell's own 'file: line N:' prefix" "$(sed 's/^.*run-instance.sh: line [0-9]*: //' "$CZ_CASE/stderr")" "1: usage: run-instance.sh <profile>-<task>"
+    cz_check "stderr line count" "$(wc -l < "$CZ_CASE/stderr" | tr -d ' ')" "1"
     ci_expect_calls run.calls
 }
 ci_case "run-instance: no argument exits 1 with the usage text and runs nothing" case_inst_no_argument

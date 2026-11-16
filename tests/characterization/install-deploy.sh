@@ -292,6 +292,21 @@ case_key_minted() {
 }
 ci_case "key: a first install mints 64 hex characters, mode 600, no trailing newline" case_key_minted
 
+# A constant key would also match the hex pattern above. Two installs into two
+# homes must mint two different keys.
+case_key_is_random() {
+    ci_fixture_profiles
+    ci_install; cz_expect_rc 0
+    local k1; k1="$(cat "$CZ_SHARE/receipt.key")"
+    mkdir -p "$CZ_CASE/home2"; cz_set HOME "$CZ_CASE/home2"
+    ci_install; cz_expect_rc 0
+    local k2; k2="$(cat "$CZ_CASE/home2/.local/share/maintainer/receipt.key")"
+    grep -qE '^[0-9a-f]{64}$' <<<"$k2" || cz_note_fail "the second key is not 64 hex characters"
+    [ "$k1" != "$k2" ] || cz_note_fail "two installs in two homes minted the same key"
+    [ "$k1" != "$(printf '%064d' 0)" ] || cz_note_fail "the key is all zeros"
+}
+ci_case "key: two installs in two homes mint two different keys" case_key_is_random
+
 case_key_never_printed() {
     ci_fixture_profiles
     ci_install
@@ -532,19 +547,24 @@ ci_case "timers: a plain install does not need systemctl" case_timers_linux_with
 
 # --- fewer profiles than expected -----------------------------------------------------
 
-# Pins current behaviour. install.sh refuses a deployed tree with no sysknife
-# profile, after it has copied everything, because that is the profile it
-# probes. A tree with only the magent profile therefore cannot install.
+# Changed by #211 (issue #207): install.sh used to probe for the sysknife profile
+# after it had copied everything, so a fork whose only profile is magent exited 1
+# with "profiles did not land". It now accepts any deployed profile.env. Before
+# #211 this case pinned exit 1.
 case_one_profile_magent_only() {
     ci_fixture_profiles; rm -rf "$CZ_TREE/profiles/sysknife"
     ci_install
-    cz_expect_rc 1
-    cz_expect_stderr "install.sh: profiles did not land where run.sh expects"
-    cz_expect_lacks stdout "  done"
+    cz_expect_rc 0
+    cz_expect_stderr_empty
+    cz_expect_stdout_has "  magent: "
+    cz_expect_stdout_has "  done"
     cz_expect_file "$CZ_SHARE/profiles/magent/profile.env"
+    cz_expect_file "$CZ_SHARE/profiles/magent/settings.json"
+    cz_expect_no_file "$CZ_SHARE/profiles/sysknife"
     cz_expect_file "$CZ_HOME/.local/bin/maintainer"
+    cz_expect_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
 }
-ci_case "profiles: a tree with only magent copies everything, then exits 1 for the missing sysknife (pins current behaviour)" case_one_profile_magent_only
+ci_case "profiles: a tree whose only profile is magent installs, deploys it and copies the units (changed by #211, issue #207)" case_one_profile_magent_only
 
 case_one_profile_sysknife_only() {
     ci_fixture_profiles; rm -rf "$CZ_TREE/profiles/magent"
@@ -564,13 +584,27 @@ case_one_profile_dry_run_does_not_check() {
 }
 ci_case "profiles: a dry run on a tree with only magent exits 0, the landing check is skipped" case_one_profile_dry_run_does_not_check
 
+# Still refused after #211: a checkout with no profile at all.
 case_no_profiles() {
     ci_fixture_profiles; rm -rf "$CZ_TREE/profiles/"*
     ci_install
     cz_expect_rc 1
     cz_expect_stderr "install.sh: profiles did not land where run.sh expects"
+    cz_expect_lacks stdout "  done"
 }
 ci_case "profiles: an empty profiles directory exits 1 with the landing message" case_no_profiles
+
+# The landing check asks for a profile.env, not for a directory.
+case_profile_dir_without_env() {
+    ci_fixture_profiles; rm -rf "$CZ_TREE/profiles/"*; mkdir -p "$CZ_TREE/profiles/lonely/prompts"
+    printf 'x\n' > "$CZ_TREE/profiles/lonely/prompts/review.md"
+    ci_install
+    cz_expect_rc 1
+    cz_expect_stderr "install.sh: profiles did not land where run.sh expects"
+    cz_expect_lacks stdout "  done"
+    cz_expect_file "$CZ_SHARE/profiles/lonely/prompts/review.md"
+}
+ci_case "profiles: a profile directory with no profile.env does not count and exits 1 after copying it" case_profile_dir_without_env
 
 case_profile_without_deny_json() {
     ci_fixture_profiles; rm -f "$CZ_TREE/profiles/magent/deny.json"

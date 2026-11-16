@@ -140,10 +140,23 @@ case_no_scenarios() {
     rm -f "$CZ_TREE"/evals/scenarios/*.md
     ci_evals
     cz_expect_rc 1
-    cz_expect_stderr_has "  FAIL  * has no entry in $CZ_TREE/profiles/sysknife/evals.json"
-    cz_expect_stderr_has "has no scenario file"
+    local ids id n
+    ids="$(python3 -I -c 'import json,sys
+for k in sorted(json.load(open(sys.argv[1]))):
+    if not k.startswith("_"): print(k)' "$CZ_TREE/profiles/sysknife/evals.json")"
+    n="$(grep -c . <<<"$ids")"
+    [ "$n" -ge 9 ] || cz_note_fail "only $n mappings found in evals.json"
+    {
+        printf '  FAIL  * has no entry in %s; add a needle or an explicit "n/a" with a reason\n' "$CZ_TREE/profiles/sysknife/evals.json"
+        for id in $ids; do printf "  FAIL  mapping '%s' has no scenario file\n" "$id"; done
+    } | LC_ALL=C sort > "$CZ_CASE/want.sorted"
+    LC_ALL=C sort "$CZ_CASE/stderr" > "$CZ_CASE/got.sorted"
+    cmp -s "$CZ_CASE/want.sorted" "$CZ_CASE/got.sorted" \
+        || cz_note_fail "stderr differs: $(diff "$CZ_CASE/want.sorted" "$CZ_CASE/got.sorted" | head -4 | tr '\n' '|' | cut -c1-300)"
+    cz_check "stdout" "$(cat "$CZ_CASE/stdout")" "
+  0 passed, $((n + 1)) failed"
 }
-ci_case "static: with no scenario files it fails on the literal pattern and on every mapping (pins current behaviour)" case_no_scenarios
+ci_case "static: with no scenario files it fails on the literal pattern and on every mapping, and says nothing else (pins current behaviour)" case_no_scenarios
 
 case_unknown_profile() {
     cz_set MAINTAINER_PROFILE nope

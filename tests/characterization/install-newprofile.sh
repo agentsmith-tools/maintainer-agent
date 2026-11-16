@@ -249,7 +249,22 @@ case_timer_overwritten() {
     printf 'old content\n' > "$CZ_TREE/platform/linux/maintainer@alpha-review.timer"
     alpha
     cz_expect_rc 0
-    grep -q '^Description=maintainer: alpha review (timer)$' "$CZ_TREE/platform/linux/maintainer@alpha-review.timer" || cz_note_fail "the existing timer was not replaced"
+    local want
+    want="$(printf '%s\n' \
+        '[Unit]' \
+        'Description=maintainer: alpha review (timer)' \
+        '' \
+        '[Timer]' \
+        '# Fires daily. The real cadence is MIN_HOURS_review in profiles/alpha/profile.env,' \
+        '# which run.sh enforces on every platform.' \
+        'OnCalendar=*-*-* 09:17:00' \
+        'Persistent=true' \
+        'RandomizedDelaySec=300' \
+        'Unit=maintainer@alpha-review.service' \
+        '' \
+        '[Install]' \
+        'WantedBy=timers.target'; printf x)"
+    ci_expect_bytes "$CZ_TREE/platform/linux/maintainer@alpha-review.timer" "${want%x}"
 }
 ci_case "timers: an existing timer unit of the same name is overwritten without a word (pins current behaviour)" case_timer_overwritten
 
@@ -362,6 +377,19 @@ case_surviving_placeholder() {
     cz_expect_lacks stdout "ready"
 }
 ci_case "refusal: a placeholder left after substitution exits 1 with grep's lines, keeps the profile, writes no timers (pins current behaviour)" case_surviving_placeholder
+
+# A placeholder whose name holds an underscore: the check must see more than a
+# bare word between the double underscores.
+case_surviving_placeholder_underscore() {
+    ci_fixture_profiles
+    printf 'Owner: __MY_OWNER__\n' >> "$CZ_TREE/profiles/_template/notes.txt"
+    alpha
+    cz_expect_rc 1
+    cz_expect_stderr_first "new-profile: a placeholder survived substitution:"
+    cz_check "stderr line 2" "$(sed -n 2p "$CZ_CASE/stderr")" "$CZ_TREE/profiles/alpha/notes.txt:2:Owner: __MY_OWNER__"
+    cz_expect_no_file "$CZ_TREE/platform/linux/maintainer@alpha-review.timer"
+}
+ci_case "refusal: a surviving placeholder with an underscore in its name exits 1 as well (pins current behaviour)" case_surviving_placeholder_underscore
 
 # --- the real template -------------------------------------------------------------------------
 
