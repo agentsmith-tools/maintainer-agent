@@ -58,6 +58,13 @@ shape_case lock-held            transient   "another run held the lock for over 
 shape_case killed-silently      needs_human "Killed" "Killed"
 shape_case no-doctrine          needs_human "preamble-core.md is missing; refusing" "preamble-core.md is missing"
 
+case_cursor_refusal_named() {
+    classify "cursor prompt is too large for a single argument (argument list too long); reduce the context or use another backend"
+    cz_expect_stderr_empty
+    cz_expect_stdout "needs_human${TAB}argument-list-too-long${TAB}argument list too long" "rc=0"
+}
+cz_case "classify: the cursor refusal of an oversized prompt is named argument-list-too-long" case_cursor_refusal_named
+
 # died-without-saying has the pattern (?!x)x, a lookahead that extended regular
 # expressions do not have. grep rejects it, the classifier hides grep's error, and
 # the shape never matches. The table's own note says it is never matched by pattern.

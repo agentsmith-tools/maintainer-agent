@@ -67,7 +67,7 @@ backend_run() {
     # The repository's CLI notes only establish an argument interface. Refuse
     # before Linux's per-argument limit, rather than claiming stdin works.
     if [ "$(wc -c < "$prompt_file")" -ge 131072 ]; then
-        echo "cursor prompt is too large for a single argument; reduce the context or use another backend" >>"$log"
+        echo "cursor prompt is too large for a single argument (argument list too long); reduce the context or use another backend" >>"$log"
         return 1
     fi
     # The wall, chosen by run.sh: the rehearsal directory adds every GitHub
