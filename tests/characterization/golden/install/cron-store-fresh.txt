@@ -1,0 +1,8 @@
+
+# maintainer-agent (sysknife)
+PATH=@HOME@/.local/bin:@HOME@/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+17 9 * * *  @HOME@/.local/share/maintainer/run.sh sysknife review >>"@HOME@/.local/state/sysknife-maint/logs/cron.out" 2>&1
+17 10 * * *  @HOME@/.local/share/maintainer/run.sh sysknife issues >>"@HOME@/.local/state/sysknife-maint/logs/cron.out" 2>&1
+17 11 * * *  @HOME@/.local/share/maintainer/run.sh sysknife ci >>"@HOME@/.local/state/sysknife-maint/logs/cron.out" 2>&1
+17 12 * * *  @HOME@/.local/share/maintainer/run.sh sysknife audit >>"@HOME@/.local/state/sysknife-maint/logs/cron.out" 2>&1
+# maintainer-agent (sysknife) end
