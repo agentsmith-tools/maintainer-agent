@@ -86,6 +86,20 @@ case_cron_install() {
 }
 ci_case "cron install: with no crontab the store is a blank line then the block, and three lines are printed" case_cron_install
 
+# Changed by #212: entries append to <state>/logs/cron.out instead of /dev/null,
+# and the install creates that directory. A dry run creates nothing.
+case_cron_log_directory() {
+    deployed
+    cron sysknife --dry-run
+    cz_expect_no_file "$CZ_HOME/.local/state/sysknife-maint"
+    cron sysknife
+    cz_expect_rc 0
+    [ -d "$CZ_HOME/.local/state/sysknife-maint/logs" ] || cz_note_fail "the install did not create the state logs directory"
+    cz_check "entries that append to cron.out" "$(grep -c ">>\"$CZ_HOME/.local/state/sysknife-maint/logs/cron.out\" 2>&1\$" "$CZ_CASE/crontab.store")" "4"
+    cz_check "entries that discard output" "$(grep -c '/dev/null' "$CZ_CASE/crontab.store")" "0"
+}
+ci_case "cron install: output goes to <state>/logs/cron.out, the install makes that directory and a dry run does not (changed by #212)" case_cron_log_directory
+
 case_cron_idempotent() {
     deployed
     cron sysknife; cp "$CZ_CASE/crontab.store" "$CZ_CASE/store1"

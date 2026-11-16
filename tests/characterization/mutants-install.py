@@ -84,6 +84,7 @@ MUTANTS = [
     ("cron-no-profile-code", C, '    exit 64\nfi\nmarker', '    exit 1\nfi\nmarker', PLT),
     ("cron-strip", C, '    $0 == m " end" {skip=0}', '    $0 == m "X" {skip=0}', PLT),
     ("cron-path", C, 'cron_path="$HOME/.local/bin:$HOME/.cargo/bin:', 'cron_path="$HOME/.local/bin:', PLT),
+    ("cron-no-logs-dir", C, '    mkdir -p "$STATE_DIR/logs"\n    { printf', '    { printf', PLT),
     ("cron-count", C, 'installed $(gen | grep -c run.sh)', 'installed $(gen | grep -c PATH)', PLT),
     ("launchd-runatload", L, '<key>RunAtLoad</key><false/>', '<key>RunAtLoad</key><true/>', PLT),
     ("launchd-unload-first", L, '    launchctl unload "$f" >/dev/null 2>&1 || true', '    true', PLT),
