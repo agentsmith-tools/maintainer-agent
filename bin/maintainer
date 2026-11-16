@@ -621,7 +621,16 @@ def _claim_in(claim: str, record: str) -> bool:
         return True
     if "..." not in claim:
         return False
-    frags = [f.strip() for f in claim.split("...") if f.strip()]
+    frags = []
+    for part in claim.split("..."):
+        frag = part.strip()
+        # Report prose sometimes writes an abridged shell command with a final
+        # line-continuation slash. It is formatting, not part of the command
+        # recorded by the runner; drop it before checking the final fragment.
+        if frag.endswith("\\"):
+            frag = frag[:-1].rstrip()
+        if frag:
+            frags.append(frag)
     if not frags:
         return False
     pos = 0

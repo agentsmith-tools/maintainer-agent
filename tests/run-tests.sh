@@ -8314,14 +8314,51 @@ aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
 # with `...` must still have each fragment in the record, so a changed tail
 # after the ellipsis is caught too.
 printf '# r\n\n```\n$ gh pr merge 5 --repo owner/name --squash --admin\n$ gh run list --repo owner/name ... --json databaseId,status\n```\n' \
-    > "$au/runs/2026-01-03T00-00-review.md"
+    > "$au/runs/2026-01-09T00-00-review.md"
 printf '$ gh pr merge 5 --repo owner/name --squash --rebase\n$ gh run list --repo owner/name --json databaseId,conclusion\n' \
-    > "$au/logs/2026-01-03T00-00-review.commands"
-out="$(aurun 2026-01-03T00-00-review)"
+    > "$au/logs/2026-01-09T00-00-review.commands"
+out="$(aurun 2026-01-09T00-00-review)"
 grep -q 'gh pr merge 5 --repo owner/name --squash --admin' <<<"$out" \
     && grep -q 'gh run list --repo owner/name ... --json databaseId,status' <<<"$out" \
     && ok "a long claim with a changed tail, and an abridged claim with a changed tail, are both reported as missing" \
     || bad "a claim whose tail differs from the record passes the audit: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# A shell continuation at the end of an abridged command is report formatting,
+# not a required fragment in the transcript.
+printf '# r\n\n```\n$ gh run list --repo owner/name ... --json databaseId,status,... \\\n```\n' \
+    > "$au/runs/2026-01-10T00-00-review.md"
+printf '$ gh run list --repo owner/name --json databaseId,status,conclusion\n' \
+    > "$au/logs/2026-01-10T00-00-review.commands"
+out="$(aurun 2026-01-10T00-00-review)"
+grep -q 'all 1 quoted command(s) appear' <<<"$out" \
+    && ok "an abridged claim ending in a shell continuation matches the complete command" \
+    || bad "the shell continuation is treated as a required command fragment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# Require both fragments and their original order.
+printf '# r\n\n```\n$ gh run list ... --repo owner/name\n```\n' \
+    > "$au/runs/2026-01-11T00-00-review.md"
+printf '$ --repo owner/name gh run list\n' \
+    > "$au/logs/2026-01-11T00-00-review.commands"
+out="$(aurun 2026-01-11T00-00-review)"
+grep -q 'gh run list ... --repo owner/name' <<<"$out" \
+    && ok "abridged command fragments must appear in order" \
+    || bad "a claim with out-of-order fragments passed the audit"
+# An ellipsis-only claim has no evidence and must not pass as an empty sequence.
+printf '# r\n\n```\n$ ...\n```\n' > "$au/runs/2026-01-12T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-12T00-00-review.commands"
+out="$(aurun 2026-01-12T00-00-review)"
+grep -q '1 of 1 quoted command(s) are not in the record' <<<"$out" \
+    && ok "an ellipsis-only claim is rejected" \
+    || bad "an empty fragment list passed the audit"
+# The first fragment is evidence too; matching only a later fragment is not a
+# match for the command the report claims it ran.
+printf '# r\n\n```\n$ gha ... --json databaseId\n```\n' \
+    > "$au/runs/2026-01-13T00-00-review.md"
+printf '$ gh run list --json databaseId\n' \
+    > "$au/logs/2026-01-13T00-00-review.commands"
+out="$(aurun 2026-01-13T00-00-review)"
+grep -q 'gha ... --json databaseId' <<<"$out" \
+    && ok "the first abridged fragment must also appear" \
+    || bad "a claim with a missing first fragment passed the audit"
+
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
