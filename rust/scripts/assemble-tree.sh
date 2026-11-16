@@ -30,6 +30,12 @@
 #
 # The copy holds every tracked file and every untracked file that git does not
 # ignore, so uncommitted work is under test. It never holds .git.
+#
+# Nothing is written outside DEST. A tracked symlink is copied as a symlink and
+# never followed: the script refuses a tree in which a symlink stands where a
+# directory of the copy must be (an entry below a symlink, or a symlink named bin,
+# .rust-bin), and it removes a symlink before it writes a wrapper or a binary in
+# its place, so a link pointing outside DEST cannot redirect the write.
 # Prints `assembled: DEST (programs: a b; HEAD abc1234)` on success.
 set -uo pipefail
 
@@ -112,18 +118,48 @@ trap 'rm -f "$list"' EXIT
 git -C "$root" ls-files -z --cached --others --exclude-standard > "$list"; rc=$?
 [ "$rc" = 0 ] || die "git ls-files exited $rc"
 [ -s "$list" ] || die "git ls-files listed nothing, so there is no tree to copy"
+# No listed path may sit below a symlink of the source tree: extracting it would
+# write through the link. python3 -I reads the NUL-separated list.
+bad="$(python3 -I -c '
+import os, sys
+root = sys.argv[1]
+for rel in sys.stdin.buffer.read().split(b"\0"):
+    if not rel:
+        continue
+    parts = os.fsdecode(rel).split("/")
+    for i in range(1, len(parts)):
+        if os.path.islink(os.path.join(root, *parts[:i])):
+            print("/".join(parts[:i]))
+            break
+' "$root" < "$list" | sort -u | head -n 5)"; rc=$?
+[ "$rc" = 0 ] || die "could not scan the file list for symlinks"
+[ -z "$bad" ] || die "a tracked symlink stands where a directory is expected, so the copy would write through it: $(tr '\n' ' ' <<<"$bad")"
+for top in bin .rust-bin; do
+    if [ -L "$root/$top" ]; then die "$top is a symlink in the source tree; refusing to copy it"; fi
+done
 tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$dest" -xf -
 rcs=("${PIPESTATUS[@]}")
 if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree failed (tar exited ${rcs[*]})"; fi
 [ -f "$dest/bin/maintainer-merge" ] || die "the copy has no bin/maintainer-merge"
 
-# 3. the binaries and their wrappers
+# 3. the binaries and their wrappers. Every directory written into must be a real
+# directory inside DEST, and a file in the way is removed (a symlink is removed,
+# never followed) before the new one is created with noclobber.
 mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
+real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
+for sub in bin .rust-bin; do
+    if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
+    real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
+    case "$real_sub/" in "$real_dest"/*) ;; *) die "$dest/$sub resolves outside $dest" ;; esac
+done
 for name in "${names[@]}"; do
     [ -f "$dest/bin/$name" ] || die "the copy has no bin/$name to replace"
-    cp -- "$target_dir/release/$name" "$dest/.rust-bin/$name" || die "cannot copy the $name binary"
+    rm -f -- "$dest/.rust-bin/$name" "$dest/bin/$name" || die "cannot remove the old $name"
+    ( set -C; cat -- "$target_dir/release/$name" > "$dest/.rust-bin/$name" ) || die "cannot copy the $name binary"
     chmod 755 "$dest/.rust-bin/$name"
-    {
+    (
+        set -C
+        {
         printf '#!/usr/bin/env bash\n'
         printf '# Written by rust/scripts/assemble-tree.sh: the Rust build of %s.\n' "$name"
         printf '# argv[0] is this file, so the program finds lib/ and bin/maintainer beside it.\n'
@@ -134,7 +170,8 @@ for name in "${names[@]}"; do
         printf 'export MAINTAINER_CHILD_ENV="${MAINTAINER_CHILD_ENV:+$MAINTAINER_CHILD_ENV }CZ_CASE_DIR BASH_ENV"\n'
         # shellcheck disable=SC2016  # the wrapper expands these when it runs
         printf 'exec -a "${BASH_SOURCE[0]}" %q "$@"\n' "$dest/.rust-bin/$name"
-    } > "$dest/bin/$name" || die "cannot write the $name wrapper"
+        } > "$dest/bin/$name"
+    ) || die "cannot write the $name wrapper"
     chmod 755 "$dest/bin/$name"
     bash -n "$dest/bin/$name" || die "the $name wrapper does not parse"
 done
