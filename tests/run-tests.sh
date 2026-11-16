@@ -11602,6 +11602,14 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
 
+echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
+# tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
+# revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
+out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'PASS  an unreadable comment thread' <<<"$out" \
+    && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
+    || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'

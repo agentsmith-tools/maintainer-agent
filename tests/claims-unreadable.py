@@ -5,6 +5,7 @@ The issue list answers with #9 held by bob, and the comments of #9 cannot be
 read (gh exits non-zero, which gh_json reports as None).
 
 Run from the repository root:  python tests/claims-unreadable.py
+run-tests.sh calls it with MX_TREE set, so the tree under test is the one judged.
 """
 import contextlib
 import importlib.machinery
@@ -13,7 +14,8 @@ import io
 import os
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = (os.path.abspath(os.environ["MX_TREE"]) if os.environ.get("MX_TREE")
+        else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.update({"MAINTAINER_ACCOUNT": "t", "MAINTAINER_PROFILE": "cv",
                    "MAINTAINER_SLUG": "o/r", "MAINTAINER_REPO": ROOT,
                    "CLAIM_LABEL": "claimed"})
