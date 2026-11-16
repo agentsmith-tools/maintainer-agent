@@ -473,6 +473,7 @@ dr_exp_healthy() {
     dr_exp_ok "rehearsal wall present, 120 rules (POST=off posts nothing)"
     dr_exp_head "Backend"
     dr_exp_ok "backend 'claude' installed"
+    dr_exp_ok "flock on PATH"
     dr_exp_ok "claude on PATH (2.0.0 (Claude Code))"
     dr_exp_head "Commands the prompts tell the agent to run"
     dr_exp_ok "gh resolves"
@@ -507,7 +508,7 @@ dr_exp_healthy() {
     dr_exp_ok "every task has completed since its last failure"
     printf '%s\n' "" "${DR_ESC}[1mDeployed code${DR_ESC}[0m"
     dr_exp_ok "deployed code is that tree's HEAD ($DR_SHORT)"
-    if [ "${1:-}" = quick ]; then dr_exp_sum 30 1 0; else dr_exp_sum 32 0 0; fi
+    if [ "${1:-}" = quick ]; then dr_exp_sum 31 1 0; else dr_exp_sum 33 0 0; fi
 }
 
 # dr_tree PARTS...: a copy of the program files in $CZ_CASE/tree, so a case can

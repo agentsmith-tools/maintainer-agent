@@ -23,7 +23,7 @@ case_healthy_report() {
     cz_expect_stdout "$(dr_exp_healthy)"
     cz_expect_stderr_empty
 }
-dr_case "report: a healthy deployment prints every section, 32 ok, and exits 0" case_healthy_report
+dr_case "report: a healthy deployment prints every section, 33 ok, and exits 0" case_healthy_report
 
 case_healthy_gh_calls() {
     dr_install
@@ -432,6 +432,15 @@ case_claude_missing() {
     dr_has_finding fail "claude not on PATH" "install Claude Code"
 }
 dr_case "backend: claude absent from PATH fails with the install fix" case_claude_missing
+
+case_flock_missing() {
+    dr_install
+    dr_absent flock
+    dr_doctor
+    cz_expect_rc 1
+    dr_has_finding fail "flock is required to serialize runs and is NOT on PATH" "install flock for this platform"
+}
+dr_case "backend: flock absent from PATH fails with the install fix" case_flock_missing
 
 case_claude_version() {
     dr_install

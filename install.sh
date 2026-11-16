@@ -117,6 +117,11 @@ if [ "$uninstall" = 1 ]; then
     exit 0
 fi
 
+if ! command -v flock >/dev/null 2>&1; then
+    echo "install.sh: flock is required to install and protect active runs; install flock and ensure it is on PATH." >&2
+    exit 1
+fi
+
 # Stamp the deployed tree with what it came from. Three versions are in play and
 # they disagree in normal use: the checkout, the deployed tree, and the profile.
 # The deployed tree is the one that actually runs, so it carries the stamp, and

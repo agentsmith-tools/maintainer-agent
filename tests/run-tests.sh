@@ -1059,6 +1059,20 @@ if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
 else
     bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
 fi
+# flock is required to distinguish an active run from a broken lock tool. Keep
+# only dirname on PATH so the installer reaches the prerequisite check without
+# finding the host's flock or modifying the scratch HOME.
+ins3_home="$ins_dir/home3"; ins3_path="$ins_dir/no-flock-bin"
+mkdir -p "$ins3_home" "$ins3_path"
+ln -s "$(command -v dirname)" "$ins3_path/dirname"
+ins_bash="$(command -v bash)"
+ins3_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins3_home" PATH="$ins3_path" "$ins_bash" "$ins_src/install.sh" 2>&1)"; ins3_rc=$?
+if [ "$ins3_rc" = 1 ] && grep -q 'flock is required to install and protect active runs' <<<"$ins3_out" \
+   && [ ! -e "$ins3_home/.local/share/maintainer" ]; then
+    ok "install.sh explains that flock is required and refuses before writing"
+else
+    bad "install.sh without flock did not refuse before writing (rc=$ins3_rc): $(tail -n 2 <<<"$ins3_out" | tr '\n' ' ')"
+fi
 rm -rf "$ins_dir"
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
