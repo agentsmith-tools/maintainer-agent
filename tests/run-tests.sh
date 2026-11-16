@@ -3243,6 +3243,11 @@ left=$(find "$fresh" -type f 2>/dev/null | wc -l)
 check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
+if bash "$suite_root/tests/install-uninstall-artifacts.sh" "$root"; then
+    ok "uninstall removes installed artifacts without a systemd user session"
+else
+    bad "uninstall leaves installed artifacts when systemctl is unavailable"
+fi
 uh="$stub_dir/unin"; mkdir -p "$uh"
 HOME="$uh" "$root/install.sh" >/dev/null 2>&1
 mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
