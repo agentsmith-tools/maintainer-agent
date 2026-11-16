@@ -28,6 +28,10 @@
 //! | runs `exit N`                     | the tool exits with N               | `LoadError::ShellExited` with N |
 //! | assigns an unrelated variable     | the variable exists in the tool     | it is in the read-back |
 //!
+//! The child runs the files under `set -u`, as `maintainer-merge` and
+//! `maintainer-repo` do, so a file that reads an unset variable ends the shell
+//! with status 1 and the shell's own message, as it ends those tools.
+//!
 //! The child keeps no positional parameters, as a sourced file inside a bash
 //! function sees none.
 
@@ -49,6 +53,7 @@ shift
 __mx_files=("$@")
 set --
 set -a
+set -u
 __mx_status=0
 for __mx_f in "${__mx_files[@]}"; do
     . "$__mx_f"
@@ -196,9 +201,11 @@ mod tests {
 
     #[test]
     fn a_dump_reads_back_names_values_and_the_status() {
-        let dump = parse_dump(b"__mx_status\x000\0A\0one\0B\0\0PWD\0/x\0_\0y\0").unwrap();
+        let dump =
+            parse_dump(b"__mx_status\x000\0A\0one\0B\0\0PWD\0/x\0_\0y\0SHLVL\x001\0OLDPWD\0/o\0")
+                .unwrap();
         assert_eq!(dump.last_status, 0);
-        assert_eq!(dump.vars.len(), 2, "PWD and _ are bash's own: {:?}", dump.vars);
+        assert_eq!(dump.vars.len(), 2, "PWD, OLDPWD, SHLVL and _ are bash's own: {:?}", dump.vars);
         assert_eq!(dump.vars["A"], b"one");
         assert_eq!(dump.vars["B"], b"");
     }

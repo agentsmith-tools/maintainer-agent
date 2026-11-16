@@ -25,7 +25,7 @@
 //! a closed pipe is an error and exits 1.
 
 use mx_ports::{RealProc, Secret};
-use mx_profile::classify::{ClassifyEnv, classify_failure};
+use mx_profile::classify::{ClassifyEnv, classify_failure, effective_locale};
 use mx_profile::scrub::scrub_secret;
 use mx_profile::{LoadEnv, LoadError, load_profile};
 use std::ffi::OsString;
@@ -76,11 +76,21 @@ fn take_flag(args: &mut Vec<OsString>, flag: &str) -> Result<Option<PathBuf>, St
     Ok(Some(PathBuf::from(value)))
 }
 
+/// A variable as text, when set and UTF-8.
+fn var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 fn classify_env(lib_dir: PathBuf) -> ClassifyEnv {
     ClassifyEnv {
         failure_shapes: std::env::var_os("MAINTAINER_FAILURE_SHAPES"),
         lib_dir,
         home: std::env::var_os("HOME").unwrap_or_default(),
+        locale: effective_locale(
+            var("LC_ALL").as_deref(),
+            var("LC_CTYPE").as_deref(),
+            var("LANG").as_deref(),
+        ),
     }
 }
 

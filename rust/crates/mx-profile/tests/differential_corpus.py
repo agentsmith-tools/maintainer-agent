@@ -256,6 +256,23 @@ add_log("table: override naming a missing file", b"Killed\n", "missing")
 add_log("table: empty override is unset", b"Killed\n", "empty-env")
 add_arg("table: none anywhere and a missing log", (os.path.join(CLS, "nope.log")).encode(), "none", "p")
 
+# multibyte text, which a UTF-8 locale counts in characters and C in bytes
+E = "\u00e9"
+add_log("utf8: multibyte after the pattern, 60 whole characters", ("usage limit reached " + E * 70 + "\n").encode())
+add_log("utf8: multibyte text before the match", ("caf\u00e9 " + E * 5 + " usage limit reached ok\n").encode())
+add_log("utf8: multibyte text inside the match window", ("usage limit reached " + "ab" + E + "cd" + E * 3 + "\n").encode())
+add_log("utf8: invalid bytes inside the window", b"usage limit reached ab\xff\xfecd and more\n")
+add_log("utf8: invalid bytes before the match", b"\xff\xfe junk\nusage limit reached fine\n")
+add_log("utf8: a lone continuation byte after the pattern", b"usage limit reached \x80 tail\n")
+add_log("utf8: four-byte characters near the cut", ("usage limit reached " + "\U0001F600" * 70 + "\n").encode())
+table_case("utf8 fold of a non-ASCII upper case letter", "fold.json",
+           json.dumps({"shapes": [{"id": "a", "class": "t", "pattern": "caf\u00e9"}]}), "un CAF\u00c9 noir\n".encode())
+table_case("utf8 character class and bound", "charclass.json",
+           json.dumps({"shapes": [{"id": "a", "class": "t", "pattern": "[[:alpha:]]{3,5}\u00e9"}]}), "xx \u00e9\u00e9\u00e9\u00e9z\u00e9 yy\n".encode())
+add_log("utf8: error word fallback with multibyte text", ("\u00e9\u00e9 an error \u00e9\u00e9\nlast\n").encode())
+FIXED = len(cases)
+write(os.path.join(CLS, "fixed_count"), str(FIXED))
+
 # ---- generated logs --------------------------------------------------------
 
 NOISE = ["starting run", "backend=claude model=opus", "- PR #12 fix the thing", "=== result ===", "ok", "done",
@@ -623,6 +640,16 @@ load_case("profile that sets PATH to nothing", {"fx": 'PATH=/nonexistent\n' + PR
 load_case("profile that sets MAINTAINER_ overrides itself", {"fx": PROFILE_FX + "MAINTAINER_LOCK_WAIT=55\n"})
 load_case("profile that clears an env override", {"fx": PROFILE_FX + "unset MAINTAINER_LOCK_WAIT\n"}, [("MAINTAINER_LOCK_WAIT", "7")])
 load_case("MAINTAINER_PROFILE empty means unnamed", {"fx": PROFILE_FX}, [("MAINTAINER_PROFILE", "")])
+
+for _src in ("REPO_SLUG", "REPO_PATH", "STATE_DIR", "GH_ACCOUNT", "POST"):
+    load_case("profile without %s, under set -u" % _src, {"fx": "".join(l + "\n" for l in PROFILE_FX.split("\n") if l and not l.startswith(_src + "="))})
+load_case("profile with every source set and empty", {"fx": "REPO_SLUG=\nREPO_PATH=\nSTATE_DIR=\nGH_ACCOUNT=\nPOST=\n"})
+load_case("profile without a source, the name preset", {"fx": "REPO_SLUG=x\n"}, [("MAINTAINER_REPO", "/r"), ("MAINTAINER_STATE", "/s"), ("MAINTAINER_ACCOUNT", "a"), ("MAINTAINER_POST", "on")])
+load_case("profile that reads an unset variable", {"fx": 'X="$NOT_SET_ANYWHERE"\n' + PROFILE_FX})
+load_case("HOME is unset", {"fx": PROFILE_FX}, flags="nohome")
+load_case("profile directory name ends in a newline", {"a\n": PROFILE_FX})
+load_case("two profile directories, one name ends in a newline", {"a\n": PROFILE_FX, "b": PROFILE_FX})
+load_case("defaults.env that sets HOME", None, lib="homesetting", home_files={"alt/.local/share/maintainer/profiles/moved/profile.env": PROFILE_FX})
 
 # ---- the profiles this repository ships ----------------------------------------
 

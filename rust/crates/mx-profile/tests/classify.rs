@@ -6,6 +6,7 @@
 mod common;
 
 use common::{Scratch, real_proc, repo_lib};
+use mx_ports::Proc;
 use mx_profile::classify::{ClassifyEnv, classify_failure, failure_shapes_path};
 use std::ffi::OsString;
 use std::path::Path;
@@ -15,6 +16,7 @@ fn env_with_table(table: Option<&Path>) -> ClassifyEnv {
         failure_shapes: table.map(|path| path.as_os_str().to_owned()),
         lib_dir: repo_lib(),
         home: OsString::from("/nonexistent/home"),
+        locale: None,
     }
 }
 
@@ -25,6 +27,15 @@ fn classify_text(log_text: &[u8]) -> (String, i32) {
     let log = scratch.write("x.log", log_text);
     let got = classify_failure(&real_proc(), &env_with_table(None), &log);
     (String::from_utf8_lossy(&got.render()).into_owned(), got.exit_code())
+}
+
+/// Classifies under a UTF-8 locale, as production runs.
+fn classify_utf8(table: Option<&str>, log_text: &[u8]) -> Vec<u8> {
+    let scratch = Scratch::new("utf8");
+    let log = scratch.write("x.log", log_text);
+    let table = table.map(|text| scratch.write("t.json", text));
+    let env = ClassifyEnv { locale: Some("C.UTF-8".into()), ..env_with_table(table.as_deref()) };
+    classify_failure(&real_proc(), &env, &log).render()
 }
 
 fn with_table(table: &str, log_text: &[u8]) -> (String, i32) {
@@ -329,6 +340,7 @@ fn no_table_anywhere_is_unreadable_and_never_nothing_matched() {
         failure_shapes: None,
         lib_dir: scratch.path().join("lib"),
         home: scratch.path().join("home").into_os_string(),
+        locale: None,
     };
     let got = classify_failure(&real_proc(), &env, &log);
     assert_eq!(
@@ -398,6 +410,7 @@ fn the_table_is_found_by_override_then_beside_the_library_then_installed() {
         failure_shapes: Some(over.as_os_str().to_owned()),
         lib_dir: lib,
         home: home.into_os_string(),
+        locale: None,
     };
     assert_eq!(failure_shapes_path(&env), Some(over.clone()));
     env.failure_shapes = Some(OsString::new());
@@ -433,4 +446,71 @@ fn the_two_predicates_answer_from_the_same_classification() {
     assert_eq!((plain.transient_reason(), plain.needs_human_reason()), (None, None));
     let missing = classify_failure(&real_proc(), &env, &scratch.path().join("none.log"));
     assert_eq!((missing.transient_reason(), missing.needs_human_reason()), (None, None));
+}
+
+// Decision P1F-5. Under a UTF-8 locale `.{0,60}` counts characters, so the cut
+// lands on a character boundary and the evidence is valid UTF-8. Under C it
+// counts bytes and can end inside a character.
+#[test]
+fn under_a_utf8_locale_the_60_character_cut_ends_on_a_whole_character() {
+    let log = format!("usage limit reached {}\n", "\u{e9}".repeat(70));
+    let utf8 = classify_utf8(None, log.as_bytes());
+    let want =
+        format!("transient\tusage-limit-reached\tusage limit reached {}", "\u{e9}".repeat(59));
+    assert_eq!(String::from_utf8(utf8).expect("valid UTF-8"), want);
+    let (c_text, _) = classify_text(log.as_bytes());
+    assert!(c_text.ends_with('\u{fffd}'), "C cuts inside a character: {c_text}");
+}
+
+#[test]
+fn under_a_utf8_locale_multibyte_text_before_and_inside_the_match_is_kept() {
+    let table =
+        r#"{"shapes": [{"id": "x", "class": "transient", "pattern": "caf\u00e9 .{0,3}ok"}]}"#;
+    let log = "\u{e9}\u{e9} avant caf\u{e9} \u{e9}\u{e9}ok apr\u{e8}s\n";
+    let got = classify_utf8(Some(table), log.as_bytes());
+    assert_eq!(String::from_utf8(got).unwrap(), "transient\tx\tcaf\u{e9} \u{e9}\u{e9}ok");
+}
+
+#[test]
+fn under_a_utf8_locale_case_folding_covers_non_ascii_letters() {
+    let table = r#"{"shapes": [{"id": "x", "class": "transient", "pattern": "caf\u00e9"}]}"#;
+    let got = classify_utf8(Some(table), "un CAF\u{c9} noir\n".as_bytes());
+    assert_eq!(String::from_utf8(got).unwrap(), "transient\tx\tCAF\u{c9}");
+    let (c_text, code) = with_table(table, "un CAF\u{c9} noir\n".as_bytes());
+    assert_eq!(code, 1, "under C the fold is ASCII only: {c_text}");
+}
+
+// Invalid bytes in the window stop a `.{0,n}` match under a UTF-8 locale.
+#[test]
+fn under_a_utf8_locale_an_invalid_byte_ends_the_match_window() {
+    let mut log = b"usage limit reached ab".to_vec();
+    log.extend_from_slice(&[0xff, 0xfe]);
+    log.extend_from_slice(b"cd\n");
+    let got = classify_utf8(None, &log);
+    assert_eq!(got, b"transient\tusage-limit-reached\tusage limit reached ab");
+    let (c_text, _) = classify_text(&log);
+    assert!(c_text.len() > got.len(), "C carries the bytes through: {c_text:?}");
+}
+
+// Decision P1F-6, corrected: opening a log that is a named pipe blocks without
+// bound, as the bash does. The case is preserved and bounded here by a wait.
+#[test]
+fn a_named_pipe_as_the_log_blocks_the_open_as_the_bash_does() {
+    let scratch = Scratch::new("fifolog");
+    let fifo = scratch.path().join("pipe.log");
+    let made = real_proc()
+        .run(&mx_ports::ProcSpec::command(
+            "mkfifo",
+            [fifo.to_str().unwrap()],
+            std::time::Duration::from_secs(10),
+        ))
+        .expect("mkfifo can run");
+    assert!(made.exit.success());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let log = fifo.clone();
+    std::thread::spawn(move || {
+        drop(sender.send(classify_failure(&real_proc(), &env_with_table(None), &log)));
+    });
+    let outcome = receiver.recv_timeout(std::time::Duration::from_secs(2));
+    assert!(outcome.is_err(), "the classifier returned for a pipe with no writer: {outcome:?}");
 }

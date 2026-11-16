@@ -30,8 +30,11 @@
 //!   share directory. Decision P1F-8 (the same class as D18).
 //! - An override applies only to a key that `defaults.env` declares at the start
 //!   of a line, and only when the variable is non-empty.
-//! - The caller's `set -e` and `set -u` are not modelled. The profile is sourced
-//!   under the child's default options. Decision P1F-9.
+//! - The callers run under `set -u`, and so does the child. An unset `HOME`, or an
+//!   unset source of one of the five exported names, is `LoadError::Unbound`,
+//!   as the bash stops with `NAME: unbound variable` (an unset `HOME` reads as
+//!   defaults not found, with the unbound message first). `set -e` is not modelled.
+//!   Decision P1F-9.
 //! - The profile sees only the variables the caller's allowlist passes (decision
 //!   P1F-7), and the sourcing is bounded by a timeout where the bash is not
 //!   (decision P1F-6).
@@ -52,6 +55,9 @@ use thiserror::Error;
 
 /// How long a child bash may run. The bash function has no limit.
 pub const DEFAULT_EVAL_TIMEOUT: Duration = Duration::from_mins(1);
+
+const DEFAULTS_MISSING: &[u8] =
+    b"maintainer: lib/defaults.env not found, so no tunable has a value. Run ./install.sh.\n";
 
 /// The names `maintainer_load_profile` derives and exports, with the profile
 /// key each one defaults from.
@@ -166,6 +172,16 @@ pub enum LoadError {
     /// The named profile has no `profile.env` in the share directory.
     #[error("no deployed profile named {}", String::from_utf8_lossy(name))]
     ProfileMissing { name: Vec<u8>, share: PathBuf },
+    /// `HOME` is unset. The defaults search expands it inside `$(...)`, so under
+    /// `set -u` the bash prints `HOME: unbound variable`, then reports the
+    /// defaults as not found, and returns 1.
+    #[error("HOME: unbound variable, so lib/defaults.env was not looked for")]
+    HomeUnbound,
+    /// A source of one of the five exported names is unset. The tools that call
+    /// the function run under `set -u`, so the bash stops with
+    /// `NAME: unbound variable` and exits 127. Set and empty is fine.
+    #[error("{name}: unbound variable")]
+    Unbound { name: String },
     /// A sourced file ended the shell with `exit`. The bash tool would have
     /// exited with this status.
     #[error("a sourced file ended the shell with status {code}")]
@@ -188,9 +204,9 @@ impl LoadError {
     #[must_use]
     pub fn message(&self) -> Vec<u8> {
         match self {
-            Self::DefaultsMissing => {
-                b"maintainer: lib/defaults.env not found, so no tunable has a value. Run ./install.sh.\n"
-                    .to_vec()
+            Self::DefaultsMissing => DEFAULTS_MISSING.to_vec(),
+            Self::HomeUnbound => {
+                [b"maintainer: HOME: unbound variable\n".as_slice(), DEFAULTS_MISSING].concat()
             }
             Self::NoProfileDeployed => [
                 b"maintainer: no profile is deployed. Run ./install.sh, or set\n".as_slice(),
@@ -214,6 +230,10 @@ impl LoadError {
                 b")\n",
             ]
             .concat(),
+            // The bash adds `profile.sh: line N:` in front, which a port cannot know.
+            Self::Unbound { name } => {
+                format!("maintainer: {name}: unbound variable\n").into_bytes()
+            }
             Self::DefaultsFailed { .. }
             | Self::ShellExited { .. }
             | Self::EvalTimedOut
@@ -223,14 +243,18 @@ impl LoadError {
     }
 
     /// The status a tool built on the bash function ends with: 1 for the
-    /// function's own refusals, and the `exit` status of a file that ended the
+    /// function's own refusals, 127 for an unbound variable as for any
+    /// non-interactive bash, and the `exit` status of a file that ended the
     /// shell. A timeout is 124, as `timeout` reports it.
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::ShellExited { code } => *code,
             Self::EvalTimedOut => 124,
+            // A non-interactive bash ends with 127 on an unbound variable.
+            Self::Unbound { .. } => 127,
             Self::DefaultsMissing
+            | Self::HomeUnbound
             | Self::DefaultsFailed { .. }
             | Self::NoProfileDeployed
             | Self::ManyProfiles { .. }
@@ -287,6 +311,11 @@ impl Streams {
 }
 
 fn resolve(proc: &dyn Proc, env: &LoadEnv, shown: &mut Streams) -> Result<Profile, LoadError> {
+    // Both tools run under `set -u`, and `"$HOME/..."` in the defaults search
+    // is the first expansion of the function.
+    if env.home.is_none() {
+        return Err(LoadError::HomeUnbound);
+    }
     // maintainer_load_defaults. This first run only decides which branch to take:
     // the branch reads variables the defaults may set, and the profile has to see
     // the defaults, so the files are sourced again together below. What this run
@@ -352,10 +381,14 @@ fn resolve(proc: &dyn Proc, env: &LoadEnv, shown: &mut Streams) -> Result<Profil
     apply_overrides(&mut vars, &defaults);
     let mut exported = Vec::new();
     for (name, from) in EXPORTED_FROM {
-        let value = non_empty(&vars, name)
-            .or_else(|| vars.get(from).map(Vec::as_slice))
-            .unwrap_or_default()
-            .to_vec();
+        // `${NAME:-$FROM}` under `set -u`: an unset FROM is fatal, an empty one is not.
+        let value = match non_empty(&vars, name) {
+            Some(value) => value.to_vec(),
+            None => vars
+                .get(from)
+                .cloned()
+                .ok_or_else(|| LoadError::Unbound { name: from.to_string() })?,
+        };
         vars.insert(name.to_string(), value);
         exported.push(name.to_string());
     }
@@ -407,6 +440,13 @@ fn deployed_profiles(share: &Path) -> Vec<Vec<u8>> {
         })
         .collect();
     names.sort_by_key(|name| [name.as_slice(), b"/profile.env"].concat());
+    // `$(basename "$(dirname "$d")")` drops trailing newlines, so a directory
+    // called `a<LF>` is listed as `a` and then refused as not deployed.
+    for name in &mut names {
+        while name.last() == Some(&b'\n') {
+            name.pop();
+        }
+    }
     names
 }
 

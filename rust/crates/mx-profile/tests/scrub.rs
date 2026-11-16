@@ -397,3 +397,107 @@ fn the_printed_path_is_the_root_as_given_joined_to_the_name() {
     let report = scrub_secret(&secret(), &[PathBuf::from(&root)]).unwrap();
     assert_eq!(report.entries, vec![ScrubEntry::Scrubbed(PathBuf::from(format!("{root}f.txt")))]);
 }
+
+// The mask is the text the bash writes. The other tests compare with the MASK
+// constant, so this one holds the bytes.
+#[test]
+fn the_mask_is_the_literal_text_the_bash_writes() {
+    let scratch = Scratch::new("mask");
+    let file = leak(&scratch, "f.txt");
+    scrub(&[&file]);
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"before REDACTED_BY_MAINTAINER_ROTATE_THIS_SECRET after\n"
+    );
+    assert_eq!(MASK, "REDACTED_BY_MAINTAINER_ROTATE_THIS_SECRET");
+}
+
+// The bash looks for the NUL in the whole file, not in a prefix of it.
+#[test]
+fn a_nul_byte_far_from_the_start_still_makes_the_file_binary() {
+    let scratch = Scratch::new("nul-far");
+    let mut data = format!("{TOKEN} ").into_bytes();
+    data.extend(std::iter::repeat_n(b'x', 5000));
+    data.push(0);
+    data.extend_from_slice(b"tail");
+    let file = scratch.write("far.bin", &data);
+    assert_eq!(scrub(&[&file]), vec![ScrubEntry::Binary(file.clone())]);
+    assert_eq!(std::fs::read(&file).unwrap(), data);
+}
+
+/// The names of the subdirectories of `root`, in the order the directory lists them.
+fn listed_dirs(root: &Path) -> Vec<String> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+// os.walk visits sibling subdirectories in the order the directory lists them.
+#[test]
+fn sibling_directories_are_walked_in_the_order_the_directory_lists_them() {
+    let scratch = Scratch::new("siblings");
+    for name in ["d1", "d2", "d3", "d4"] {
+        leak(&scratch, &format!("{name}/f.txt"));
+    }
+    let want: Vec<PathBuf> =
+        listed_dirs(scratch.path()).iter().map(|d| scratch.path().join(d).join("f.txt")).collect();
+    let got: Vec<PathBuf> = scrub(&[scratch.path()])
+        .into_iter()
+        .map(|entry| match entry {
+            ScrubEntry::Scrubbed(path) => path,
+            ScrubEntry::Binary(path) => panic!("binary {}", path.display()),
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
+// A directory that cannot be listed is skipped, and the walk goes on with its
+// siblings. The test checks that some unlistable directory precedes a good one in
+// the listing, so the guard is the thing that is tested.
+#[test]
+fn an_unlistable_directory_is_skipped_and_its_siblings_are_still_walked() {
+    let scratch = Scratch::new("sealed");
+    for index in 0..8 {
+        leak(&scratch, &format!("good{index}/f.txt"));
+        leak(&scratch, &format!("sealed{index}/f.txt"));
+        std::fs::set_permissions(
+            scratch.path().join(format!("sealed{index}")),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+    }
+    assert!(
+        std::fs::read_dir(scratch.path().join("sealed0")).is_err(),
+        "run as a user the mode bits bind"
+    );
+    let order = listed_dirs(scratch.path());
+    let first_sealed = order.iter().position(|d| d.starts_with("sealed")).unwrap();
+    assert!(
+        order[first_sealed..].iter().any(|d| d.starts_with("good")),
+        "no good directory follows a sealed one in {order:?}, so the case proves nothing"
+    );
+    let entries = scrub(&[scratch.path()]);
+    assert_eq!(entries.len(), 8, "{entries:?}");
+    for index in 0..8 {
+        std::fs::set_permissions(
+            scratch.path().join(format!("sealed{index}")),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+}
+
+// Decision P1F-13, preserved: a symlink to a file is followed, and the file it
+// names is rewritten wherever it lives, as it is today. Same class as P1F-8.
+#[test]
+fn a_symlink_in_the_tree_rewrites_a_file_outside_the_tree() {
+    let scratch = Scratch::new("outside-link");
+    let outside = leak(&scratch, "outside/secret-holder.txt");
+    std::fs::create_dir_all(scratch.path().join("tree")).unwrap();
+    symlink(&outside, scratch.path().join("tree/link")).unwrap();
+    scrub(&[&scratch.path().join("tree")]);
+    assert_eq!(std::fs::read(&outside).unwrap(), masked());
+}

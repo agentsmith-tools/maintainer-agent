@@ -13,10 +13,15 @@
 //! classifiers on one engine only after both outputs are pinned equal on the
 //! shipped table, and this crate is the pin.
 //!
-//! The Proc port runs every child under `LC_ALL=C`. The bash runs grep under the
-//! caller's locale, so `.{0,60}` counts bytes here and characters there when a
-//! UTF-8 log holds multibyte text, and `-i` folds only ASCII. Every shipped
-//! pattern is ASCII. This is decision P1F-5 in the pull request.
+//! # Locale
+//!
+//! The bash runs grep under the caller's locale, and production runs under
+//! `LANG=en_US.UTF-8`, so `.{0,60}` counts characters, `-i` folds non-ASCII
+//! letters, and a match stops at an invalid byte. The classifier takes the
+//! locale from the caller ([`effective_locale`]) and passes it to each child
+//! through [`mx_ports::ProcSpec::locale`], which the adapter checks against a
+//! plain-name pattern and which leaves the environment allowlist alone. Decision
+//! P1F-5. The differential runs under `C` and under a UTF-8 locale.
 //!
 //! # What the bash pipeline does that this port keeps
 //!
@@ -37,6 +42,10 @@
 //! [`GREP_TIMEOUT`], is `Unreadable` (return code 2, "could not ask"). The bash
 //! reads a missing grep as "nothing matched" and a hung one never returns.
 //! Decision P1F-6.
+//!
+//! The limit is not total. A log that is a named pipe blocks the readability
+//! check (`File::open`) with no bound, and the bash blocks in `grep` on it too.
+//! That case is preserved, documented and tested with a bounded wait.
 
 use crate::table::{TableFault, parse_shapes, read_rows};
 use mx_ports::{Proc, ProcExit, ProcSpec};
@@ -58,6 +67,26 @@ pub struct ClassifyEnv {
     pub lib_dir: PathBuf,
     /// `$HOME`, empty when unset.
     pub home: OsString,
+    /// The locale `grep` runs under: what [`effective_locale`] makes of the
+    /// caller's `LC_ALL`, `LC_CTYPE` and `LANG`. `None` is `C`.
+    pub locale: Option<String>,
+}
+
+/// The locale `grep` would use: the first non-empty of `LC_ALL`, `LC_CTYPE` and
+/// `LANG`, else `None` (the `C` locale). The classifier hands it to the child as
+/// `LC_ALL`, which gives `LC_CTYPE`, the only category `grep` matching reads, the
+/// same value. The `Proc` adapter drops a name that is not a plain locale name.
+#[must_use]
+pub fn effective_locale(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> Option<String> {
+    [lc_all, lc_ctype, lang]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// The three outcomes and the fourth, "could not ask".
@@ -175,8 +204,16 @@ fn last_line(output: &[u8]) -> Vec<u8> {
 
 /// Runs `program args...` and returns what it wrote to standard output,
 /// whatever its exit status, as the bash does. `Err` is why it could not finish.
-fn run_for_stdout(proc: &dyn Proc, program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let spec = ProcSpec::command(program, args.iter().copied(), GREP_TIMEOUT);
+fn run_for_stdout(
+    proc: &dyn Proc,
+    locale: Option<&str>,
+    program: &str,
+    args: &[&str],
+) -> Result<Vec<u8>, String> {
+    let mut spec = ProcSpec::command(program, args.iter().copied(), GREP_TIMEOUT);
+    if let Some(name) = locale {
+        spec = spec.locale(name);
+    }
     match proc.run(&spec) {
         Ok(output) if output.exit == ProcExit::TimedOut => {
             Err(format!("{program} did not finish within {} s", GREP_TIMEOUT.as_secs()))
@@ -231,15 +268,20 @@ pub fn classify_failure(proc: &dyn Proc, env: &ClassifyEnv, log: &Path) -> Class
         return unreadable("the log path is not UTF-8 text, so grep cannot be given it");
     };
 
+    let locale = env.locale.as_deref();
     for row in read_rows(&shapes) {
         if row.id.is_empty() {
             continue;
         }
-        let output =
-            match run_for_stdout(proc, "grep", &["-aoiE", "--", row.pattern.as_str(), log_arg]) {
-                Ok(output) => output,
-                Err(reason) => return unreadable(&reason),
-            };
+        let output = match run_for_stdout(
+            proc,
+            locale,
+            "grep",
+            &["-aoiE", "--", row.pattern.as_str(), log_arg],
+        ) {
+            Ok(output) => output,
+            Err(reason) => return unreadable(&reason),
+        };
         let hit = last_line(&output);
         if hit.is_empty() {
             continue;
@@ -248,13 +290,13 @@ pub fn classify_failure(proc: &dyn Proc, env: &ClassifyEnv, log: &Path) -> Class
     }
 
     // Nothing matched. The most error-shaped line, else the last line of the log.
-    let output = match run_for_stdout(proc, "grep", &["-aiE", ERROR_WORDS, log_arg]) {
+    let output = match run_for_stdout(proc, locale, "grep", &["-aiE", ERROR_WORDS, log_arg]) {
         Ok(output) => output,
         Err(reason) => return unreadable(&reason),
     };
     let mut evidence = last_line(&output);
     if evidence.is_empty() {
-        evidence = match run_for_stdout(proc, "tail", &["-1", log_arg]) {
+        evidence = match run_for_stdout(proc, locale, "tail", &["-1", log_arg]) {
             Ok(output) => last_line(&output),
             Err(reason) => return unreadable(&reason),
         };
@@ -279,6 +321,7 @@ mod tests {
             failure_shapes: Some(table.as_os_str().to_owned()),
             lib_dir: PathBuf::from("/nonexistent/lib"),
             home: OsString::from("/nonexistent/home"),
+            locale: None,
         }
     }
 
@@ -600,6 +643,7 @@ mod tests {
             failure_shapes: None,
             lib_dir: PathBuf::from("/opt/maint/lib"),
             home: OsString::from("/home/u/"),
+            locale: None,
         };
         assert_eq!(
             search_candidates(&env),
@@ -613,6 +657,49 @@ mod tests {
             search_candidates(&no_home)[1],
             PathBuf::from("/.local/share/maintainer/failure-shapes.json")
         );
+    }
+
+    // Decision P1F-5: the locale of the call is the caller's, and only that.
+    #[test]
+    fn every_call_carries_the_callers_locale() {
+        let scratch = Scratch::new("locale");
+        let table = scratch.file("t.json", TABLE_TWO);
+        let log_path = scratch.file("run.log", "x\n");
+        let effects = EffectLog::new();
+        let fake = FakeProc::new(&effects);
+        script_one(&fake, &grep_shape("boom", &log_path), out(1, ""));
+        script_one(&fake, &grep_shape("bang", &log_path), out(1, ""));
+        let p = log_path.to_str().unwrap();
+        script_one(
+            &fake,
+            &["grep", "-aiE", "error|fail|panic|refus|denied|cannot|could not", p],
+            out(1, ""),
+        );
+        script_one(&fake, &["tail", "-1", p], out(0, "x\n"));
+        let env = ClassifyEnv { locale: Some("en_US.UTF-8".into()), ..env_with(&table) };
+        let _ = classify_failure(&fake, &env, &log_path);
+        let specs: Vec<_> = effects
+            .entries()
+            .into_iter()
+            .map(|effect| match effect {
+                Effect::Proc(ProcEffect::Run(spec)) => spec,
+                other => panic!("not a call: {other:?}"),
+            })
+            .collect();
+        assert_eq!(specs.len(), 4);
+        for spec in &specs {
+            assert_eq!(spec.locale.as_deref(), Some("en_US.UTF-8"));
+            assert!(spec.env.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_effective_locale_is_the_first_non_empty_of_lc_all_lc_ctype_and_lang() {
+        assert_eq!(effective_locale(Some("A"), Some("B"), Some("C")).as_deref(), Some("A"));
+        assert_eq!(effective_locale(Some(""), Some("B"), Some("C")).as_deref(), Some("B"));
+        assert_eq!(effective_locale(None, Some(""), Some("C")).as_deref(), Some("C"));
+        assert_eq!(effective_locale(None, None, Some("")), None);
+        assert_eq!(effective_locale(None, None, None), None);
     }
 
     #[test]

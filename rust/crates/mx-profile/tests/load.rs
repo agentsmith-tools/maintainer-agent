@@ -201,7 +201,7 @@ fn the_five_names_take_a_value_already_set_over_their_profile_default() {
 #[test]
 fn a_profile_that_declares_nothing_leaves_the_five_empty_and_still_exports_them() {
     let tree = Tree::new("five-empty");
-    tree.profile("fx", "# nothing\n");
+    tree.profile("fx", "REPO_SLUG=\nREPO_PATH=\nSTATE_DIR=\nGH_ACCOUNT=\nPOST=\n");
     let profile = load_ok(&tree, &[]);
     for (name, _) in EXPORTED_FROM {
         assert_eq!(profile.get(name), Some(b"".as_slice()), "{name}");
@@ -332,7 +332,10 @@ fn a_named_profile_that_is_not_deployed_is_refused_and_the_message_names_the_sha
 #[test]
 fn a_profile_name_with_dot_dot_is_joined_into_the_path_unchecked() {
     let tree = Tree::new("traversal");
-    tree.scratch.write("elsewhere/profile.env", "REPO_SLUG=\"out/side\"\n");
+    tree.scratch.write(
+        "elsewhere/profile.env",
+        "REPO_SLUG=\"out/side\"\nREPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\n",
+    );
     let share = tree.share();
     std::fs::create_dir_all(&share).unwrap();
     let up = "../../../../../elsewhere";
@@ -489,10 +492,14 @@ fn a_profile_that_is_killed_by_a_signal_reports_128_plus_the_signal() {
 #[test]
 fn a_profile_that_returns_stops_sourcing_there_and_the_load_goes_on() {
     let tree = Tree::new("returns");
-    tree.profile("fx", "REPO_SLUG=\"before/return\"\nreturn 5\nREPO_PATH=\"/after\"\n");
+    tree.profile("fx", "REPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\nREPO_SLUG=\"before/return\"\nreturn 5\nREPO_PATH=\"/after\"\n");
     let profile = load_ok(&tree, &[]);
     assert_eq!(s(&profile, "MAINTAINER_SLUG"), "before/return");
-    assert_eq!(profile.get("REPO_PATH"), None);
+    assert_eq!(
+        profile.get("REPO_PATH"),
+        Some(b"/p".as_slice()),
+        "the line after return did not run"
+    );
 }
 
 #[test]
@@ -513,7 +520,7 @@ fn a_profile_that_sets_an_unrelated_variable_leaves_it_in_the_result() {
 #[test]
 fn values_come_back_byte_exact_with_newlines_tabs_and_high_bytes() {
     let tree = Tree::new("bytes");
-    tree.profile("fx", "V1=$'a\\nb\\tc'\nV2=$'\\xc3\\xa9\\xff'\nV3=''\nV4=\"  padded  \"\n");
+    tree.profile("fx", "REPO_SLUG=x\nREPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\nV1=$'a\\nb\\tc'\nV2=$'\\xc3\\xa9\\xff'\nV3=''\nV4=\"  padded  \"\n");
     let profile = load_ok(&tree, &[]);
     assert_eq!(profile.get("V1"), Some(b"a\nb\tc".as_slice()));
     assert_eq!(profile.get("V2"), Some(b"\xc3\xa9\xff".as_slice()));
@@ -524,7 +531,7 @@ fn values_come_back_byte_exact_with_newlines_tabs_and_high_bytes() {
 #[test]
 fn a_profile_sees_no_positional_parameters() {
     let tree = Tree::new("params");
-    tree.profile("fx", "NARGS=$#\nFIRST=\"${1-unset}\"\n");
+    tree.profile("fx", "REPO_SLUG=x\nREPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\nNARGS=$#\nFIRST=\"${1-unset}\"\n");
     let profile = load_ok(&tree, &[]);
     assert_eq!(s(&profile, "NARGS"), "0");
     assert_eq!(s(&profile, "FIRST"), "unset");
@@ -539,7 +546,7 @@ fn the_profile_sees_home_the_maintainer_variables_and_the_adapters_path_and_noth
     let tree = Tree::new("env");
     tree.profile(
         "fx",
-        "SEEN_HOME=\"$HOME\"\nSEEN_PATH=\"$PATH\"\nSEEN_USER=\"${USER-unset}\"\nSEEN_TOKEN=\"${GH_TOKEN-unset}\"\nSEEN_M=\"$MAINTAINER_CUSTOM\"\nSEEN_LC=\"$LC_ALL\"\n",
+        "REPO_SLUG=x\nREPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\nSEEN_HOME=\"$HOME\"\nSEEN_PATH=\"$PATH\"\nSEEN_USER=\"${USER-unset}\"\nSEEN_TOKEN=\"${GH_TOKEN-unset}\"\nSEEN_M=\"$MAINTAINER_CUSTOM\"\nSEEN_LC=\"$LC_ALL\"\n",
     );
     let vars = vec![
         ("HOME".to_string(), tree.home().display().to_string()),
@@ -605,7 +612,9 @@ fn a_profile_that_never_finishes_is_killed_at_the_timeout() {
     let loaded = load_profile(&real_proc(), &env);
     let elapsed = started.elapsed();
     assert_eq!(loaded.stdout, b"started\n", "what it printed before the kill is kept");
-    assert_eq!(err_of(loaded), LoadError::EvalTimedOut);
+    let error = err_of(loaded);
+    assert_eq!(error, LoadError::EvalTimedOut);
+    assert_eq!(error.exit_code(), 124);
     assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
 }
 
@@ -627,6 +636,121 @@ fn a_profile_that_empties_path_or_shadows_printf_does_not_stop_the_overrides() {
     assert_eq!(s(&profile, "MAINTAINER_SLUG"), "o/r");
 }
 
+// ----- set -u, as the calling tools run ---------------------------------------------
+
+const SOURCES: [(&str, &str); 5] = [
+    ("MAINTAINER_SLUG", "REPO_SLUG"),
+    ("MAINTAINER_REPO", "REPO_PATH"),
+    ("MAINTAINER_STATE", "STATE_DIR"),
+    ("MAINTAINER_ACCOUNT", "GH_ACCOUNT"),
+    ("MAINTAINER_POST", "POST"),
+];
+
+// maintainer-merge and maintainer-repo run under `set -u`, so a profile that
+// leaves one source of the five exported names unset stops the bash with
+// `NAME: unbound variable`. Plan decision P1F-9, corrected.
+#[test]
+fn a_profile_that_leaves_a_source_variable_unset_is_an_unbound_variable_error() {
+    for (_, source) in SOURCES {
+        let tree = Tree::new("unbound");
+        let mut body = String::new();
+        for (_, other) in SOURCES.iter().filter(|(_, other)| *other != source) {
+            body.push_str(other);
+            body.push_str("=x\n");
+        }
+        tree.profile("fx", &body);
+        let (error, _, _) = load_err(&tree, &[]);
+        assert_eq!(error, LoadError::Unbound { name: source.to_string() }, "{source}");
+        assert_eq!(error.exit_code(), 127);
+        assert_eq!(
+            error.message(),
+            format!("maintainer: {source}: unbound variable\n").into_bytes()
+        );
+    }
+}
+
+// `${A:-$B}` with B set and empty is legal, and so is a preset MAINTAINER_ name
+// that makes the source unnecessary.
+#[test]
+fn an_empty_source_is_fine_and_a_preset_name_does_not_need_its_source() {
+    let tree = Tree::new("unbound-ok");
+    tree.profile("fx", "REPO_SLUG=\nREPO_PATH=\nSTATE_DIR=\nGH_ACCOUNT=\nPOST=\n");
+    let profile = load_ok(&tree, &[]);
+    assert_eq!(profile.get("MAINTAINER_POST"), Some(b"".as_slice()));
+    let tree = Tree::new("unbound-preset");
+    tree.profile("fx", "REPO_SLUG=x\n");
+    let preset = [
+        ("MAINTAINER_REPO", "/r"),
+        ("MAINTAINER_STATE", "/s"),
+        ("MAINTAINER_ACCOUNT", "a"),
+        ("MAINTAINER_POST", "on"),
+    ];
+    assert_eq!(s(&load_ok(&tree, &preset), "MAINTAINER_REPO"), "/r");
+}
+
+#[test]
+fn an_unset_home_is_an_unbound_variable_error() {
+    let tree = Tree::new("nohome");
+    tree.profile("fx", PROFILE_FX);
+    let env = LoadEnv::from_vars(tree.lib(), Vec::<(String, String)>::new());
+    let error = err_of(load_profile(&real_proc(), &env));
+    assert_eq!(error, LoadError::HomeUnbound);
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(
+        error.message(),
+        b"maintainer: HOME: unbound variable\nmaintainer: lib/defaults.env not found, so no tunable has a value. Run ./install.sh.\n"
+    );
+}
+
+// The child runs under `set -u` too, so a profile that reads an unset variable
+// ends the shell with status 127, as it ends the calling tool.
+#[test]
+fn a_profile_that_reads_an_unset_variable_ends_the_shell_with_status_127() {
+    let tree = Tree::new("profile-unbound");
+    tree.profile("fx", &format!("X=\"$NOT_SET_ANYWHERE\"\n{PROFILE_FX}"));
+    let loaded = load_profile(&real_proc(), &tree.env(&[]));
+    assert!(String::from_utf8_lossy(&loaded.stderr).contains("NOT_SET_ANYWHERE: unbound variable"));
+    assert_eq!(err_of(loaded), LoadError::ShellExited { code: 127 });
+}
+
+// Bash drops the newline with `$(basename ...)`, lists `a`, and then finds no
+// deployed profile `a`.
+#[test]
+fn a_profile_directory_whose_name_ends_in_a_newline_is_refused_as_not_deployed() {
+    let tree = Tree::new("newline");
+    tree.profile("a\n", PROFILE_FX);
+    let (error, _, _) = load_err(&tree, &[]);
+    assert_eq!(error, LoadError::ProfileMissing { name: b"a".to_vec(), share: tree.share() });
+    let tree = Tree::new("newline-two");
+    tree.profile("a\n", PROFILE_FX);
+    tree.profile("b", PROFILE_FX);
+    let (error, _, _) = load_err(&tree, &[]);
+    assert_eq!(error, LoadError::ManyProfiles { names: vec![b"a".to_vec(), b"b".to_vec()] });
+}
+
+// The share directory comes from HOME as defaults.env leaves it, not from the
+// caller's value.
+#[test]
+fn a_defaults_env_that_sets_home_moves_the_profiles_directory() {
+    let tree = Tree::new("defaults-home");
+    let elsewhere = tree.scratch.path().join("elsewhere");
+    tree.scratch.write("lib/defaults.env", format!("HOME={}\nLOCK_WAIT=1\n", elsewhere.display()));
+    tree.scratch.write("elsewhere/.local/share/maintainer/profiles/moved/profile.env", PROFILE_FX);
+    tree.profile("fx", "REPO_SLUG=\"caller/home\"\n");
+    let profile = load_ok(&tree, &[]);
+    assert_eq!(profile.deployed_name(), Some(b"moved".as_slice()));
+}
+
+#[test]
+fn the_shells_own_variables_never_reach_the_result() {
+    let tree = Tree::new("own");
+    tree.profile("fx", PROFILE_FX);
+    let profile = load_ok(&tree, &[]);
+    for name in ["PWD", "OLDPWD", "SHLVL", "_"] {
+        assert_eq!(profile.get(name), None, "{name}");
+    }
+}
+
 // ----- errors as refusals ------------------------------------------------------------
 
 #[test]
@@ -637,12 +761,14 @@ fn every_load_error_maps_to_a_refusal_with_exit_code_64() {
         LoadError::NoProfileDeployed,
         LoadError::ManyProfiles { names: vec![b"a".to_vec(), b"b".to_vec()] },
         LoadError::ProfileMissing { name: b"x".to_vec(), share: PathBuf::from("/s") },
+        LoadError::Unbound { name: "REPO_PATH".into() },
+        LoadError::HomeUnbound,
         LoadError::ShellExited { code: 3 },
         LoadError::EvalTimedOut,
         LoadError::Bash("x".into()),
         LoadError::Malformed("x".into()),
     ];
-    assert_eq!(errors.len(), 9);
+    assert_eq!(errors.len(), 11);
     for error in errors {
         let shown = format!("{error:?}");
         assert_eq!(error.into_refusal().exit_code(), 64, "{shown}");
