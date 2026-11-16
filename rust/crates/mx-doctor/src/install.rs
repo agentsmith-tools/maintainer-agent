@@ -15,6 +15,11 @@ pub fn rule_count(contents: &Fact<Vec<u8>>) -> Option<usize> {
     pyval::py_len(pyval::index(&value, &["permissions", "deny"])?)
 }
 
+/// The rule count a `python3 -c` snippet prints, or nothing when python3 is absent.
+fn count_rules(ctx: &Ctx<'_>, contents: &Fact<Vec<u8>>) -> Option<usize> {
+    if ctx.python_available() { rule_count(contents) } else { None }
+}
+
 /// Deployment.
 pub fn deployment(ctx: &Ctx<'_>, out: &mut Out) {
     out.add(Item::head("Deployment"));
@@ -87,7 +92,7 @@ pub fn profile_and_containment(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop>
         ));
     } else if ctx.host.stat(&settings_path).is_file() {
         let contents = ctx.host.read(&settings_path);
-        match rule_count(&contents) {
+        match count_rules(ctx, &contents) {
             None => out.add(Item::fail("deny wall is not valid JSON", "reinstall")),
             Some(n) => {
                 let floor = ctx.settings.need("DENY_WALL_MIN_RULES", 92, out)?;
@@ -137,7 +142,7 @@ pub fn profile_and_containment(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop>
     let rehearsal = format!("{pdir}/settings-rehearsal.json");
     if ctx.host.stat(&rehearsal).is_file() {
         let count =
-            rule_count(&ctx.host.read(&rehearsal)).map(|n| n.to_string()).unwrap_or_default();
+            count_rules(ctx, &ctx.host.read(&rehearsal)).map(|n| n.to_string()).unwrap_or_default();
         out.add(Item::ok(format!(
             "rehearsal wall present, {count} rules (POST=off posts nothing)"
         )));

@@ -117,7 +117,7 @@ pub fn scheduler(ctx: &Ctx<'_>, out: &mut Out) {
             let timers = list_timers();
             let fires_soon =
                 text::lines(text::strip_trailing_newlines(&timers)).any(text::fires_in_seconds);
-            out.report.extend(decide_timers(
+            out.extend(decide_timers(
                 &TimerFacts { listed, files, lingering, fires_soon },
                 profile,
                 &who,
@@ -267,7 +267,7 @@ fn gather_suite(ctx: &Ctx<'_>, out: &mut Out, path: &str, file: &str) -> SuiteFa
         }
         match ctx.proc.run(&spec) {
             Ok(output) => {
-                out.stderr.extend_from_slice(&output.stderr);
+                out.raw_stderr(&output.stderr);
                 text::captured(&output.stdout)
             }
             Err(_) => String::new(),
@@ -279,8 +279,12 @@ fn gather_suite(ctx: &Ctx<'_>, out: &mut Out, path: &str, file: &str) -> SuiteFa
     if !facts.needs.is_empty() && facts.image.starts_with("localhost/") {
         let containerfile = format!("{}.Containerfile", path.strip_suffix(".sh").unwrap_or(path));
         let present = ctx.host.stat(&containerfile).is_file();
+        // The bash hashes with `sha256sum`; a host without it (macOS) gets an empty
+        // recipe there and every image reads as current. Kept (decision P1I-12).
         let hash = match ctx.host.read(&containerfile) {
-            Fact::Known(bytes) if present => hex(&Sha256::digest(&bytes)),
+            Fact::Known(bytes) if present && ctx.command_v("sha256sum").is_some() => {
+                hex(&Sha256::digest(&bytes))
+            }
             _ => String::new(),
         };
         let parent = containerfile.rsplit_once('/').map_or(".", |(parent, _)| parent);
@@ -389,7 +393,7 @@ pub fn container_verification(ctx: &Ctx<'_>, out: &mut Out) {
             continue;
         }
         let facts = gather_suite(ctx, out, &path, &file);
-        out.report.extend(decide_suite(&facts, ctx.profile).0);
+        out.extend(decide_suite(&facts, ctx.profile).0);
     }
     let unit = format!("{}/.config/systemd/user/podman-userns-warmup.service", ctx.env.home);
     if ctx.uname() == "Linux" && ctx.host.stat(&unit).is_file() {
@@ -484,35 +488,54 @@ fn probe_extraction(ctx: &Ctx<'_>, out: &mut Out, unit: &str, dirs: &str, merge:
     // probe under `/` (`/r`, `/x`, `/s`). That is dangerous for root and harmless
     // for anyone else, and it is not on the plan, so it is kept and pinned by a
     // test (found, not fixed).
-    let sb = ctx.host.make_temp_dir(&tmp).unwrap_or_default();
+    let sb = match ctx.host.make_temp_dir(&tmp) {
+        Ok(made) => made,
+        Err(why) => {
+            out.warn_text(&format!(
+                "mktemp: failed to create directory via template '{}/tmp.XXXXXXXXXX': {why}\n",
+                tmp.trim_end_matches('/')
+            ));
+            String::new()
+        }
+    };
     let repo = format!("{sb}/r");
-    let git_ok =
-        ctx.run(&["git", "init", "-q", "-b", "main", &repo], limit::GIT).is_some_and(|c| c.ok())
-            && ctx.host.write(&format!("{repo}/f"), b"x\n").is_ok()
-            && ctx.run(&["git", "-C", &repo, "add", "f"], limit::GIT).is_some_and(|c| c.ok())
-            && ctx
-                .run(
-                    &[
-                        "git",
-                        "-C",
-                        &repo,
-                        "-c",
-                        "user.email=t@t",
-                        "-c",
-                        "user.name=t",
-                        "-c",
-                        "commit.gpgsign=false",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "commit",
-                        "-qm",
-                        "probe",
-                    ],
-                    limit::GIT,
-                )
-                .is_some_and(|c| c.ok());
-    drop(ctx.host.make_dirs(&format!("{sb}/x")));
-    drop(ctx.host.make_dirs(&format!("{sb}/s")));
+    // The bash does not silence git here, so its diagnostics reach standard error.
+    let git = |argv: &[&str], out: &mut Out<'_>| -> bool {
+        match ctx.run(argv, limit::GIT) {
+            Some(call) => {
+                out.raw_stderr(&call.stderr);
+                call.ok()
+            }
+            None => false,
+        }
+    };
+    let git_ok = git(&["git", "init", "-q", "-b", "main", &repo], out)
+        && ctx.host.write(&format!("{repo}/f"), b"x\n").is_ok()
+        && git(&["git", "-C", &repo, "add", "f"], out)
+        && git(
+            &[
+                "git",
+                "-C",
+                &repo,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "probe",
+            ],
+            out,
+        );
+    for leaf in ["x", "s"] {
+        if let Err(why) = ctx.host.make_dirs(&format!("{sb}/{leaf}")) {
+            out.warn_text(&format!("mkdir: {why}\n"));
+        }
+    }
     if git_ok {
         let repo_env = format!("MAINTAINER_REPO={repo}");
         let state_env = format!("MAINTAINER_STATE={sb}/s");

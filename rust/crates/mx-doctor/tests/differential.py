@@ -167,6 +167,9 @@ class Fx:
         self.notes = []
         self.chmods = []        # (path, mode) applied after files
         self.tmpdir_missing = False
+        self.nopython = False
+        self.profile_lines = []
+        self.nosha = False
         self.profile = "magent"
         self.git_init_fails = False
 
@@ -425,7 +428,7 @@ def d_runs(fx, rng):
     k = rng.choice(["ok"] * 2 + ["no-slug", "gh-fails", "empty", "object", "garbage", "red-old", "red-young",
                                   "superseded", "newest-fail", "two", "progress", "queued", "cancelled",
                                   "no-name", "threshold-under", "threshold-at", "threshold-over", "no-created",
-                                  "naive", "bad-date", "str-int", "nonstr-name"])
+                                  "naive", "bad-date", "str-int", "nonstr-name", "date-edge", "date-edge", "int-created", "nan-field"])
     fx.notes.append("runs=" + k)
     g = rng.choice(["default"] * 5 + ["9", "1", "abc", "0.5", "1_0", "inf", "nan", "env"])
     fx.notes.append("grace=" + g)
@@ -489,6 +492,32 @@ def d_runs(fx, rng):
     elif k == "str-int":
         rows = json.loads(runs_json(fx, [("CI", "failure", "completed", 10)]))
         rows[0]["url"] = 5
+        fx.answer("run-list", json.dumps(rows))
+    elif k == "date-edge":
+        import datetime as _dt
+        e = ago_epoch(fx.t0, 10)
+        d = _dt.datetime.fromtimestamp(e, _dt.timezone.utc)
+        iso_w = d.isocalendar()
+        shifted = _dt.datetime.fromtimestamp(e + 3630, _dt.timezone.utc)
+        text = rng.choice([
+            d.strftime("%Y%m%dT%H%M%SZ"),
+            "%d-W%02d-%dT%s" % (iso_w[0], iso_w[1], iso_w[2], d.strftime("%H:%M:%SZ")),
+            d.strftime("%Y-%m-%dT%H:%M:%S") + ",5Z",
+            shifted.strftime("%Y-%m-%dT%H:%M:%S") + "+01:00:30",
+            "2026-02-30T00:00:00Z", "0000-01-01T00:00:00Z", "yesterday", "2026-01-05T24:00:00Z",
+            d.strftime("%Y-%m-%dT%H:%M:%S.123456789Z")])
+        rows = json.loads(runs_json(fx, [("CI", "failure", "completed", 10)]))
+        rows[0]["createdAt"] = text
+        fx.answer("run-list", json.dumps(rows))
+        fx.notes.append("date=" + text)
+    elif k == "int-created":
+        rows = json.loads(runs_json(fx, [("CI", "success", "completed", 10), ("CI", "success", "completed", 11)]))
+        rows[0]["createdAt"] = 1
+        rows[1]["createdAt"] = 2
+        fx.answer("run-list", json.dumps(rows))
+    elif k == "nan-field":
+        rows = json.loads(runs_json(fx, [("CI", "success", "completed", 10)]))
+        rows[0]["extra"] = float("nan")
         fx.answer("run-list", json.dumps(rows))
     elif k == "nonstr-name":
         rows = json.loads(runs_json(fx, [("CI", "failure", "completed", 10)]))
@@ -816,8 +845,50 @@ def d_deployed(fx, rng):
     fx.version_repo = k
 
 
+def d_unbound(fx, rng):
+    k = rng.choice(["none"] * 6 + ["floor", "grace", "lease", "limit", "home"])
+    fx.notes.append("unbound=" + k)
+    if k == "home":
+        fx.unset_env.add("HOME")
+        return
+    name = {"floor": "DENY_WALL_MIN_RULES", "grace": "RED_GRACE_HOURS", "lease": "DOCTOR_LEASE_HOURS",
+            "limit": "DOCTOR_RUN_LIMIT"}.get(k)
+    if name:
+        fx.profile_lines.append("unset " + name)
+
+
+def d_python(fx, rng):
+    if rng.random() < 0.15:
+        fx.nopython = True
+        fx.notes.append("python=absent")
+
+
+def d_tmp(fx, rng):
+    if rng.random() < 0.15:
+        fx.tmpdir_missing = True
+        fx.notes.append("tmpdir=missing")
+        unit = fx.home + "/.config/systemd/user/maintainer@.service"
+        fx.put(unit, UNIT)
+        fx.answer("systemd-run-bare", "", 0)
+        fx.answer("systemd-run-probe", "", 0)
+        fx.tools.add("systemd-run")
+        fx.tools.add("maintainer-merge")
+
+
+def d_nosha(fx, rng):
+    if rng.random() < 0.15:
+        fx.nosha = True
+        fx.notes.append("sha256sum=absent")
+        fx.tools.add("podman")
+        suite_files(fx, "s9", "localhost/sk-img:9", "bash git", "FROM scratch\n# 9\n")
+        key = re.sub(r"[^A-Za-z0-9]", "_", "localhost/sk-img:9")
+        fx.answer("exists." + key, "", 0)
+        fx.answer("inspect." + key, rng.choice(["", "<no value>", "abc"]) + "\n", 0)
+        fx.answer("probe." + key, "", 0)
+
+
 DIMENSIONS = [d_os, d_args, d_profiles, d_install, d_wall, d_backend, d_commands, d_identity, d_post, d_repo,
-              d_runs, d_scheduler, d_podman, d_sandbox, d_audit, d_token, d_tasks, d_deployed]
+              d_runs, d_scheduler, d_podman, d_sandbox, d_audit, d_token, d_tasks, d_deployed, d_unbound, d_python, d_tmp, d_nosha]
 
 
 # --- writing a host to disk -------------------------------------------------------
@@ -860,7 +931,7 @@ def build(fx):
             f.write(body)
         os.chmod(p, 0o755)
     for t in PLAIN_TOOLS:
-        if t == "grep":
+        if t == "grep" or (t == "python3" and fx.nopython) or (t == "sha256sum" and fx.nosha):
             continue
         os.symlink(real(t), case + "/tools/" + t)
     # the cases of the shipped (not generated) tools the doctor looks up by name
@@ -894,6 +965,8 @@ def build(fx):
         with open(fx.pdir + "/profile.env", "w") as f:
             for k, v in fx.profile_vars.items():
                 f.write("%s=%s\n" % (k, shlex_quote(v)))
+            for line in fx.profile_lines:
+                f.write(line + "\n")
     else:
         shutil.rmtree(fx.pdir, ignore_errors=True)
     if getattr(fx, "no_share", False):
@@ -979,22 +1052,35 @@ def make_version(fx):
 
 # --- running and comparing -----------------------------------------------------------
 
-def run_doctor(fx, program, mode):
+def run_doctor(fx, program, mode, merged=False):
+    """mode is "bash" or "rust". merged captures standard error into standard output."""
     env = {"PATH": fx.case + "/bin:" + fx.case + "/tools", "HOME": fx.home, "LC_ALL": "C", "TZ": "UTC",
            "LOGNAME": "fixture-user", "USER": "fixture-user", "TMPDIR": fx.case + "/tmp",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
            "CZ_CASE_DIR": fx.case}
+    if fx.tmpdir_missing:
+        env["TMPDIR"] = fx.case + "/tmp-gone"
+    if mode == "bash":
+        # The shell's own record of a tool it could not find, as the test harness installs it.
+        with open(fx.case + "/benv.sh", "w") as f:
+            f.write('command_not_found_handle() { printf \'%s\\n\' "$1" >> "${CZ_CASE_DIR:?}/missing.log"; return 127; }\n')
+        env["BASH_ENV"] = fx.case + "/benv.sh"
+    else:
+        env["MAINTAINER_DOCTOR_MISSING_LOG"] = fx.case + "/missing.log"
     for k in fx.unset_env:
         env.pop(k, None)
     env.update(fx.extra_env)
     cmd = ["env", "-i"] + ["%s=%s" % kv for kv in env.items()] + ["timeout", "120", "bash", program] + fx.args
-    r = subprocess.run(cmd, cwd=fx.case + "/cwd", capture_output=True, stdin=subprocess.DEVNULL)
+    r = subprocess.run(cmd, cwd=fx.case + "/cwd", capture_output=not merged, stdin=subprocess.DEVNULL,
+                       **({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT} if merged else {}))
+    if merged:
+        return r.returncode, r.stdout, b""
     return r.returncode, r.stdout, r.stderr
 
 
 def snapshot(case):
     rows = []
-    skip_top = {"calls.log", "grepcalls", "stubs.all", "ans", "bin", "tools", "unplanned"}
+    skip_top = {"calls.log", "grepcalls", "stubs.all", "ans", "bin", "tools", "unplanned", "missing.log", "benv.sh"}
     for root, dirs, files in os.walk(case):
         rel_root = os.path.relpath(root, case)
         if rel_root == ".":
@@ -1035,20 +1121,31 @@ def read(path):
         return b""
 
 
-def one_run(fx, program):
+ABSENT_BY_DESIGN = {b"python3", b"sha256sum"}
+
+
+def one_run(fx, program, mode, merged_too):
     build(fx)
-    rc, out, err = run_doctor(fx, program, None)
+    rc, out, err = run_doctor(fx, program, mode)
     calls = norm(read(fx.case + "/calls.log"))
     grep_calls = read(fx.case + "/grepcalls")
     all_logs = read(fx.case + "/stubs.all") + read(fx.case + "/calls.log")
-    return {"rc": rc, "stdout": norm(out), "stderr": norm(err), "calls": calls, "state": snapshot(fx.case),
-            "grep": grep_calls, "all_logs": all_logs, "raw_out": out + err,
-            "unplanned": read(fx.case + "/unplanned")}
+    missing = [m for m in read(fx.case + "/missing.log").split(b"\n") if m and m not in ABSENT_BY_DESIGN]
+    state = snapshot(fx.case)
+    unplanned = read(fx.case + "/unplanned")
+    merged = None
+    if merged_too:
+        build(fx)
+        _rc, merged_out, _ = run_doctor(fx, program, mode, merged=True)
+        merged = norm(merged_out)
+    return {"rc": rc, "stdout": norm(out), "stderr": norm(err), "calls": calls, "state": state,
+            "grep": grep_calls, "all_logs": all_logs, "raw_out": out + err, "unplanned": unplanned,
+            "missing": missing, "merged": merged}
 
 
 def compare(a, b):
     diffs = []
-    for key in ("rc", "stdout", "stderr", "calls", "state"):
+    for key in ("rc", "stdout", "stderr", "calls", "state", "missing", "merged"):
         if a[key] != b[key]:
             diffs.append(key)
     return diffs
@@ -1087,11 +1184,12 @@ def main():
             if rng.random() < 0.55 or dim in (d_os, d_args):
                 dim(fx, rng)
         # profile.env is written after every dimension has had its say
-        b = one_run(fx, bash_prog)
-        r = one_run(fx, rust_prog)
+        merged_too = i % 4 == 0
+        b = one_run(fx, bash_prog, "bash", merged_too)
+        r = one_run(fx, rust_prog, "rust", merged_too)
         diffs = compare(b, r)
         totals["cases"] += 1
-        totals["fields"] += 5
+        totals["fields"] += 6 + int(merged_too)
         token = TOKEN.encode()
         pinned = False
         # F4: the bash argv carries the token; the Rust run carries it nowhere.
@@ -1131,7 +1229,7 @@ def main():
         if a.verbose:
             print("case %d %s %s" % (i, "ok" if not diffs else "DIFF", fx.notes))
         rm_rf(case)
-    print("comparisons: %d (%d cases x 5 fields: stdout, stderr, exit code, call log, state tree)" % (
+    print("comparisons: %d (%d cases x 6 fields (7 on every 4th case): stdout, stderr, exit code, call log, state tree, missing-tool record, interleaved capture (every 4th case))" % (
         totals["fields"], totals["cases"]))
     print("cases with a difference: %d %s" % (totals["differences"], kinds))
     print("cases where the bash grep argv carried a token scan (pinned, decision P1I-F4): %d" % totals["pinned"])

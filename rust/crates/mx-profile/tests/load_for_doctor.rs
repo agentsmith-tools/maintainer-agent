@@ -99,3 +99,22 @@ fn what_the_profile_prints_comes_back_for_the_caller_to_replay() {
     assert_eq!(loaded.stderr, b"oops\n");
     assert!(loaded.result.is_ok());
 }
+
+#[test]
+fn an_unset_home_is_refused_before_any_file_is_looked_for() {
+    let (scratch, profile_env) = tree("doc-nohome");
+    let mut env = env(&scratch, &[]);
+    env.home = None;
+    let loaded = load_for_doctor(&real_proc(), &env, &profile_env);
+    assert!(matches!(loaded.result, Err(LoadError::HomeUnbound)));
+}
+
+#[test]
+fn a_profile_that_reads_an_unset_variable_ends_with_status_1_as_a_script_file_does() {
+    let (scratch, profile_env) = tree("doc-unbound");
+    scratch.write("profile.env", "X=\"$NOT_SET_ANYWHERE\"\n");
+    let loaded = load_for_doctor(&real_proc(), &env(&scratch, &[]), &profile_env);
+    let error = loaded.result.unwrap_err();
+    assert_eq!(error, LoadError::ShellExited { code: 1 });
+    assert_eq!(error.exit_code(), 1);
+}

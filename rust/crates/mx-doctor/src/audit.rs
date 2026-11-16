@@ -175,30 +175,48 @@ fn receipts_check(ctx: &Ctx<'_>, out: &mut Out, st: &str) {
 /// A lease nobody released and nobody renewed. It blocks nothing once it has
 /// expired, so this is housekeeping, but a lease that old means a session ended
 /// without letting go, and a file the doctor cannot read is not a pass.
-fn leases_check(ctx: &Ctx<'_>, out: &mut Out, st: &str) -> Result<(), Stop> {
+fn leases_check(ctx: &Ctx<'_>, out: &mut Out<'_>, st: &str) -> Result<(), Stop> {
     let dir = format!("{st}/leases");
     let mut found = Vec::new();
-    let hours;
     if ctx.host.stat(&dir).is_dir() {
-        hours = ctx.settings.need("DOCTOR_LEASE_HOURS", 440, out)?.to_string();
-        let files: Vec<LeaseFile> = glob_names(ctx.host, &dir, "pr-", ".json")
-            .into_iter()
-            .map(|name| {
-                let contents = ctx.host.read(&format!("{dir}/{name}"));
-                LeaseFile { name, contents }
-            })
-            .collect();
-        let now = i64::try_from(ctx.clock.now_unix()).unwrap_or(0);
-        match forgotten_leases(&hours, &files, now) {
-            Ok(lines) => found = lines,
-            Err(Crash) => out.add(Item::warn(
+        let could_not_read = |out: &mut Out<'_>| {
+            out.add(Item::warn(
                 format!("could not read the leases under {dir}, so forgotten ones are unknown"),
                 "python3 and a readable state directory",
-            )),
+            ));
+        };
+        if ctx.settings.is_set("DOCTOR_LEASE_HOURS") {
+            let hours = ctx.settings.get("DOCTOR_LEASE_HOURS");
+            let files: Vec<LeaseFile> = glob_names(ctx.host, &dir, "pr-", ".json")
+                .into_iter()
+                .map(|name| {
+                    let contents = ctx.host.read(&format!("{dir}/{name}"));
+                    LeaseFile { name, contents }
+                })
+                .collect();
+            let now = i64::try_from(ctx.clock.now_unix()).unwrap_or(0);
+            let read = if ctx.python_available() {
+                forgotten_leases(hours, &files, now)
+            } else {
+                Err(Crash)
+            };
+            match read {
+                Ok(lines) => found = lines,
+                Err(Crash) => could_not_read(out),
+            }
+        } else {
+            // The expansion sits inside the `$(python3 ...)` of the bash: only that
+            // substitution dies, with the line the substitution ends on.
+            out.warn_text("maintainer-doctor: line 452: DOCTOR_LEASE_HOURS: unbound variable\n");
+            could_not_read(out);
         }
-    } else {
-        hours = ctx.settings.need("DOCTOR_LEASE_HOURS", 461, out)?.to_string();
     }
+    // The summary line expands the limit at the top level: line 458 when leases were
+    // listed, 461 otherwise. An unset limit ends the shell there.
+    let hours = ctx
+        .settings
+        .need("DOCTOR_LEASE_HOURS", if found.is_empty() { 461 } else { 458 }, out)?
+        .to_string();
     out.add(decide_leases(&found, &hours));
     Ok(())
 }
@@ -285,7 +303,11 @@ fn tasks_check(ctx: &Ctx<'_>, out: &mut Out, st: &str) -> Result<(), Stop> {
         let age = hours_between(now(ctx), failed.mtime.0);
         // An unreadable reason must not silence the report: the failure is the
         // finding, the reason is detail.
-        let mut why = failure_reason(&ctx.host.read(&path));
+        let mut why = if ctx.python_available() {
+            failure_reason(&ctx.host.read(&path))
+        } else {
+            String::new()
+        };
         if why.is_empty() {
             why = format!("no reason recorded in {name}");
         }

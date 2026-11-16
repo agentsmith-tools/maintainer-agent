@@ -100,6 +100,13 @@ impl Report {
         }
     }
 
+    /// The bytes one item prints: [`Report::render_item`] with each escaped byte
+    /// of a name that was not UTF-8 put back.
+    #[must_use]
+    pub fn render_bytes(item: &Item) -> Vec<u8> {
+        crate::text::to_bytes(&Self::render_item(item))
+    }
+
     /// The closing count line.
     #[must_use]
     pub fn render_summary(&self) -> String {

@@ -23,4 +23,13 @@ A binary's `main` restores the default `SIGPIPE` action, because Rust ignores it
 - `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit code, the order of every external call and the state tree.
 - `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
 
-The doctor's binary cannot restore the default `SIGPIPE` action without `unsafe`, so a write to a closed pipe ends it with status 141, which is what a shell reports for a process the signal killed.
+The doctor writes each finding and each diagnostic the moment it is made, so a capture of both streams interleaves as the bash does. It cannot restore the default `SIGPIPE` action without `unsafe`, so when standard output is closed it stops at the next section and exits with status 141, which is what a shell reports for a process the signal killed.
+
+## Running the bash suites against a Rust program
+
+`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (today `maintainer-repo`), and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
+
+    rust/scripts/assemble-tree.sh /scratch/tree
+    MX_TREE=/scratch/tree bash tests/run-characterization.sh repo-prune.sh repo-release.sh repo-fixup.sh
+
+The helper never writes outside `DEST`: it refuses a tree in which a tracked symlink stands where a directory of the copy must be, and it removes a symlink before it writes in its place. `rust/scripts/test-assemble-tree.sh` builds three throwaway repositories with such symlinks and checks that the files outside stay byte for byte the same.

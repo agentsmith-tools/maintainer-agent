@@ -3,12 +3,12 @@
 //! variables and the directory of the tree.
 
 use crate::audit::{audit_trail, deployed_code};
-use crate::ctx::{Ctx, Env, Out, Settings, Stop, limit};
+use crate::ctx::{Ctx, Emit, Env, Out, Settings, Stop, Stream, limit};
 use crate::github::{identity, posting, repository};
 use crate::host::HostFs;
 use crate::hostchecks::{container_verification, sandbox, scheduler};
 use crate::install::{backend, commands, deployment, profile_and_containment};
-use crate::report::Report;
+use crate::text;
 use mx_ports::{Clock, Proc};
 use mx_profile::{LoadEnv, LoadError, load_for_doctor};
 use std::collections::BTreeMap;
@@ -47,22 +47,61 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn refusal(stderr: &str, code: i32) -> Outcome {
-    Outcome { stdout: Vec::new(), stderr: stderr.as_bytes().to_vec(), code }
+/// Ends the run with a message on standard error.
+fn refuse(out: &mut Out<'_>, stderr: &str, code: i32) -> i32 {
+    out.warn_text(stderr);
+    code
 }
 
-/// Runs the doctor.
+/// Runs the doctor and keeps what it wrote, for the tests.
 pub fn run(proc: &dyn Proc, clock: &dyn Clock, host: &dyn HostFs, input: &RunInput) -> Outcome {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = {
+        let mut keep = |stream: Stream, bytes: &[u8]| {
+            match stream {
+                Stream::Stdout => stdout.extend_from_slice(bytes),
+                Stream::Stderr => stderr.extend_from_slice(bytes),
+            }
+            true
+        };
+        run_live(proc, clock, host, input, &mut keep)
+    };
+    Outcome { stdout, stderr, code }
+}
+
+/// Runs the doctor, handing every piece of output to `emit` the moment it is
+/// made, in order. Returns the exit status: 141 when `emit` reports that the
+/// reader is gone, which is what a shell reports for a process `SIGPIPE` killed.
+pub fn run_live(
+    proc: &dyn Proc,
+    clock: &dyn Clock,
+    host: &dyn HostFs,
+    input: &RunInput,
+    emit: Emit<'_>,
+) -> i32 {
+    let mut out = Out::live(emit);
+    let code = drive(proc, clock, host, input, &mut out);
+    if out.closed() { 141 } else { code }
+}
+
+fn drive(
+    proc: &dyn Proc,
+    clock: &dyn Clock,
+    host: &dyn HostFs,
+    input: &RunInput,
+    out: &mut Out<'_>,
+) -> i32 {
     let var = |name: &str| input.vars.iter().find(|(key, _)| key == name).map(|(_, v)| v.as_str());
     let Some(home) = var("HOME") else {
-        return refusal("maintainer-doctor: line 12: HOME: unbound variable\n", 127);
+        return refuse(out, "maintainer-doctor: line 12: HOME: unbound variable\n", 1);
     };
     let share = format!("{home}/.local/share/maintainer");
     // One deployed profile needs no naming; several do. Defaulting to a particular
     // repository's name is how a tool ends up reporting on somebody else's project.
     let profile = match choose_profile(host, &share, var("MAINTAINER_PROFILE").unwrap_or("")) {
         Ok(profile) => profile,
-        Err(outcome) => return outcome,
+        Err((message, code)) => return refuse(out, &message, code),
     };
     let quick = input.args.first().is_some_and(|arg| arg == "--quick");
 
@@ -73,7 +112,7 @@ pub fn run(proc: &dyn Proc, clock: &dyn Clock, host: &dyn HostFs, input: &RunInp
     } else if host.stat(&format!("{share}/profile.sh")).is_file() {
         share.clone()
     } else {
-        return refusal("maintainer-doctor: cannot find profile.sh\n", 64);
+        return refuse(out, "maintainer-doctor: cannot find profile.sh\n", 64);
     };
     let ambient: Vec<(String, String)> = input
         .vars
@@ -95,23 +134,23 @@ pub fn run(proc: &dyn Proc, clock: &dyn Clock, host: &dyn HostFs, input: &RunInp
         &load_env,
         std::path::Path::new(&format!("{share}/profiles/{profile}/profile.env")),
     );
+    out.raw_stdout(&loaded.stdout);
+    out.raw_stderr(&loaded.stderr);
     let profile_vars = match loaded.result {
         Ok(vars) => vars,
         Err(error) => {
-            let mut stderr = loaded.stderr.clone();
-            stderr.extend_from_slice(&error.message());
-            let code = match &error {
+            out.raw_stderr(&error.message());
+            return match &error {
                 &LoadError::ShellExited { code } => code,
                 LoadError::EvalTimedOut => 124,
                 _ => 64,
             };
-            return Outcome { stdout: loaded.stdout, stderr, code };
         }
     };
     let mut values = BTreeMap::new();
     let mut suite_env = Vec::new();
     for (name, value) in profile_vars.vars() {
-        let text = String::from_utf8_lossy(value).into_owned();
+        let text = text::lossless(value);
         if !NOT_PASSED_TO_PROFILE.contains(&name) {
             suite_env.push((name.to_string(), text.clone()));
         }
@@ -133,32 +172,21 @@ pub fn run(proc: &dyn Proc, clock: &dyn Clock, host: &dyn HostFs, input: &RunInp
         share,
         quick,
         suite_env: &suite_env,
+        python: std::cell::Cell::new(None),
     };
-    let mut out = Out::default();
-    let stopped = sections(&ctx, &mut out);
-    let mut stdout = loaded.stdout;
-    for item in out.report.items() {
-        stdout.extend_from_slice(Report::render_item(item).as_bytes());
+    if let Some(code) = sections(&ctx, out) {
+        return code;
     }
-    let mut stderr = loaded.stderr;
-    stderr.extend_from_slice(&out.stderr);
-    if let Some(code) = stopped {
-        Outcome { stdout, stderr, code }
-    } else {
-        stdout.extend_from_slice(out.report.render_summary().as_bytes());
-        Outcome { stdout, stderr, code: out.report.exit_code() }
-    }
+    out.raw_stdout(out.report.render_summary().as_bytes());
+    out.report.exit_code()
 }
 
 /// The profile to check: the one named, else the only one deployed.
-fn choose_profile(host: &dyn HostFs, share: &str, named: &str) -> Result<String, Outcome> {
+fn choose_profile(host: &dyn HostFs, share: &str, named: &str) -> Result<String, (String, i32)> {
     // Validated before it reaches a `python3 -c` string in the bash. An empty value
     // does not match: the unset case falls through to the enumeration below.
     if !named.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
-        return Err(refusal(
-            &format!("maintainer-doctor: '{named}' is not a plain profile name\n"),
-            64,
-        ));
+        return Err((format!("maintainer-doctor: '{named}' is not a plain profile name\n"), 64));
     }
     if !named.is_empty() {
         return Ok(named.to_string());
@@ -167,8 +195,8 @@ fn choose_profile(host: &dyn HostFs, share: &str, named: &str) -> Result<String,
     match found.len() {
         1 => Ok(found[0].clone()),
         0 => Ok("(none deployed)".to_string()),
-        n => Err(refusal(
-            &format!(
+        n => Err((
+            format!(
                 "maintainer-doctor: {n} profiles are deployed ({}).\n                   Set MAINTAINER_PROFILE to say which one to check.\n",
                 found.join(" ")
             ),
@@ -178,10 +206,10 @@ fn choose_profile(host: &dyn HostFs, share: &str, named: &str) -> Result<String,
 }
 
 /// One check that may end the run or the section.
-type Step<'a> = &'a dyn Fn(&Ctx<'_>, &mut Out) -> Result<(), Stop>;
+type Step<'a> = &'a dyn Fn(&Ctx<'_>, &mut Out<'_>) -> Result<(), Stop>;
 
 /// Every section in order. `Some(code)` when the shell ended early.
-fn sections(ctx: &Ctx<'_>, out: &mut Out) -> Option<i32> {
+fn sections(ctx: &Ctx<'_>, out: &mut Out<'_>) -> Option<i32> {
     deployment(ctx, out);
     let steps: [Step; 11] = [
         &profile_and_containment,
@@ -225,6 +253,9 @@ fn sections(ctx: &Ctx<'_>, out: &mut Out) -> Option<i32> {
             Ok(()) | Err(Stop::AbortSection) => {}
             Err(Stop::Exit(code)) => return Some(code),
         }
+        if out.closed() {
+            return Some(141);
+        }
     }
     None
 }
@@ -257,5 +288,36 @@ impl Clock for SystemClock {
 
     fn sleep(&self, duration: std::time::Duration) {
         std::thread::sleep(duration);
+    }
+}
+
+/// A `Proc` that notes every program it could not find, one name per line, in the
+/// file it was given. The bash tool learns of a missing tool from the shell's
+/// "command not found" handler, which the test harness hooks; this is the same
+/// record for the Rust program (`MAINTAINER_DOCTOR_MISSING_LOG`, a test hook).
+pub struct NotingProc<'a> {
+    inner: &'a dyn Proc,
+    log: PathBuf,
+}
+
+impl<'a> NotingProc<'a> {
+    #[must_use]
+    pub fn new(inner: &'a dyn Proc, log: impl Into<PathBuf>) -> Self {
+        Self { inner, log: log.into() }
+    }
+}
+
+impl Proc for NotingProc<'_> {
+    fn run(&self, spec: &mx_ports::ProcSpec) -> Result<mx_ports::ProcOutput, mx_ports::ProcError> {
+        let result = self.inner.run(spec);
+        if let Err(mx_ports::ProcError::NotFound { program }) = &result {
+            use std::io::Write;
+            if let Ok(mut file) =
+                std::fs::OpenOptions::new().create(true).append(true).open(&self.log)
+            {
+                drop(writeln!(file, "{program}"));
+            }
+        }
+        result
     }
 }

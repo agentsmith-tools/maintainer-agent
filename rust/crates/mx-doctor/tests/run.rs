@@ -89,7 +89,7 @@ fn an_unset_home_ends_the_run_with_the_unbound_variable_status() {
     let clock = FakeClock::at(NOW, &log);
     let bare = RunInput { args: vec![], vars: vec![], tree: PathBuf::from("/tree") };
     let outcome = run(&proc, &clock, &FakeHost::new(), &bare);
-    assert_eq!(outcome.code, 127);
+    assert_eq!(outcome.code, 1);
     assert_eq!(text(&outcome.stderr), "maintainer-doctor: line 12: HOME: unbound variable\n");
 }
 
@@ -276,5 +276,90 @@ fn with_no_profile_deployed_the_report_names_none_deployed_and_goes_on() {
         "{}",
         text(&outcome.stdout)
     );
+    drop(std::fs::remove_dir_all(&dir));
+}
+
+/// A real process adapter that records the environment of every call.
+struct Spy {
+    inner: RealProc,
+    specs: std::sync::Mutex<Vec<mx_ports::ProcSpec>>,
+}
+
+impl mx_ports::Proc for Spy {
+    fn run(&self, spec: &mx_ports::ProcSpec) -> Result<mx_ports::ProcOutput, mx_ports::ProcError> {
+        self.specs.lock().unwrap().push(spec.clone());
+        self.inner.run(spec)
+    }
+}
+
+#[test]
+fn the_profile_child_sees_the_caller_s_variables_but_never_the_eight_that_start_or_change_a_shell()
+{
+    let dir = scratch("envnames");
+    let home = dir.join("home");
+    let share = home.join(".local/share/maintainer");
+    std::fs::create_dir_all(share.join("profiles/p")).unwrap();
+    std::fs::create_dir_all(dir.join("tree/lib")).unwrap();
+    std::fs::write(dir.join("tree/lib/profile.sh"), "").unwrap();
+    std::fs::write(
+        dir.join("tree/lib/defaults.env"),
+        "DENY_WALL_MIN_RULES=100\nRED_GRACE_HOURS=6\nDOCTOR_RUN_LIMIT=40\nDOCTOR_LEASE_HOURS=12\n",
+    )
+    .unwrap();
+    std::fs::write(share.join("profiles/p/profile.env"), "").unwrap();
+    let path = bash_only_path(&dir);
+    let spy = Spy {
+        inner: RealProc::new(path.as_os_str(), Vec::new()),
+        specs: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut vars = vec![
+        ("HOME".to_string(), home.display().to_string()),
+        ("PATH".to_string(), path.display().to_string()),
+        ("AMBIENT_VALUE".to_string(), "kept".to_string()),
+    ];
+    let excluded = ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "LC_ALL"];
+    vars.extend(excluded.iter().map(|n| ((*n).to_string(), "x".to_string())));
+    let outcome = run(
+        &spy,
+        &SystemClock,
+        &RealHost::new(),
+        &RunInput { args: vec!["--quick".into()], vars, tree: dir.join("tree") },
+    );
+    assert!(outcome.code == 0 || outcome.code == 1);
+    let specs = spy.specs.lock().unwrap();
+    let child = specs
+        .iter()
+        .find(|s| s.argv.as_slice().get(2).is_some_and(|a| a.contains("compgen")))
+        .unwrap();
+    let names: Vec<&str> = child.env.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"AMBIENT_VALUE"), "{names:?}");
+    for bad in excluded {
+        assert!(!names.contains(&bad), "{bad} reached the profile child: {names:?}");
+    }
+    assert!(!names.contains(&"PATH"), "PATH belongs to the adapter");
+    drop(specs);
+    drop(std::fs::remove_dir_all(&dir));
+}
+
+#[test]
+fn a_program_that_could_not_be_found_is_noted_by_name_and_other_calls_are_not() {
+    let dir = scratch("noting");
+    let log = dir.join("missing.log");
+    let script = ScriptProc::default();
+    script.missing(&["gh", "auth", "token"]);
+    script.on(&["git", "status"], 0, "");
+    let noting = mx_doctor::NotingProc::new(&script, &log);
+    let found = mx_ports::Proc::run(
+        &noting,
+        &mx_ports::ProcSpec::command("git", ["status"], std::time::Duration::from_secs(1)),
+    );
+    assert!(found.is_ok());
+    assert!(!log.exists(), "a found program writes nothing");
+    let lost = mx_ports::Proc::run(
+        &noting,
+        &mx_ports::ProcSpec::command("gh", ["auth", "token"], std::time::Duration::from_secs(1)),
+    );
+    assert!(lost.is_err());
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "gh\n");
     drop(std::fs::remove_dir_all(&dir));
 }

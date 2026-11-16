@@ -111,7 +111,7 @@ pub fn repository(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop> {
             Some(call) if call.ok() => call.text(),
             _ => "0".to_string(),
         };
-        out.report.extend(decide_repo(&RepoFacts { dirty, ahead }));
+        out.extend(decide_repo(&RepoFacts { dirty, ahead }));
     } else {
         out.add(Item::fail(
             format!("no repository at {r}"),
@@ -131,7 +131,14 @@ fn main_runs(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop> {
         return Ok(());
     }
     let grace = ctx.settings.need("RED_GRACE_HOURS", 185, out)?.to_string();
-    let limit_text = ctx.settings.need("DOCTOR_RUN_LIMIT", 186, out)?.to_string();
+    // The expansion sits inside the `$(gh run list ...)` of the bash, so an unset
+    // limit kills only that substitution: the doctor warns and goes on (line 187).
+    let limit_text = if ctx.settings.is_set("DOCTOR_RUN_LIMIT") {
+        Some(ctx.settings.get("DOCTOR_RUN_LIMIT").to_string())
+    } else {
+        out.warn_text("maintainer-doctor: line 187: DOCTOR_RUN_LIMIT: unbound variable\n");
+        None
+    };
     let unknown = || {
         Item::warn(
             format!(
@@ -140,30 +147,37 @@ fn main_runs(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop> {
             format!("gh run list --repo {slug} --branch main"),
         )
     };
-    let listed = ctx.run(
-        &[
-            "gh",
-            "run",
-            "list",
-            "--repo",
-            slug,
-            "--branch",
-            "main",
-            "--event",
-            "push",
-            "--limit",
-            &limit_text,
-            "--json",
-            "workflowName,status,conclusion,createdAt,url",
-        ],
-        limit::GH,
-    );
+    let listed = limit_text.as_deref().and_then(|limit_text| {
+        ctx.run(
+            &[
+                "gh",
+                "run",
+                "list",
+                "--repo",
+                slug,
+                "--branch",
+                "main",
+                "--event",
+                "push",
+                "--limit",
+                limit_text,
+                "--json",
+                "workflowName,status,conclusion,createdAt,url",
+            ],
+            limit::GH,
+        )
+    });
     let Some(call) = listed.filter(crate::ctx::Call::ok) else {
         out.add(unknown());
         return Ok(());
     };
     let now = i64::try_from(ctx.clock.now_unix()).unwrap_or(0);
-    let verdicts = verdicts(&call.stdout, &grace, now).unwrap_or_else(|_| "unreadable".to_string());
+    // Without python3 the snippet fails, which reads as unreadable.
+    let verdicts = if ctx.python_available() {
+        verdicts(&call.stdout, &grace, now).unwrap_or_else(|_| "unreadable".to_string())
+    } else {
+        "unreadable".to_string()
+    };
     if verdicts == "unreadable" {
         out.add(unknown());
     } else if verdicts.is_empty() {
@@ -181,6 +195,23 @@ fn main_runs(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop> {
         }
     }
     Ok(())
+}
+
+/// A `createdAt` as Python holds it: two texts compare, two numbers compare, and a
+/// text with a number is a `TypeError`.
+enum Created {
+    Text(String),
+    Number(f64),
+}
+
+impl Created {
+    fn newer_than(&self, other: &Self) -> Result<bool, Crash> {
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => Ok(a > b),
+            (Self::Number(a), Self::Number(b)) => Ok(a > b),
+            _ => Err(Crash),
+        }
+    }
 }
 
 /// The key a workflow is filed under.
@@ -221,8 +252,15 @@ pub fn verdicts(runs: &[u8], grace: &str, now: i64) -> Result<String, Crash> {
     let Some(list) = value.as_array().filter(|list| !list.is_empty()) else {
         return Ok("unreadable".to_string());
     };
-    let created = |run: &Value| -> Result<String, Crash> {
-        run.get("createdAt").and_then(Value::as_str).map(str::to_string).ok_or(Crash)
+    let created = |run: &Value| -> Result<Created, Crash> {
+        match run.get("createdAt") {
+            Some(Value::String(text)) => Ok(Created::Text(text.clone())),
+            Some(found @ (Value::Number(_) | Value::Bool(_))) => Ok(Created::Number(match found {
+                Value::Bool(flag) => f64::from(u8::from(*flag)),
+                other => other.as_f64().unwrap_or(f64::NAN),
+            })),
+            _ => Err(Crash),
+        }
     };
     // Python keys the latest run by `workflowName or "?"`: a text, or a number
     // (`True` is the number 1). A list or dict is unhashable, and a text and a
@@ -238,7 +276,7 @@ pub fn verdicts(runs: &[u8], grace: &str, now: i64) -> Result<String, Crash> {
             Some(_) => return Err(Crash),
         };
         if let Some(slot) = latest.iter_mut().find(|(existing, _)| *existing == key) {
-            if created(run)? > created(slot.1)? {
+            if created(run)?.newer_than(&created(slot.1)?)? {
                 slot.1 = run;
             }
         } else {
@@ -260,7 +298,8 @@ pub fn verdicts(runs: &[u8], grace: &str, now: i64) -> Result<String, Crash> {
         if !completed || !failed {
             continue;
         }
-        let at = pyval::iso_epoch(&created(run)?).ok_or(Crash)?;
+        let Created::Text(stamp) = created(run)? else { return Err(Crash) };
+        let at = pyval::iso_epoch(&stamp).ok_or(Crash)?;
         #[allow(clippy::cast_precision_loss)]
         let age = (now as f64 - at) / 3600.0;
         let grace = text::py_float(grace).ok_or(Crash)?;

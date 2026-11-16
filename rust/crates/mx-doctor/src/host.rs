@@ -12,7 +12,24 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+
+/// An I/O error as the C library words it: "Permission denied", with Rust's
+/// " (os error 13)" left off.
+fn reason(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    match text.rfind(" (os error ") {
+        Some(at) => text[..at].to_string(),
+        None => text,
+    }
+}
+
+/// The path a string made by `text::lossless` names.
+fn os(path: &str) -> PathBuf {
+    PathBuf::from(OsStr::from_bytes(&crate::text::to_bytes(path)))
+}
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// What a path is.
@@ -186,7 +203,7 @@ fn read_ids() -> Option<Ids> {
 
 impl HostFs for RealHost {
     fn stat(&self, path: &str) -> Stat {
-        let Ok(meta) = std::fs::metadata(path) else { return Stat::missing() };
+        let Ok(meta) = std::fs::metadata(os(path)) else { return Stat::missing() };
         let kind = if meta.is_dir() {
             Kind::Dir
         } else if meta.is_file() {
@@ -203,7 +220,7 @@ impl HostFs for RealHost {
     }
 
     fn read(&self, path: &str) -> Fact<Vec<u8>> {
-        match std::fs::read(path) {
+        match std::fs::read(os(path)) {
             Ok(bytes) => Fact::Known(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Fact::Absent,
             Err(error) => Fact::Unreadable(error.to_string()),
@@ -211,17 +228,17 @@ impl HostFs for RealHost {
     }
 
     fn list(&self, path: &str) -> Fact<Vec<String>> {
-        match std::fs::metadata(path) {
+        match std::fs::metadata(os(path)) {
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => return Fact::Absent,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Fact::Absent,
             Err(error) => return Fact::Unreadable(error.to_string()),
         }
-        match std::fs::read_dir(path) {
+        match std::fs::read_dir(os(path)) {
             Ok(entries) => {
                 let mut names: Vec<String> = entries
                     .filter_map(Result::ok)
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .map(|entry| crate::text::lossless(entry.file_name().as_bytes()))
                     .collect();
                 names.sort();
                 Fact::Known(names)
@@ -244,7 +261,8 @@ impl HostFs for RealHost {
             }
         }
         let mut count = 0;
-        let root_path = Path::new(root);
+        let root_path = os(root);
+        let root_path = root_path.as_path();
         // `find` starts at the root itself, which is a directory when it is one
         // (a link given on the command line is not followed by default).
         if std::fs::symlink_metadata(root_path).is_ok_and(|meta| meta.is_dir()) {
@@ -259,10 +277,10 @@ impl HostFs for RealHost {
     fn scan_for(&self, roots: &[String], patterns: &[Vec<u8>]) -> Vec<String> {
         let mut found = Vec::new();
         for root in roots {
-            let Ok(meta) = std::fs::metadata(root) else { continue };
+            let Ok(meta) = std::fs::metadata(os(root)) else { continue };
             if meta.is_dir() {
                 scan_dir(root, patterns, &mut found);
-            } else if meta.is_file() && file_matches(Path::new(root), patterns) {
+            } else if meta.is_file() && file_matches(&os(root), patterns) {
                 found.push(root.clone());
             }
         }
@@ -287,34 +305,34 @@ impl HostFs for RealHost {
             let path = format!("{}/tmp.{suffix}", base.trim_end_matches('/'));
             let mut builder = std::fs::DirBuilder::new();
             std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            match builder.create(&path) {
+            match builder.create(os(&path)) {
                 Ok(()) => return Ok(path),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    last = error.to_string();
+                    last = reason(&error);
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(reason(&error)),
             }
         }
         Err(last)
     }
 
     fn make_dirs(&self, path: &str) -> Result<(), String> {
-        std::fs::create_dir_all(path).map_err(|error| error.to_string())
+        std::fs::create_dir_all(os(path)).map_err(|error| reason(&error))
     }
 
     fn write(&self, path: &str, contents: &[u8]) -> Result<(), String> {
-        std::fs::write(path, contents).map_err(|error| error.to_string())
+        std::fs::write(os(path), contents).map_err(|error| error.to_string())
     }
 
     fn remove_tree(&self, path: &str) {
-        drop(std::fs::remove_dir_all(path));
+        drop(std::fs::remove_dir_all(os(path)));
     }
 }
 
 fn scan_dir(dir: &str, patterns: &[Vec<u8>], found: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(os(dir)) else { return };
     for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = crate::text::lossless(entry.file_name().as_bytes());
         let shown =
             if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") };
         let Ok(kind) = entry.file_type() else { continue };
@@ -326,9 +344,44 @@ fn scan_dir(dir: &str, patterns: &[Vec<u8>], found: &mut Vec<String>) {
     }
 }
 
+/// How much of a file the scan holds at once. A state directory can hold a
+/// log of many gigabytes, and the Claude transcripts of a repository grow without
+/// bound, so a file is read in pieces, as `grep` does.
+pub const SCAN_CHUNK: usize = 64 * 1024;
+
 fn file_matches(path: &Path, patterns: &[Vec<u8>]) -> bool {
-    let Ok(bytes) = std::fs::read(path) else { return false };
-    contains_any(&bytes, patterns)
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    stream_contains(file, patterns, SCAN_CHUNK).unwrap_or(false)
+}
+
+/// True when the bytes of `reader` hold any pattern, reading `chunk` bytes at a
+/// time. The last `longest pattern - 1` bytes are kept between reads, so a
+/// pattern that straddles two reads is found. An empty pattern matches any
+/// non-empty input. A read error ends the search with that error (a match found
+/// before it is still a match).
+pub fn stream_contains(
+    mut reader: impl std::io::Read,
+    patterns: &[Vec<u8>],
+    chunk: usize,
+) -> std::io::Result<bool> {
+    let keep = patterns.iter().map(Vec::len).max().unwrap_or(0).saturating_sub(1);
+    let mut window: Vec<u8> = Vec::new();
+    let mut buffer = vec![0u8; chunk.max(1)];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(false),
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        window.extend_from_slice(&buffer[..read]);
+        if contains_any(&window, patterns) {
+            return Ok(true);
+        }
+        if window.len() > keep {
+            window.drain(..window.len() - keep);
+        }
+    }
 }
 
 /// True when `bytes` holds any pattern. An empty pattern matches any non-empty text.
@@ -362,6 +415,7 @@ pub struct FakeHost {
     removed: Mutex<Vec<String>>,
     read_only: Mutex<Vec<String>>,
     temp_dir_fails: Mutex<bool>,
+    make_dirs_fails: Mutex<Option<String>>,
 }
 
 impl FakeHost {
@@ -404,6 +458,11 @@ impl FakeHost {
     /// Makes `make_temp_dir` fail, as `mktemp -d` does on a full or missing temporary directory.
     pub fn fail_temp_dir(&self) {
         *Self::lock(&self.temp_dir_fails) = true;
+    }
+
+    /// Makes `make_dirs` fail with `reason`, as `mkdir -p` does where it may not write.
+    pub fn fail_make_dirs(&self, reason: &str) {
+        *Self::lock(&self.make_dirs_fails) = Some(reason.to_string());
     }
 
     /// Takes the write permission away from a path.
@@ -537,6 +596,9 @@ impl HostFs for FakeHost {
     }
 
     fn make_dirs(&self, path: &str) -> Result<(), String> {
+        if let Some(reason) = Self::lock(&self.make_dirs_fails).clone() {
+            return Err(reason);
+        }
         self.dir(path);
         Ok(())
     }

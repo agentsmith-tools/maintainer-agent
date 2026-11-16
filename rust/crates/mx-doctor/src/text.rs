@@ -17,15 +17,61 @@ pub fn strip_trailing_newlines(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-/// `$(...)` as text. Bytes that are not UTF-8 become U+FFFD: a path or a
-/// message with such bytes is the one place the port differs (decision P1I-9).
+/// The first private-use character of the escape for a byte that is not UTF-8:
+/// byte `b` (0x80 to 0xFF) is `char(0xF700 + b)`. This is the idea of Python's
+/// `surrogateescape`, so a file name that is not UTF-8 survives a trip through a
+/// `String` and prints as the bytes it had (decision P1I-7).
+const ESCAPE_BASE: u32 = 0xF700;
+
+/// Bytes as text, losing none: bytes that are not UTF-8 become escape characters.
+#[must_use]
+pub fn lossless(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                out.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let good = error.valid_up_to();
+                out.push_str(std::str::from_utf8(&rest[..good]).unwrap_or(""));
+                let bad = error.error_len().unwrap_or(rest.len() - good);
+                for byte in &rest[good..good + bad] {
+                    out.push(char::from_u32(ESCAPE_BASE + u32::from(*byte)).unwrap_or('\u{FFFD}'));
+                }
+                rest = &rest[good + bad..];
+            }
+        }
+    }
+    out
+}
+
+/// The bytes a string made by [`lossless`] stood for.
+#[must_use]
+pub fn to_bytes(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let code = u32::from(ch);
+        if (ESCAPE_BASE + 0x80..=ESCAPE_BASE + 0xFF).contains(&code) {
+            out.push(u8::try_from(code - ESCAPE_BASE).unwrap_or(0));
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
+/// `$(...)` as text, with no byte lost.
 #[must_use]
 pub fn captured(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(strip_trailing_newlines(bytes)).into_owned()
+    lossless(strip_trailing_newlines(bytes))
 }
 
 /// The words an unquoted `$VAR` becomes: split on spaces, tabs and newlines.
-/// Glob characters are not expanded (decision P1I-8).
+/// Glob characters are not expanded (decision P1I-7).
 #[must_use]
 pub fn ifs_words(text: &str) -> Vec<&str> {
     text.split([' ', '\t', '\n']).filter(|word| !word.is_empty()).collect()

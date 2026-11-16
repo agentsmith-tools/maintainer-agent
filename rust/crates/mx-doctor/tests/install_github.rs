@@ -107,7 +107,7 @@ fn uname_is_asked_only_where_a_missing_run_instance_script_needs_it() {
 
 // --- Profile and containment ----------------------------------------------------
 
-fn wall_lines(rig: &Rig) -> (mx_doctor::ctx::Out, Result<(), mx_doctor::ctx::Stop>) {
+fn wall_lines(rig: &Rig) -> (mx_doctor::ctx::Out<'static>, Result<(), mx_doctor::ctx::Stop>) {
     let mut o = out();
     let r = install::profile_and_containment(&rig.ctx(), &mut o);
     (o, r)
@@ -160,7 +160,7 @@ fn an_unset_floor_ends_the_run_with_the_unbound_variable_status() {
     rig.settings = mx_doctor::ctx::Settings::new(std::collections::BTreeMap::new());
     healthy_profile(&rig);
     let (o, r) = wall_lines(&rig);
-    assert_eq!(r, Err(mx_doctor::ctx::Stop::Exit(127)));
+    assert_eq!(r, Err(mx_doctor::ctx::Stop::Exit(1)));
     assert_eq!(
         String::from_utf8_lossy(&o.stderr),
         "maintainer-doctor: line 92: DENY_WALL_MIN_RULES: unbound variable\n"
@@ -358,7 +358,7 @@ fn a_command_that_does_not_resolve_fails_and_the_others_still_print() {
 
 // --- GitHub identity and posting ---------------------------------------------------
 
-fn identity(who: Option<(i32, &str)>, want: &str) -> mx_doctor::ctx::Out {
+fn identity(who: Option<(i32, &str)>, want: &str) -> mx_doctor::ctx::Out<'static> {
     let rig = Rig::new(&[("GH_ACCOUNT", want)]);
     rig.proc.have("gh", "/bin/gh");
     if let Some((code, text)) = who {

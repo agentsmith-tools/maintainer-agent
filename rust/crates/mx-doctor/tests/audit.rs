@@ -32,7 +32,7 @@ fn audit_rig(pairs: &[(&str, &str)]) -> Rig {
     rig
 }
 
-fn run_audit(rig: &Rig) -> (mx_doctor::ctx::Out, Result<(), Stop>) {
+fn run_audit(rig: &Rig) -> (mx_doctor::ctx::Out<'static>, Result<(), Stop>) {
     let mut o = out();
     let r = audit::audit_trail(&rig.ctx(), &mut o);
     (o, r)

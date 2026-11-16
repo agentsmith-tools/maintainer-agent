@@ -33,4 +33,4 @@ pub mod report;
 pub mod run;
 pub mod text;
 
-pub use run::{Outcome, RunInput, SystemClock, run};
+pub use run::{NotingProc, Outcome, RunInput, SystemClock, run, run_live};

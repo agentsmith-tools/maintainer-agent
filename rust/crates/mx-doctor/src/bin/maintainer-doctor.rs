@@ -6,11 +6,12 @@
 //!
 //! A write to a closed pipe ends the program with status 141, which is what a
 //! shell reports for a process killed by `SIGPIPE`. Restoring the default signal
-//! action needs `unsafe`, which this workspace forbids (decision P1I-13).
+//! action needs `unsafe`, which this workspace forbids (decision P1I-9).
 
+use mx_doctor::ctx::Stream;
 use mx_doctor::host::RealHost;
-use mx_doctor::{RunInput, SystemClock, run};
-use mx_ports::RealProc;
+use mx_doctor::{NotingProc, RunInput, SystemClock, run_live};
+use mx_ports::{Proc, RealProc};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -83,18 +84,32 @@ fn main() -> ExitCode {
             exe.parent().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf)
         })
         .unwrap_or_default();
+    let missing_log = lookup("MAINTAINER_DOCTOR_MISSING_LOG");
     let input = RunInput { args: std::env::args().skip(1).collect(), vars, tree };
-    let outcome = run(&proc, &SystemClock, &RealHost::new(), &input);
-    let wrote = std::io::stdout().lock().write_all(&outcome.stdout);
-    if let Err(error) = wrote {
-        return if error.kind() == std::io::ErrorKind::BrokenPipe {
-            ExitCode::from(141)
-        } else {
-            ExitCode::from(1)
-        };
-    }
-    drop(std::io::stderr().lock().write_all(&outcome.stderr));
-    ExitCode::from(u8::try_from(outcome.code & 0xff).unwrap_or(1))
+    let noting;
+    let proc_ref: &dyn Proc = match missing_log {
+        Some(log) if !log.is_empty() => {
+            noting = NotingProc::new(&proc, log);
+            &noting
+        }
+        _ => &proc,
+    };
+    // Every piece of output is written and flushed as it is made, so a capture of
+    // both streams interleaves as the bash does and a killed run keeps what it had
+    // printed. A closed standard output ends the run with 141.
+    let mut emit = |stream: Stream, bytes: &[u8]| match stream {
+        Stream::Stdout => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(bytes).is_ok() && stdout.flush().is_ok()
+        }
+        Stream::Stderr => {
+            let mut stderr = std::io::stderr().lock();
+            drop(stderr.write_all(bytes));
+            true
+        }
+    };
+    let code = run_live(proc_ref, &SystemClock, &RealHost::new(), &input, &mut emit);
+    ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1))
 }
 
 /// `readlink -f` of the program as it was invoked: a path with a slash is taken

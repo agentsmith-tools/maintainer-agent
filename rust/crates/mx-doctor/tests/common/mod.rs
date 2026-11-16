@@ -150,8 +150,10 @@ pub fn settings(pairs: &[(&str, &str)]) -> Settings {
 impl Rig {
     pub fn new(pairs: &[(&str, &str)]) -> Self {
         let log = EffectLog::new();
+        let proc = ScriptProc::default();
+        proc.have("python3", "/usr/bin/python3");
         Self {
-            proc: ScriptProc::default(),
+            proc,
             host: FakeHost::new(),
             clock: FakeClock::at(NOW, &log),
             env: Env {
@@ -178,6 +180,7 @@ impl Rig {
             share: SHARE.to_string(),
             quick: self.quick,
             suite_env: &self.suite_env,
+            python: std::cell::Cell::new(None),
         }
     }
 
@@ -205,7 +208,7 @@ pub fn lines(report: &Report) -> Vec<String> {
         .collect()
 }
 
-pub fn out() -> Out {
+pub fn out() -> Out<'static> {
     Out::default()
 }
 

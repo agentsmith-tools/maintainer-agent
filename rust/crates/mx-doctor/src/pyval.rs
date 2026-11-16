@@ -1,10 +1,10 @@
 //! The parts of Python's `json` and `datetime` the doctor's four `python3 -c`
 //! snippets depend on, so the Rust reads a file as Python read it.
 //!
-//! One gap is documented, not closed (decision P1I-10): Python's `json` accepts
-//! the literals `NaN`, `Infinity` and `-Infinity` and lone surrogate escapes,
-//! and `serde_json` does not. A file holding one reads as unreadable here, where
-//! Python would go on.
+//! Decision P1I-5. One gap is documented, not closed: Python's `json` accepts lone
+//! surrogate escapes, and `serde_json` does not, so a file holding one reads as
+//! unreadable here where Python would go on. The words `NaN`, `Infinity` and
+//! `-Infinity` are read as Python reads them.
 
 use serde_json::Value;
 use std::fmt::Write;
@@ -15,10 +15,64 @@ use std::fmt::Write;
 pub struct Crash;
 
 /// Parses bytes as `json.load` on a UTF-8 text file would: invalid UTF-8 is an
-/// error, as `UnicodeDecodeError` is.
+/// error, as `UnicodeDecodeError` is. Python also reads the bare words `NaN`,
+/// `Infinity` and `-Infinity`; they are rewritten before parsing, `NaN` to the
+/// string [`NAN_MARK`] and the infinities to `1e999` and `-1e999`, which every
+/// reader here treats as Python does.
 pub fn parse(bytes: &[u8]) -> Result<Value, Crash> {
     let text = std::str::from_utf8(bytes).map_err(|_| Crash)?;
-    serde_json::from_str(text).map_err(|_| Crash)
+    match serde_json::from_str(text) {
+        Ok(value) => Ok(value),
+        Err(_) if text.contains("NaN") || text.contains("Infinity") => {
+            serde_json::from_str(&rewrite_special_numbers(text)).map_err(|_| Crash)
+        }
+        Err(_) => Err(Crash),
+    }
+}
+
+/// What the JSON word `NaN` is read as.
+pub const NAN_MARK: &str = "\u{0}NaN";
+
+fn rewrite_special_numbers(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut in_string = false;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if in_string {
+            let ch = text[at..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            at += ch.len_utf8();
+            if ch == '\\' {
+                if let Some(next) = text[at..].chars().next() {
+                    out.push(next);
+                    at += next.len_utf8();
+                }
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        let rest = &text[at..];
+        if rest.starts_with("NaN") {
+            out.push_str("\"\\u0000NaN\"");
+            at += 3;
+        } else if rest.starts_with("Infinity") {
+            out.push_str("1e999");
+            at += 8;
+        } else {
+            if byte == b'"' {
+                in_string = true;
+            }
+            // Multi-byte characters only occur inside strings, handled above, or
+            // are errors the parser reports; copy the whole character.
+            let ch = rest.chars().next().unwrap_or(' ');
+            out.push(ch);
+            at += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// `len(x)` of a JSON value: a list, a dict or a string. Anything else has no length.
@@ -60,6 +114,7 @@ pub fn truthy(value: &Value) -> bool {
 #[must_use]
 pub fn py_str(value: &Value) -> String {
     match value {
+        Value::String(text) if text == NAN_MARK => "nan".to_string(),
         Value::String(text) => text.clone(),
         other => py_repr(other),
     }
@@ -162,98 +217,186 @@ fn str_repr(text: &str) -> String {
 }
 
 /// `datetime.fromisoformat(text.replace("Z", "+00:00"))` as seconds since the
-/// epoch, for the forms GitHub and `date` produce: `YYYY-MM-DD` and `YYYYMMDD`
-/// dates, a `T` or space and `HH:MM[:SS[.f]]` (or `HHMM[SS[.f]]`), then a zone
-/// offset. A text with no offset is naive, and subtracting it from an aware
-/// time is a `TypeError`, so it is `None`, as is anything else Python rejects.
+/// epoch (Python 3.11 and later). A text with no zone offset is naive, and
+/// subtracting it from an aware time is a `TypeError`, so it is `None`, as is
+/// anything else Python rejects. Accepted forms: dates `YYYY-MM-DD`, `YYYYMMDD`,
+/// `YYYY-Www-D`, `YYYYWwwD` and `YYYY-Www`; one separator character; times `HH`,
+/// `HH:MM`, `HH:MM:SS`, `HHMM`, `HHMMSS` with a `.` or `,` fraction; `24:00:00`
+/// as the start of the next day; offsets `+HH`, `+HHMM`, `+HH:MM`, `+HH:MM:SS`
+/// (and without colons) with a fraction on the seconds.
 #[must_use]
 pub fn iso_epoch(text: &str) -> Option<f64> {
     let text = text.replace('Z', "+00:00");
+    if !text.is_ascii() {
+        return None;
+    }
     let b = text.as_bytes();
-    let digits = |s: &[u8]| -> Option<i64> {
+    let num = |s: &[u8]| -> Option<i64> {
         (!s.is_empty() && s.iter().all(u8::is_ascii_digit))
             .then(|| std::str::from_utf8(s).ok()?.parse().ok())
             .flatten()
     };
-    let (year, month, day, mut at) =
-        if b.len() >= 10 && b.get(4) == Some(&b'-') && b.get(7) == Some(&b'-') {
-            (digits(&b[0..4])?, digits(&b[5..7])?, digits(&b[8..10])?, 10)
-        } else if b.len() >= 8 {
-            (digits(&b[0..4])?, digits(&b[4..6])?, digits(&b[6..8])?, 8)
-        } else {
-            return None;
-        };
-    if b.len() <= at {
+    let (days, date_len) = parse_date(b, &num)?;
+    let rest = text.get(date_len + 1..)?;
+    if b.len() <= date_len {
         return None;
     }
-    at += 1; // any one character separates date and time
-    let rest = &text[at..];
     let split = rest.find(['+', '-']).unwrap_or(rest.len());
     let (clock, zone) = rest.split_at(split);
     if zone.is_empty() {
         return None;
     }
-    let cb = clock.as_bytes();
-    let (hh, mm, ss, frac) = if cb.get(2) == Some(&b':') {
-        let hh = digits(cb.get(0..2)?)?;
-        let mm = digits(cb.get(3..5)?)?;
-        let (ss, frac) = if cb.len() > 5 {
-            if cb.get(5) != Some(&b':') {
-                return None;
-            }
-            let sec = digits(cb.get(6..8)?)?;
-            let frac = match cb.get(8..) {
-                Some([]) | None => 0.0,
-                Some([b'.', f @ ..]) if !f.is_empty() && f.iter().all(u8::is_ascii_digit) => {
-                    format!("0.{}", std::str::from_utf8(f).ok()?).parse::<f64>().ok()?
-                }
-                _ => return None,
-            };
-            (sec, frac)
-        } else {
-            (0, 0.0)
-        };
-        (hh, mm, ss, frac)
+    let (hh, mm, ss, frac) = parse_clock(clock.as_bytes(), &num)?;
+    let (sign, off_secs, off_frac) = parse_zone(zone.as_bytes(), &num)?;
+    let (days, hh) = if hh == 24 {
+        if mm != 0 || ss != 0 || frac != 0.0 {
+            return None;
+        }
+        (days + 1, 0)
     } else {
-        let hh = digits(cb.get(0..2)?)?;
-        let mm = digits(cb.get(2..4)?)?;
-        let (ss, frac) = if cb.len() > 4 {
-            let sec = digits(cb.get(4..6)?)?;
-            let frac = match cb.get(6..) {
-                Some([]) | None => 0.0,
-                Some([b'.', f @ ..]) if !f.is_empty() && f.iter().all(u8::is_ascii_digit) => {
-                    format!("0.{}", std::str::from_utf8(f).ok()?).parse::<f64>().ok()?
-                }
-                _ => return None,
-            };
-            (sec, frac)
-        } else {
-            (0, 0.0)
-        };
-        (hh, mm, ss, frac)
+        (days, hh)
     };
-    let zb = zone.as_bytes();
-    let sign = if zb[0] == b'-' { -1 } else { 1 };
-    let zdigits: Vec<u8> = zone[1..].bytes().filter(|c| *c != b':').collect();
-    let (zh, zm) = match zdigits.len() {
-        2 => (digits(&zdigits)?, 0),
-        4 => (digits(&zdigits[0..2])?, digits(&zdigits[2..4])?),
-        _ => return None,
-    };
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hh > 23
-        || mm > 59
-        || ss > 59
-        || zh > 23
-        || zm > 59
-    {
+    if hh > 23 || mm > 59 || ss > 59 {
         return None;
     }
-    let days = days_from_civil(year, month, day);
-    let secs = days * 86_400 + hh * 3600 + mm * 60 + ss - sign * (zh * 3600 + zm * 60);
+    let secs = days * 86_400 + hh * 3600 + mm * 60 + ss - sign * off_secs;
     #[allow(clippy::cast_precision_loss)]
-    Some(secs as f64 + frac)
+    Some(secs as f64 + frac - (sign as f64) * off_frac)
+}
+
+type Num<'a> = &'a dyn Fn(&[u8]) -> Option<i64>;
+
+/// A date at the start of `b`: days since the epoch and the characters used.
+fn parse_date(b: &[u8], num: Num<'_>) -> Option<(i64, usize)> {
+    let year = num(b.get(0..4)?)?;
+    if year < 1 {
+        return None;
+    }
+    // Week dates.
+    let (week_at, extended) = if b.get(4) == Some(&b'-') { (5, true) } else { (4, false) };
+    if b.get(week_at) == Some(&b'W') {
+        let week = num(b.get(week_at + 1..week_at + 3)?)?;
+        let mut len = week_at + 3;
+        let mut dow = 1;
+        let day_at = if extended { len + 1 } else { len };
+        let has_day = if extended {
+            b.get(len) == Some(&b'-')
+        } else {
+            b.len() > len && b[len].is_ascii_digit()
+        };
+        if has_day {
+            dow = num(b.get(day_at..day_at + 1)?)?;
+            len = day_at + 1;
+        }
+        if !(1..=7).contains(&dow) {
+            return None;
+        }
+        let jan4 = days_from_civil(year, 1, 4);
+        let monday = jan4 - (jan4 + 3).rem_euclid(7);
+        let days = monday + (week - 1) * 7 + (dow - 1);
+        // week 53 only exists in a long year
+        if !(1..=53).contains(&week) || (week == 53 && civil_year(days + 3 - (dow - 1)) != year) {
+            return None;
+        }
+        return Some((days, len));
+    }
+    let (month, day, len) = if extended {
+        if b.get(7) != Some(&b'-') {
+            return None;
+        }
+        (num(b.get(5..7)?)?, num(b.get(8..10)?)?, 10)
+    } else {
+        (num(b.get(4..6)?)?, num(b.get(6..8)?)?, 8)
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + i64::from(leap),
+        _ => return None,
+    };
+    if !(1..=last).contains(&day) {
+        return None;
+    }
+    Some((days_from_civil(year, month, day), len))
+}
+
+/// The civil year a day count falls in.
+fn civil_year(days: i64) -> i64 {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let year = yoe + era * 400;
+    if mp >= 10 { year + 1 } else { year }
+}
+
+/// `HH`, `HH:MM`, `HH:MM:SS[.f]`, `HHMM`, `HHMMSS[.f]`: hours, minutes, seconds, fraction.
+fn parse_clock(c: &[u8], num: Num<'_>) -> Option<(i64, i64, i64, f64)> {
+    let hh = num(c.get(0..2)?)?;
+    let extended = c.get(2) == Some(&b':');
+    let mut at = 2;
+    let mut mm = 0;
+    let mut ss = 0;
+    if extended || c.len() > 2 {
+        at = if extended { 3 } else { 2 };
+        mm = num(c.get(at..at + 2)?)?;
+        at += 2;
+        if c.len() > at {
+            if extended {
+                if c.get(at) != Some(&b':') {
+                    return None;
+                }
+                at += 1;
+            }
+            ss = num(c.get(at..at + 2)?)?;
+            at += 2;
+        }
+    }
+    let frac = match c.get(at..) {
+        Some([]) | None => 0.0,
+        Some([b'.' | b',', f @ ..])
+            if !f.is_empty() && f.iter().all(u8::is_ascii_digit) && ss_present(c, at) =>
+        {
+            format!("0.{}", std::str::from_utf8(&f[..f.len().min(6)]).ok()?).parse::<f64>().ok()?
+        }
+        _ => return None,
+    };
+    Some((hh, mm, ss, frac))
+}
+
+/// A fraction is only valid after seconds.
+fn ss_present(c: &[u8], at: usize) -> bool {
+    at >= 6 || (at == 5 && c.get(2) != Some(&b':'))
+}
+
+/// `+HH[[:]MM[[:]SS[.f]]]`: the sign, the offset in whole seconds, and its fraction.
+fn parse_zone(z: &[u8], num: Num<'_>) -> Option<(i64, i64, f64)> {
+    let sign = if z.first() == Some(&b'-') { -1 } else { 1 };
+    let body: Vec<u8> = z[1..].iter().copied().filter(|ch| *ch != b':').collect();
+    let (digits, frac) = match body.iter().position(|ch| *ch == b'.' || *ch == b',') {
+        Some(p) => (&body[..p], Some(&body[p + 1..])),
+        None => (&body[..], None),
+    };
+    let (zh, zm, zs) = match digits.len() {
+        2 => (num(digits)?, 0, 0),
+        4 => (num(&digits[0..2])?, num(&digits[2..4])?, 0),
+        6 => (num(&digits[0..2])?, num(&digits[2..4])?, num(&digits[4..6])?),
+        _ => return None,
+    };
+    let frac = match frac {
+        Some(f) if digits.len() == 6 && !f.is_empty() && f.iter().all(u8::is_ascii_digit) => {
+            format!("0.{}", std::str::from_utf8(&f[..f.len().min(6)]).ok()?).parse::<f64>().ok()?
+        }
+        Some(_) => return None,
+        None => 0.0,
+    };
+    if zh > 23 || zm > 59 || zs > 59 {
+        return None;
+    }
+    Some((sign, zh * 3600 + zm * 60 + zs, frac))
 }
 
 /// Days since 1970-01-01 for a civil date (proleptic Gregorian).

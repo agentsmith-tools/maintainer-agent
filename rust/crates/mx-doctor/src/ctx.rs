@@ -10,7 +10,7 @@ use std::time::Duration;
 
 /// Time allowed to one external call. The bash has no limits; each limit is
 /// generous and a call that reaches it reads as a failure with status 124
-/// (decision P1I-7).
+/// (decision P1I-6).
 pub mod limit {
     use std::time::Duration;
     pub const QUICK: Duration = Duration::from_mins(1);
@@ -31,19 +31,75 @@ pub enum Stop {
     AbortSection,
 }
 
-/// The report and standard error, written as the checks run.
-#[derive(Debug, Default)]
-pub struct Out {
-    pub report: Report,
-    pub stderr: Vec<u8>,
+/// Which stream a piece of output belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
 }
 
-impl Out {
-    pub fn add(&mut self, item: Item) {
-        self.report.push(item);
+/// Where output goes the moment it is made. It returns false when the reader is
+/// gone (a closed pipe), and the run then ends with status 141.
+pub type Emit<'a> = &'a mut dyn FnMut(Stream, &[u8]) -> bool;
+
+/// The report and standard error, written as the checks run. With a live sink every
+/// finding and every diagnostic is handed on at once, in the order made, so a
+/// capture of both streams interleaves as the bash does; the copies kept here are
+/// for the tests.
+#[derive(Default)]
+pub struct Out<'a> {
+    pub report: Report,
+    pub stderr: Vec<u8>,
+    emit: Option<Emit<'a>>,
+    closed: bool,
+}
+
+impl<'a> Out<'a> {
+    /// An output that hands everything to `emit` as it is made.
+    pub fn live(emit: Emit<'a>) -> Self {
+        Self { emit: Some(emit), ..Self::default() }
     }
+
+    fn send(&mut self, stream: Stream, bytes: &[u8]) {
+        if let Some(emit) = self.emit.as_mut()
+            && !self.closed
+            && !emit(stream, bytes)
+        {
+            self.closed = true;
+        }
+    }
+
+    /// True once the reader of a live sink has gone.
+    #[must_use]
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+
+    pub fn add(&mut self, item: Item) {
+        let bytes = Report::render_bytes(&item);
+        self.report.push(item);
+        self.send(Stream::Stdout, &bytes);
+    }
+
+    /// Several findings, in order.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = Item>) {
+        for item in items {
+            self.add(item);
+        }
+    }
+
+    /// Standard output text that is not a finding (what a profile file printed).
+    pub fn raw_stdout(&mut self, bytes: &[u8]) {
+        self.send(Stream::Stdout, bytes);
+    }
+
     pub fn warn_text(&mut self, text: &str) {
-        self.stderr.extend_from_slice(text.as_bytes());
+        self.raw_stderr(&crate::text::to_bytes(text));
+    }
+
+    pub fn raw_stderr(&mut self, bytes: &[u8]) {
+        self.stderr.extend_from_slice(bytes);
+        self.send(Stream::Stderr, bytes);
     }
 }
 
@@ -58,7 +114,7 @@ pub struct Env {
 }
 
 /// The variables the profile resolved, by name. Values are text; a byte that is
-/// not UTF-8 becomes U+FFFD (decision P1I-9).
+/// not UTF-8 is kept as an escape character (decision P1I-7).
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     vars: BTreeMap<String, String>,
@@ -92,12 +148,12 @@ impl Settings {
     }
 
     /// `$NAME` under `set -u`: an unset variable ends the shell.
-    pub fn need(&self, name: &str, line: u32, out: &mut Out) -> Result<&str, Stop> {
+    pub fn need(&self, name: &str, line: u32, out: &mut Out<'_>) -> Result<&str, Stop> {
         if let Some(value) = self.vars.get(name) {
             Ok(value)
         } else {
             out.warn_text(&format!("maintainer-doctor: line {line}: {name}: unbound variable\n"));
-            Err(Stop::Exit(127))
+            Err(Stop::Exit(1))
         }
     }
 }
@@ -117,6 +173,8 @@ pub struct Ctx<'a> {
     /// Variables for the child bash that sources a verify suite: what the
     /// profile resolved, as the subshell of the bash doctor would see.
     pub suite_env: &'a [(String, String)],
+    /// Whether `python3` resolves, asked the first time a check needs it.
+    pub python: std::cell::Cell<Option<bool>>,
 }
 
 /// What a finished call left.
@@ -167,6 +225,19 @@ impl Ctx<'_> {
     pub fn command_v(&self, name: &str) -> Option<String> {
         let call = self.run(&["bash", "-c", "command -v \"$1\"", "_", name], limit::QUICK)?;
         call.ok().then(|| call.text())
+    }
+
+    /// True when `python3` resolves. The four snippets that read JSON were Python in
+    /// the bash, so a host without it makes each of them fail there; each check
+    /// that was a snippet asks this first and fails the way the bash did.
+    #[must_use]
+    pub fn python_available(&self) -> bool {
+        if let Some(known) = self.python.get() {
+            return known;
+        }
+        let found = self.command_v("python3").is_some();
+        self.python.set(Some(found));
+        found
     }
 
     /// `$(uname -s)`. Asked again at each place the bash asks, so the call log

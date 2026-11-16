@@ -38,6 +38,8 @@ REPO = os.path.abspath(os.path.join(RUST, ".."))
 
 C = "crates/mx-doctor/src/"
 
+PROFILE_TESTS = ["cargo", "test", "-p", "mx-profile", "--offline", "--locked", "--no-fail-fast", "--test", "load", "--test", "load_for_doctor"]
+
 # (id, category, file, old, new)
 MUTANTS = [
     ("thr-nested", "threshold", C + "install.rs", "if nested <= 2 {", "if nested < 2 {"),
@@ -62,14 +64,14 @@ MUTANTS = [
     ("msg-summary", "message", C + "report.rs", '{ok} ok, {warn} warning(s), {fail} failure(s)',
      '{ok} ok, {warn} warnings, {fail} failure(s)'),
     ("exit-fail", "exit-code", C + "report.rs", "i32::from(self.counts().2 != 0)", "i32::from(self.counts().2 == 0)"),
-    ("exit-unbound", "exit-code", C + "ctx.rs", "Err(Stop::Exit(127))", "Err(Stop::Exit(1))"),
-    ("exit-name", "exit-code", C + "run.rs", "            64,\n        ));", "            1,\n        ));"),
+    ("exit-unbound", "exit-code", C + "ctx.rs", "Err(Stop::Exit(1))", "Err(Stop::Exit(127))"),
+    ("exit-name", "exit-code", C + "run.rs", "is not a plain profile name\\n\"), 64));", "is not a plain profile name\\n\"), 1));"),
     ("order-audit", "ordering", C + "audit.rs", "    receipts_check(ctx, out, &st);\n    leases_check(ctx, out, &st)?;",
      "    leases_check(ctx, out, &st)?;\n    receipts_check(ctx, out, &st);"),
     ("order-sort-glob", "ordering", C + "run.rs", 'names.sort_by_key(|name| format!("{name}/profile.env"));',
      "names.sort();"),
-    ("order-leases", "ordering", C + "audit.rs", "forgotten_leases(&hours, &files, now)",
-     "{ let mut reversed = files; reversed.reverse(); forgotten_leases(&hours, &reversed, now) }"),
+    ("order-leases", "ordering", C + "audit.rs", "forgotten_leases(hours, &files, now)",
+     "{ let mut reversed = files; reversed.reverse(); forgotten_leases(hours, &reversed, now) }"),
     ("os-run-instance", "per-os", C + "install.rs", 'name == "run-instance.sh" && ctx.uname() != "Linux"',
      'name == "run-instance.sh"'),
     ("os-darwin-literal", "per-os", C + "hostchecks.rs", "line.windows(needle.len()).any(|w| w == needle)",
@@ -95,8 +97,8 @@ MUTANTS = [
     ("lease-string-int", "lease-boundary", C + "audit.rs", "Some(Value::String(text)) => text::py_int_text(text),",
      "Some(Value::String(_)) => None,"),
     ("stale-hours", "stale-run", C + "audit.rs", "(now - then) / 3600", "(now - then) / 3600 + 1"),
-    ("stale-newest", "stale-run", C + "github.rs", "if created(run)? > created(slot.1)? {",
-     "if created(run)? < created(slot.1)? {"),
+    ("stale-newest", "stale-run", C + "github.rs", "if created(run)?.newer_than(&created(slot.1)?)? {",
+     "if !created(run)?.newer_than(&created(slot.1)?)? {"),
     ("stale-completed", "stale-run", C + "github.rs", "if !completed || !failed {", "if !completed && !failed {"),
     ("stale-empty-list", "stale-run", C + "github.rs", ".filter(|list| !list.is_empty())", ".filter(|_| true)"),
     ("img-stamp", "image", C + "hostchecks.rs", "if recipe.stamp == recipe.hash {", "if recipe.stamp != recipe.hash {"),
@@ -114,12 +116,44 @@ MUTANTS = [
     ("txt-seconds-unit", "text", C + "text.rs", "rest.get(digits) == Some(&b's')", "rest.get(digits) == Some(&b'm')"),
     ("txt-dot-wildcard", "text", C + "text.rs", "*want == b'.' || line[at + i] == *want", "line[at + i] == *want"),
     ("txt-round-half", "text", C + "text.rs", 'format!("{value:.0}")', 'format!("{:.0}", value + 0.01)'),
-    ("py-zone-sign", "text", C + "pyval.rs", "- sign * (zh * 3600 + zm * 60)", "+ sign * (zh * 3600 + zm * 60)"),
+    ("py-zone-sign", "text", C + "pyval.rs", "- sign * off_secs;", "+ sign * off_secs;"),
     ("host-nested-root", "per-os", C + "host.rs",
      "if root_path.file_name().is_some_and(|base| names.iter().any(|name| base == *name)) {\n                count += 1;\n            }",
      ""),
     ("prof-ambient", "profile", C + "run.rs", '"HOME" && valid_name(name)', '"HOME" && false && valid_name(name)'),
+    # --- the review's fixes ---
+    ("rv-exit-home", "exit-code", C + "run.rs", 'HOME: unbound variable\\n", 1)', 'HOME: unbound variable\\n", 127)'),
+    ("rv-run-limit", "unbound", C + "github.rs", 'if ctx.settings.is_set("DOCTOR_RUN_LIMIT") {', "if true {"),
+    ("rv-lease-limit-line", "unbound", C + "audit.rs", "if found.is_empty() { 461 } else { 458 }", "if found.is_empty() { 440 } else { 458 }"),
+    ("rv-scan-overlap", "scan-stream", C + "host.rs", "max().unwrap_or(0).saturating_sub(1);", "max().unwrap_or(0).saturating_sub(2);"),
+    ("rv-scan-chunk", "scan-stream", C + "host.rs", "pub const SCAN_CHUNK: usize = 64 * 1024;", "pub const SCAN_CHUNK: usize = 1024 * 1024;"),
+    ("rv-py-wall", "python", C + "install.rs", "if ctx.python_available() { rule_count(contents) } else { None }", "rule_count(contents)"),
+    ("rv-py-runs", "python", C + "github.rs", "if ctx.python_available() {\n        verdicts(", "if true {\n        verdicts("),
+    ("rv-py-leases", "python", C + "audit.rs", "let read = if ctx.python_available() {", "let read = if true {"),
+    ("rv-py-reason", "python", C + "audit.rs", "let mut why = if ctx.python_available() {", "let mut why = if true {"),
+    ("rv-live-stdout", "stream", C + "ctx.rs", "self.send(Stream::Stdout, &bytes);", "let _ = &bytes;"),
+    ("rv-live-stderr", "stream", C + "ctx.rs", "        self.send(Stream::Stderr, bytes);", "        let _ = bytes;"),
+    ("rv-closed", "stream", C + "ctx.rs", "self.closed = true;", "self.closed = false;"),
+    ("rv-141", "exit-code", C + "run.rs", "if out.closed() { 141 } else { code }", "if out.closed() { 142 } else { code }"),
+    ("rv-bytes", "bytes", C + "text.rs", "char::from_u32(ESCAPE_BASE + u32::from(*byte)).unwrap_or('\\u{FFFD}')", "'\\u{FFFD}'"),
+    ("rv-mkdir-msg", "stderr", C + "hostchecks.rs", 'out.warn_text(&format!("mkdir: {why}\\n"));', ""),
+    ("rv-git-stderr", "stderr", C + "hostchecks.rs", "out.raw_stderr(&call.stderr);", ""),
+    ("rv-mktemp-msg", "stderr", C + "hostchecks.rs", '"mktemp: failed to create directory via template', '"mktemp: failed to make a directory via template'),
+    ("rv-sha256sum", "image", C + "hostchecks.rs", 'if present && ctx.command_v("sha256sum").is_some() =>', "if present =>"),
+    ("rv-nan", "json", C + "pyval.rs", 'if rest.starts_with("NaN") {', "if false {"),
+    ("rv-date-year0", "date", C + "pyval.rs", "if year < 1 {", "if year < 0 {"),
+    ("rv-date-24", "date", C + "pyval.rs", "(days + 1, 0)", "(days, 0)"),
+    ("rv-date-leap", "date", C + "pyval.rs", "2 => 28 + i64::from(leap),", "2 => 29,"),
+    ("rv-date-week", "date", C + "pyval.rs", "if !(1..=53).contains(&week) ||", "if false ||"),
+    ("rv-bash-env", "profile-env", C + "run.rs", '"BASH_ENV",', '"BASH_ENV_",'),
+    ("rv-lease-glob", "lease-boundary", C + "audit.rs", 'glob_names(ctx.host, &dir, "pr-", ".json")', 'glob_names(ctx.host, &dir, "pr", ".json")'),
+    ("rv-linger", "per-os", C + "hostchecks.rs", 'call.text() == "yes"', 'call.text().starts_with("y")'),
+    ("rv-noting", "missing-log", C + "run.rs", "if let Err(mx_ports::ProcError::NotFound { program }) = &result {", "if let Err(mx_ports::ProcError::Spawn { program, .. }) = &result {"),
+    ("rv-profile-exit", "exit-code", "crates/mx-profile/src/shell.rs", "let code = if code == 127 && unbound { 1 } else { code };", "let code = if code == 127 && unbound { 127 } else { code };", PROFILE_TESTS),
+    ("rv-profile-exit-enum", "exit-code", "crates/mx-profile/src/load.rs", "            Self::Unbound { .. }\n            | Self::DefaultsMissing", "            Self::Unbound { .. } => 127,\n            Self::DefaultsMissing", PROFILE_TESTS),
+    ("rv-profile-home", "unbound", "crates/mx-profile/src/load.rs", "    // `$HOME` is the first expansion of the defaults search, as in `resolve`.\n    if env.home.is_none() {\n        return Err(LoadError::HomeUnbound);\n    }\n    let defaults = defaults_path(env).ok_or(LoadError::DefaultsMissing)?;\n    let first = evaluate(proc, env, std::slice::from_ref(&defaults));\n    let after_defaults = match &first.outcome {\n        Ok(dump) if dump.last_status == 0 => dump.vars.clone(),\n        Ok(dump) => {\n            shown.keep(&first);\n            return Err(LoadError::DefaultsFailed { status: dump.last_status });", "    let defaults = defaults_path(env).ok_or(LoadError::DefaultsMissing)?;\n    let first = evaluate(proc, env, std::slice::from_ref(&defaults));\n    let after_defaults = match &first.outcome {\n        Ok(dump) if dump.last_status == 0 => dump.vars.clone(),\n        Ok(dump) => {\n            shown.keep(&first);\n            return Err(LoadError::DefaultsFailed { status: dump.last_status });", PROFILE_TESTS),
 ]
+
 
 TEST_CMD = ["cargo", "test", "-p", "mx-doctor", "--offline", "--locked", "--no-fail-fast"]
 
@@ -141,8 +175,8 @@ def limits():
     os.setsid()
 
 
-def run_tests(work, env, timeout=1500):
-    proc = subprocess.Popen(TEST_CMD, cwd=work + "/rust", env=env, stdout=subprocess.PIPE,
+def run_tests(work, env, cmd=None, timeout=1500):
+    proc = subprocess.Popen(cmd or TEST_CMD, cwd=work + "/rust", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, preexec_fn=limits)
     try:
         out, _ = proc.communicate(timeout=timeout)
@@ -155,7 +189,7 @@ def run_tests(work, env, timeout=1500):
 
 def summarize(out):
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
-    failed_names = re.findall(r"^test (\S+) \.\.\. FAILED", out, re.M)
+    failed_names = re.findall(r"^test (\S+) \.\.\. FAILED", out, re.M) + re.findall(r"^FAIL  (.*)$", out, re.M)
     panics = re.findall(r"panicked at [^\n]*\n([^\n]*)", out)
     build_err = "could not compile" in out or re.search(r"^error(\[E\d+\])?:", out, re.M) is not None
     return passed, failed_names, panics, build_err
@@ -183,7 +217,7 @@ def main():
     shutil.copytree(REPO + "/lib", pristine + "/lib")
     # every mutant's old text must occur exactly once in the pristine file
     bad = []
-    for mid, _cat, rel, old, new in MUTANTS:
+    for mid, _cat, rel, old, new, *_rest in MUTANTS:
         text = open(pristine + "/rust/" + rel).read()
         if text.count(old) != 1:
             bad.append((mid, text.count(old)))
@@ -211,7 +245,8 @@ def main():
     if not ok_before:
         return 1
     survivors = build_errs = 0
-    for mid, cat, rel, old, new in MUTANTS:
+    for mid, cat, rel, old, new, *rest in MUTANTS:
+        cmd = rest[0] if rest else None
         if a.only and mid != a.only:
             continue
         shutil.rmtree(work, ignore_errors=True)
@@ -227,7 +262,7 @@ def main():
         readback = open(path).read()
         assert new in readback and readback == mutated and sha(path) != pristine_sha, mid + ": mutation did not land"
         touch_all(work)
-        rc, out, timed_out = run_tests(work, env)
+        rc, out, timed_out = run_tests(work, env, cmd)
         passed, failed, panics, build_err = summarize(out)
         if timed_out:
             outcome = "CAPPED"
