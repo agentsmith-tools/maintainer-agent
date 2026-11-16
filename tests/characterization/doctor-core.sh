@@ -70,7 +70,7 @@ case_warnings_exit_zero() {
     dr_p_unset POST
     dr_doctor
     cz_expect_rc 0
-    dr_summary 31 1 0
+    dr_summary 32 1 0
 }
 dr_case "exit: warnings alone leave the exit code 0" case_warnings_exit_zero
 
@@ -79,7 +79,7 @@ case_failure_exit_one() {
     chmod -x "$DR_SHARE/run.sh"
     dr_doctor
     cz_expect_rc 1
-    dr_summary 31 0 1
+    dr_summary 32 0 1
 }
 dr_case "exit: one failure makes the exit code 1" case_failure_exit_one
 
@@ -125,7 +125,7 @@ case_name_plain_chars() {
     cz_expect_rc 0
     dr_has_finding ok "profile 'my-prof.v2_x' present"
     dr_has_finding warn "no timers for my-prof.v2_x" "./install.sh --timers"
-    dr_summary 31 1 0
+    dr_summary 32 1 0
 }
 dr_case "profile name: letters, digits, dot, underscore and hyphen are accepted" case_name_plain_chars
 
@@ -148,7 +148,7 @@ case_two_profiles_named() {
     dr_doctor
     cz_expect_rc 0
     dr_has_finding ok "profile 'magent' present"
-    dr_summary 32 0 0
+    dr_summary 33 0 0
 }
 dr_case "profile name: MAINTAINER_PROFILE picks one of two deployed profiles" case_two_profiles_named
 
@@ -166,9 +166,9 @@ case_none_deployed() {
     dr_has_finding warn "no timers for (none deployed)" "./install.sh --timers"
     dr_has_finding fail "the profile names no STATE_DIR" "set it in profiles/(none deployed)/profile.env"
     dr_has_finding fail "maintainer is named in the prompts and is NOT on PATH" "install it, or remove it from the prompts and REQUIRED_COMMANDS"
-    dr_summary 15 3 7
+    dr_summary 16 3 7
 }
-dr_case "profile name: with no profile deployed the report names '(none deployed)' and counts 15 ok, 3 warn, 7 FAIL" case_none_deployed
+dr_case "profile name: with no profile deployed the report names '(none deployed)' and counts 16 ok, 3 warn, 7 FAIL" case_none_deployed
 
 case_no_profile_sh() {
     dr_install
@@ -198,7 +198,7 @@ case_defaults_deployed() {
     dr_run "$CZ_CASE/tree/bin/maintainer-doctor"
     cz_expect_rc 0
     dr_has_finding ok "deny wall generated, 120 rules"
-    dr_summary 32 0 0
+    dr_summary 33 0 0
 }
 dr_case "refusal: defaults.env is read from the deployed share when the tree has none" case_defaults_deployed
 
@@ -325,7 +325,7 @@ case_wall_invalid() {
     cz_expect_rc 1
     dr_has_finding fail "deny wall is not valid JSON" "reinstall"
     dr_has_finding fail "no Read(~/...) rule; credential paths are not protected" "check credential_paths in deny.json and re-run ./install.sh"
-    dr_summary 30 0 2
+    dr_summary 31 0 2
 }
 dr_case "profile: an unparseable settings.json fails twice, as invalid JSON and as lacking Read(~/" case_wall_invalid
 
@@ -523,7 +523,7 @@ case_backend_unknown() {
     dr_has_finding ok "backend 'mystery' installed"
     dr_lacks "on PATH ("
     dr_lacks "mystery on PATH"
-    dr_summary 31 0 0
+    dr_summary 32 0 0
 }
 dr_case "backend: an unknown backend with a script is ok and gets no PATH check" case_backend_unknown
 
@@ -562,7 +562,7 @@ case_commands_default_found() {
     cz_expect_rc 0
     dr_has_finding ok "maintainer resolves"
     dr_has_finding ok "maintainer-merge resolves"
-    dr_summary 34 0 0
+    dr_summary 35 0 0
 }
 dr_case "commands: the default four all resolve when they are on PATH" case_commands_default_found
 

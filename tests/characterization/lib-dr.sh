@@ -24,7 +24,7 @@ DR_REPO="$MX_TREE/bin/maintainer-repo"
 
 # Plain tools the two programs use, resolved once from the host. `type -P`
 # ignores shell functions and aliases.
-DR_TOOL_NAMES="bash sh env python3 git sed grep awk sort uniq cut tr head tail wc cat ls find dirname basename readlink stat date mktemp rm mkdir rmdir touch cp mv chmod sha256sum paste sleep timeout true false tee tar xargs ln"
+DR_TOOL_NAMES="bash sh env python3 git sed grep awk sort uniq cut tr head tail wc cat ls find dirname basename readlink stat date mktemp rm mkdir rmdir touch cp mv chmod sha256sum paste sleep timeout true false tee tar xargs ln flock"
 
 dr_init() {
     local p
@@ -255,8 +255,8 @@ STUB
 
 # dr_present NAME...: tools that exist on PATH and must not run (command -v finds them).
 dr_present() { local t; for t in "$@"; do cz_stub_tool "$t"; done; }
-# dr_absent NAME...: removes a default stub, so the tool is not on PATH.
-dr_absent() { local t; for t in "$@"; do rm -f "$CZ_CASE/bin/$t"; done; }
+# dr_absent NAME...: removes a default stub and a tool-farm link, so it is not on PATH.
+dr_absent() { local t; for t in "$@"; do rm -f "$CZ_CASE/bin/$t" "$DR_TOOLS/$t"; done; }
 
 dr_ans() {  # $1 = key, $2 = text printed ("" for nothing), $3 = exit code (default 0)
     if [ -n "$2" ]; then printf '%s\n' "$2" > "$CZ_CASE/ans/$1.out"; else : > "$CZ_CASE/ans/$1.out"; fi

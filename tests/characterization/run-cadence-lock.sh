@@ -301,7 +301,7 @@ cz_case "lock: a flock error other than contention alerts and exits 1" case_floc
 
 case_flock_bad_wait() {
     rz_setup
-    printf '64' > "$CZ_CASE/bin/flock.rc"
+    printf '64' > "$CZ_CASE/flock.rc"
     cz_set MAINTAINER_LOCK_WAIT abc
     rz_run fx review
     cz_expect_rc 1
