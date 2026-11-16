@@ -267,6 +267,10 @@ alert_transient() {
 
 alert() {
     printf '%s\n' "$1" | tee -a "$log" >&2
+    # A preview reports the refusal and stops there. Recording it would mark the
+    # task failed in `maintainer status` until the next real success, and toast
+    # and page someone over a command that only prints.
+    [ "$show" = 1 ] && return 0
     # 1. Disk first. No display, no bus, no network, no way for this to be
     #    swallowed. `maintainer status` prints it in red at the top until a
     #    successful run of the same task clears it.
@@ -362,6 +366,16 @@ if declare -F backend_allowed_tasks >/dev/null; then
         *) alert "backend '$BACKEND' may only run: $allowed (refused '$task')"; exit 78 ;;
     esac
 fi
+
+# The prompt temp file, created in step 2. Removed on the way out by whichever
+# EXIT handler this process has: scrub_pinned_token for a run, the one set at
+# step 2 for a preview. A RETURN trap never fires on `exit`, so every preview
+# and every run that left after step 2 used to leave the full prompt in TMPDIR.
+prompt_file=""
+remove_prompt_file() {
+    [ -n "$prompt_file" ] && rm -f "$prompt_file"
+    return 0
+}
 
 if [ "$show" = 0 ]; then
 
@@ -503,6 +517,7 @@ scrub_pinned_token() {
     # shellcheck disable=SC2086
     maintainer_scrub_secret "$GH_TOKEN" $where >>"$log" 2>&1 || true
     clear_run_lease
+    remove_prompt_file
     return "$rc"
 }
 trap scrub_pinned_token EXIT
@@ -595,7 +610,9 @@ fi
 #    to a file rather than piped from a variable so the backend can choose
 #    stdin or an argument without the caller caring.
 prompt_file="$(mktemp)"
-trap 'rm -f "$prompt_file"' RETURN
+# A run already has scrub_pinned_token on EXIT and must keep it, so only a
+# preview, which never installs that trap, gets its own.
+[ "$show" = 1 ] && trap remove_prompt_file EXIT
 
 # lib/ files sit under lib/ in the repository and beside run.sh once installed.
 libfile() {
@@ -700,6 +717,7 @@ POSTING
 
 if [ "$show" = 1 ]; then
     cat "$prompt_file"
+    remove_prompt_file
     exit 0
 fi
 
