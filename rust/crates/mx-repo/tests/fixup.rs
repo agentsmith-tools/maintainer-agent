@@ -210,6 +210,7 @@ struct Opts {
     /// What `git rev-parse HEAD` prints, call by call.
     head_reads: Vec<String>,
     mktemp_fails: bool,
+    mktemp_missing: bool,
     clone_fails: bool,
     switch_rc: i32,
     /// The patch path `fixup-check` names, when it is not the real file.
@@ -221,6 +222,7 @@ impl Default for Opts {
         Self {
             head_reads: vec![HEAD.to_string(), NEW.to_string()],
             mktemp_fails: false,
+            mktemp_missing: false,
             clone_fails: false,
             switch_rc: 0,
             patch_path: None,
@@ -246,7 +248,12 @@ fn world_with(items: &str, patch_text: &str, opts: &Opts) -> World {
     rig.ok(AUTHOR, "7\tbob\n");
     let state = scratch.0.to_string_lossy().into_owned();
     let mktemp = ["mktemp", "-d", &format!("{state}/fixup-XXXXXX")];
-    if opts.mktemp_fails {
+    if opts.mktemp_missing {
+        rig.proc.script(
+            &mktemp,
+            mx_ports::Script::always(Err(ProcError::NotFound { program: "mktemp".into() })),
+        );
+    } else if opts.mktemp_fails {
         rig.reply(&mktemp, 1, "", "mktemp: failed to create directory\n");
     } else {
         rig.ok(&mktemp, &format!("{work_text}\n"));
@@ -985,4 +992,282 @@ fn a_tries_setting_that_is_not_a_bash_integer_or_is_not_positive_runs_no_read_at
         8,
         "the test builtin reads 010 as ten, so the last read sleeps too"
     );
+}
+
+// ---- a host that lacks a tool the bash runs (decision P1H-16) -----------------------------------
+//
+// The expected text is what the bash program printed on the same fixture without that tool, as
+// the `notool` scenarios of `tests/differential.sh` measure it.
+
+const SCRIPT: &str = "/tree/bin/maintainer-repo";
+
+fn run_without(world: &World, settings: &Settings, words: &[&str], missing: &[&str]) -> Outcome {
+    let path = common::path_without(&world.scratch, missing);
+    world.rig.run(
+        &[("HOME", "/h"), ("GH_TOKEN", "t0k"), ("MAINTAINER_SLUG", "o/r"), ("PATH", &path)],
+        |ctx| match cmd_fixup(ctx, settings, &tree(), &args(words)) {
+            Ok(code) => code,
+            Err(stop) => stop.0,
+        },
+    )
+}
+
+fn not_found(line: u32, tool: &str) -> String {
+    format!("{SCRIPT}: line {line}: {tool}: command not found\n")
+}
+
+#[test]
+fn without_sed_the_eleven_field_reads_each_say_so_and_the_run_is_refused_before_any_gh_call() {
+    let world = ready("typo:docs.md", TYPO_PATCH);
+    let got = run_without(&world, &tunables(&world, &[]), &["7"], &["sed"]);
+    let want = (223..=233).map(|line| not_found(line, "sed")).collect::<String>()
+        + "maintainer-repo: fixup-check answered without a state, head, branch, fork or items; refusing to act on that\n";
+    assert_eq!(got.code, 1);
+    assert_eq!(got.err, want);
+    assert_eq!(world.rig.argvs(), [check_argv("7")], "nothing but fixup-check ran");
+}
+
+#[test]
+fn without_sed_a_heads_up_is_refused_the_same_way() {
+    let scratch = Scratch::new("fixup-notice-nosed");
+    let rig = Rig::new();
+    rig.ok(&check_argv("7"), &answer("notice", "typo:docs.md", "/p"));
+    let path = common::path_without(&scratch, &["sed"]);
+    let settings = settings_with(&scratch.0, "/s", "on", &[]);
+    let got = rig.run(&[("PATH", &path)], |ctx| {
+        cmd_fixup(ctx, &settings, &tree(), &args(&["7", "--dry-run"])).unwrap_err().0
+    });
+    assert_eq!(got.code, 1);
+    assert!(got.err.starts_with(&not_found(223, "sed")), "{}", got.err);
+    assert!(got.out.is_empty(), "no heads-up text: {}", got.out);
+}
+
+#[test]
+fn without_awk_a_count_that_the_patch_states_is_still_refused() {
+    let world = ready("test-count:docs.md", "diff\n+there are 3 tests\n");
+    let w = world.work.clone();
+    let patch = world.patch.to_string_lossy().into_owned();
+    script(&world.rig, &g(&w, &["apply", "--check", &patch]), 0, "");
+    script(&world.rig, &g(&w, &["apply", "--index", &patch]), 0, "");
+    world.rig.ok(&["sort", "-u"], "test-count\n");
+    world.rig.ok(
+        &["env", "-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "timeout", "120", "bash", "-c", "echo 3"],
+        "3\n",
+    );
+    script(&world.rig, &g(&w, &["diff", "--cached", "-U0"]), 0, "+there are 3 tests\n");
+    let got =
+        run_without(&world, &tunables(&world, &[("FIXUP_COUNT_CMD", "echo 3")]), &["7"], &["awk"]);
+    assert_eq!(got.code, 1);
+    assert_eq!(
+        got.err,
+        not_found(311, "awk")
+            + "maintainer-repo: the patch does not state 3, the count FIXUP_COUNT_CMD derives; a typed count is refused\n"
+    );
+    assert!(world.rig.calls_starting(AUTHOR).is_empty(), "the author is never looked up");
+    assert!(
+        world.rig.calls_starting(&["git", "-C"]).iter().all(|argv| !argv.contains(&"push".into()))
+    );
+}
+
+/// What a typo fixup needs from `git` up to the plan line, with the history `log` and a commit
+/// that is signed off or not.
+fn typo_flow(world: &World, history: &str, signed_commit: bool) {
+    let w = &world.work;
+    let patch = world.patch.to_string_lossy().into_owned();
+    script(&world.rig, &g(w, &["apply", "--check", &patch]), 0, "");
+    script(&world.rig, &g(w, &["apply", "--index", &patch]), 0, "");
+    script(&world.rig, &g(w, &["log", "-n", "50", "--format=%B", HEAD]), 0, history);
+    let mut commit = vec!["commit", "-q"];
+    if signed_commit {
+        commit.push("-s");
+    }
+    commit.extend([
+        "-m",
+        "fixup: typo from the review",
+        "-m",
+        "Co-authored-by: bob <7+bob@users.noreply.github.com>",
+    ]);
+    script(&world.rig, &g(w, &commit), 0, "");
+    script(&world.rig, &g(w, &["rev-parse", "--short", HEAD]), 0, "1111111\n");
+    script(&world.rig, &g(w, &["rev-parse", "--short", NEW]), 0, "2222222\n");
+    script(&world.rig, &g(w, &["show", "--stat", "--patch", "--format=%B", "HEAD"]), 0, "");
+    world.rig.ok(&["sort", "-u"], "typo\n");
+}
+
+#[test]
+fn each_missing_tool_of_the_kinds_pipeline_leaves_the_list_empty_and_says_so_in_pipeline_order() {
+    for (missing, lines) in [
+        (vec!["tr"], vec!["tr"]),
+        (vec!["sort"], vec!["sort"]),
+        (vec!["paste"], vec!["paste"]),
+        (vec!["tr", "paste"], vec!["tr", "paste"]),
+        (vec!["paste", "sort", "grep", "tr"], vec!["tr", "grep", "sort", "paste"]),
+    ] {
+        let world = world_with(
+            "typo:docs.md",
+            TYPO_PATCH,
+            &Opts { head_reads: vec![HEAD.into(), HEAD.into()], ..Opts::default() },
+        );
+        let got = run_without(&world, &tunables(&world, &[]), &["7"], &missing);
+        let want = lines.iter().map(|tool| not_found(298, tool)).collect::<String>()
+            + "maintainer-repo: the fixup would change nothing on fix-1\n";
+        assert_eq!(got.err, want, "without {missing:?}");
+        assert!(
+            world
+                .rig
+                .calls_starting(&["git", "-C"])
+                .iter()
+                .all(|argv| !argv.contains(&"apply".into())),
+            "without {missing:?} no patch is applied"
+        );
+    }
+}
+
+#[test]
+fn without_rm_the_scratch_clone_stays_and_the_trap_says_so_at_the_end() {
+    let world = ready("typo:docs.md", TYPO_PATCH);
+    typo_flow(&world, "docs: add one\n", false);
+    let got = run_without(&world, &tunables(&world, &[]), &["7", "--dry-run"], &["rm"]);
+    assert_eq!(got.code, 0, "{}", got.err);
+    assert_eq!(got.err, format!("{SCRIPT}: line 1: rm: command not found\n"));
+    assert!(std::path::Path::new(&world.work).exists(), "nothing removed the scratch clone");
+}
+
+#[test]
+fn a_heads_up_without_tr_or_paste_has_an_empty_kinds_list_and_says_so() {
+    for tool in ["tr", "paste"] {
+        let scratch = Scratch::new("fixup-notice-nokinds");
+        let rig = Rig::new();
+        rig.ok(&check_argv("7"), &answer("notice", "typo:docs.md", "/p"));
+        rig.ok(SWITCH, "");
+        rig.ok(ME, "42\ttestuser\n");
+        let path = common::path_without(&scratch, &[tool]);
+        let settings = settings_with(&scratch.0, "/s", "on", &[]);
+        let got = rig.run(&[("PATH", &path)], |ctx| {
+            cmd_fixup(ctx, &settings, &tree(), &args(&["7", "--dry-run"])).unwrap()
+        });
+        assert_eq!(got.err, not_found(247, tool), "without {tool}");
+        assert!(got.out.contains("what is left is mechanical ()."), "without {tool}: {}", got.out);
+    }
+}
+
+#[test]
+fn a_heads_up_without_grep_cannot_be_read_back_so_it_is_not_reported_as_told() {
+    let scratch = Scratch::new("fixup-notice-nogrep");
+    let temp = scratch.file("fixup-notice.Gg", "");
+    let state = scratch.0.to_string_lossy().into_owned();
+    let rig = Rig::new();
+    let first = answer("notice", "typo:docs.md", "/p");
+    rig.sequence(&check_argv("7"), vec![output(0, &first, ""), output(0, "state=ready\n", "")]);
+    rig.ok(SWITCH, "");
+    rig.ok(ME, "42\ttestuser\n");
+    rig.ok(&["mktemp", &format!("{state}/fixup-notice.XXXXXX")], &format!("{}\n", temp.display()));
+    rig.ok(
+        &["gh", "pr", "comment", "7", "--repo", "o/r", "--body-file", &temp.to_string_lossy()],
+        "",
+    );
+    let path = common::path_without(&scratch, &["grep"]);
+    let settings = settings_with(&scratch.0, &state, "on", &[]);
+    let got = rig.run(&[("PATH", &path)], |ctx| {
+        cmd_fixup(ctx, &settings, &tree(), &args(&["7"])).unwrap_err().0
+    });
+    assert_eq!(
+        got.err,
+        not_found(263, "grep")
+            + "maintainer-repo: posted the heads-up but could not read it back on #7, so I cannot say the author was told\n"
+    );
+}
+
+#[test]
+fn a_heads_up_without_rm_leaves_its_temp_file_and_says_so() {
+    let scratch = Scratch::new("fixup-notice-norm");
+    let temp = scratch.file("fixup-notice.Rr", "");
+    let state = scratch.0.to_string_lossy().into_owned();
+    let rig = Rig::new();
+    let first = answer("notice", "typo:docs.md", "/p");
+    rig.sequence(&check_argv("7"), vec![output(0, &first, ""), output(0, "state=ready\n", "")]);
+    rig.ok(SWITCH, "");
+    rig.ok(ME, "42\ttestuser\n");
+    rig.ok(&["mktemp", &format!("{state}/fixup-notice.XXXXXX")], &format!("{}\n", temp.display()));
+    rig.ok(
+        &["gh", "pr", "comment", "7", "--repo", "o/r", "--body-file", &temp.to_string_lossy()],
+        "",
+    );
+    let path = common::path_without(&scratch, &["rm"]);
+    let settings = settings_with(&scratch.0, &state, "on", &[]);
+    let got = rig
+        .run(&[("PATH", &path)], |ctx| cmd_fixup(ctx, &settings, &tree(), &args(&["7"])).unwrap());
+    assert_eq!(got.err, not_found(258, "rm"));
+    assert!(temp.exists(), "rm never ran, so the temp file stays");
+}
+
+#[test]
+fn a_mktemp_that_is_not_installed_names_its_line_in_the_diagnostic() {
+    let world =
+        world_with("typo:docs.md", TYPO_PATCH, &Opts { mktemp_missing: true, ..Opts::default() });
+    let got = run_fixup(&world, &tunables(&world, &[]), &["7"]);
+    assert_eq!(got.err, not_found(270, "mktemp") + "maintainer-repo: no scratch directory\n");
+}
+
+// ---- a profile that unsets a variable the program reads (decision P1H-18) ----------------------
+
+fn push_world() -> World {
+    let world = ready("typo:docs.md", TYPO_PATCH);
+    commit_calls(&world, false);
+    let w = world.work.clone();
+    script(
+        &world.rig,
+        &g(&w, &["push", "-q", "https://github.com/alice/r.git", "HEAD:refs/heads/fix-1"]),
+        0,
+        "",
+    );
+    world.rig.sequence(
+        &["gh", "pr", "view", "7", "--repo", "o/r", "--json", "headRefOid", "--jq", ".headRefOid"],
+        vec![output(0, "old\n", ""); 3],
+    );
+    world.rig.ok(&["sleep", "0"], "");
+    world
+}
+
+#[test]
+fn an_unset_gh_tries_ends_the_run_with_1_after_the_push_and_names_line_349() {
+    let world = push_world();
+    let state = world.scratch.0.to_string_lossy().into_owned();
+    let settings = settings_with(&world.scratch.0, &state, "on", &[("GH_BACKOFF", "0")]);
+    let got = run_fixup(&world, &settings, &["7"]);
+    assert_eq!(got.code, 1);
+    assert_eq!(got.err, format!("{SCRIPT}: line 349: GH_TRIES: unbound variable\n"));
+    assert_eq!(
+        world
+            .rig
+            .calls_starting(&["git", "-C"])
+            .iter()
+            .filter(|a| a.contains(&"push".into()))
+            .count(),
+        1,
+        "the push had already happened"
+    );
+    assert!(world.rig.calls_starting(&["gh", "pr", "view"]).is_empty());
+}
+
+#[test]
+fn an_unset_gh_backoff_ends_the_run_with_1_at_the_first_wait_and_names_line_353() {
+    let world = push_world();
+    let state = world.scratch.0.to_string_lossy().into_owned();
+    let settings = settings_with(&world.scratch.0, &state, "on", &[("GH_TRIES", "3")]);
+    let got = run_fixup(&world, &settings, &["7"]);
+    assert_eq!(got.code, 1);
+    assert_eq!(got.err, format!("{SCRIPT}: line 353: GH_BACKOFF: unbound variable\n"));
+    assert_eq!(world.rig.calls_starting(&["gh", "pr", "view"]).len(), 1, "one read, then the wait");
+    assert!(world.rig.calls_starting(&["sleep"]).is_empty());
+}
+
+#[test]
+fn an_unset_gh_backoff_is_not_read_when_no_wait_follows_the_read() {
+    let world = push_world();
+    let state = world.scratch.0.to_string_lossy().into_owned();
+    let settings = settings_with(&world.scratch.0, &state, "on", &[("GH_TRIES", "1")]);
+    let got = run_fixup(&world, &settings, &["7"]);
+    assert!(got.err.contains("NOT confirmed"), "{}", got.err);
+    assert!(!got.err.contains("unbound"), "{}", got.err);
 }

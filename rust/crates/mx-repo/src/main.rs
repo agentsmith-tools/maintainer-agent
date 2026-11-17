@@ -10,14 +10,11 @@
 //! reports) the moment a write meets a closed pipe (decision P1H-3).
 
 use mx_ports::RealProc;
-use mx_repo::ctx::Ctx;
+use mx_repo::ctx::{Ctx, DEFAULT_PATH};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{ErrorKind, Write};
 use std::process::ExitCode;
-
-/// bash's compiled-in default when `PATH` is unset.
-const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A stream that ends the program quietly when its reader has gone.
 struct PipeEnd<W: Write>(W);
@@ -27,6 +24,7 @@ impl<W: Write> PipeEnd<W> {
         if let Err(error) = &result
             && error.kind() == ErrorKind::BrokenPipe
         {
+            mx_repo::cleanup::run_now();
             std::process::exit(141);
         }
         result
@@ -48,6 +46,7 @@ impl<W: Write> Write for PipeEnd<W> {
 }
 
 fn main() -> ExitCode {
+    mx_repo::cleanup::install();
     let args: Vec<OsString> = std::env::args_os().collect();
     let argv0 = args.first().cloned().unwrap_or_else(|| OsString::from("maintainer-repo"));
     let vars: BTreeMap<String, String> = std::env::vars_os()

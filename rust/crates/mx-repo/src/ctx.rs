@@ -10,6 +10,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// bash's compiled-in default when `PATH` is unset.
+pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 /// How long one child may run. The bash has no limit; the `Proc` port needs
 /// one, so a call that has not finished in an hour is killed (decision P1H-5).
 pub const CHILD_TIMEOUT: Duration = Duration::from_hours(1);
@@ -46,6 +49,14 @@ const CHILD_ENV_NAMES: &[&str] = &[
 const CHILD_ENV_PREFIXES: &[&str] =
     &["MAINTAINER_", "GH_", "GITHUB_", "GIT_", "XDG_", "LC_", "PYTHON"];
 
+/// Credentials the caller may hold. Only the programs in [`TOKEN_CHILDREN`] get them
+/// (decision P1H-17): `gh` and `git` use them, and `python3` runs `maintainer
+/// fixup-check`, which starts `gh`. `mktemp`, `sort`, `sleep`, `env`, `timeout` and
+/// `bash -c` never need one, and the bash handed them every variable it had.
+const TOKEN_NAMES: &[&str] =
+    &["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+const TOKEN_CHILDREN: &[&str] = &["gh", "git", "python3"];
+
 /// The variables of `vars` a child receives. `MAINTAINER_CHILD_ENV` may name
 /// more, separated by spaces: the black-box harness uses it to pass the names
 /// its stubs read. `LC_ALL` is left out because the `Proc` port owns it.
@@ -64,6 +75,11 @@ pub fn child_env(vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+/// `line N: ` when the line is known.
+fn line_text(line: Option<u32>) -> String {
+    line.map_or_else(String::new, |n| format!("line {n}: "))
 }
 
 /// What a child left behind.
@@ -104,6 +120,9 @@ pub struct Call {
     pub cwd: Option<PathBuf>,
     pub stdin: Option<Vec<u8>>,
     pub timeout: Duration,
+    /// The line of `bin/maintainer-repo` that runs this call, for the
+    /// `line N:` the bash puts in its `command not found` message.
+    pub line: Option<u32>,
 }
 
 impl Call {
@@ -115,7 +134,15 @@ impl Call {
             cwd: None,
             stdin: None,
             timeout: CHILD_TIMEOUT,
+            line: None,
         }
+    }
+
+    /// Names the line of the bash program this call stands for.
+    #[must_use]
+    pub fn at(mut self, line: u32) -> Self {
+        self.line = Some(line);
+        self
     }
 
     /// Runs in `dir`.
@@ -224,7 +251,11 @@ impl<'a> Ctx<'a> {
             return Done { rc: 127, stdout: Vec::new(), stderr: Vec::new(), started: false };
         };
         let mut spec = ProcSpec::command(program, call.argv[1..].iter().cloned(), call.timeout);
+        let may_hold_tokens = TOKEN_CHILDREN.contains(&program.as_str());
         for (name, value) in self.child_env.iter().chain(&self.exports) {
+            if !may_hold_tokens && TOKEN_NAMES.contains(&name.as_str()) {
+                continue;
+            }
             spec = spec.env(name.as_str(), value.as_str());
         }
         if let Some(locale) = &self.locale {
@@ -248,14 +279,46 @@ impl<'a> Ctx<'a> {
             Err(error) => {
                 let name = self.script_name();
                 let (rc, text) = match &error {
-                    ProcError::NotFound { .. } | ProcError::RelativeProgram { .. } => {
-                        (127, format!("{name}: {program}: command not found\n"))
-                    }
-                    other => (126, format!("{name}: {program}: {other}\n")),
+                    ProcError::NotFound { .. } | ProcError::RelativeProgram { .. } => (
+                        127,
+                        format!("{name}: {}{program}: command not found\n", line_text(call.line)),
+                    ),
+                    other => (126, format!("{name}: {}{program}: {other}\n", line_text(call.line))),
                 };
                 Done { rc, stdout: Vec::new(), stderr: text.into_bytes(), started: false }
             }
         }
+    }
+
+    /// Is `name` an executable file in a directory of the `PATH` the children
+    /// get? The in-process replacements of `tr`, `sed`, `grep`, `awk`, `paste`,
+    /// `wc` and `rm` ask this, so a host that lacks the tool behaves as the bash
+    /// does there (decision P1H-16).
+    #[must_use]
+    pub fn has_tool(&self, name: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.vars.get("PATH").map_or(DEFAULT_PATH, String::as_str);
+        path.split(':').filter(|dir| dir.starts_with('/')).any(|dir| {
+            std::fs::metadata(Path::new(dir).join(name))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    }
+
+    /// True, after printing the bash's `SCRIPT: line N: TOOL: command not found`
+    /// on standard error, when the host has no `tool`. The caller then does what
+    /// the bash does with a command that failed with status 127 and printed nothing.
+    pub fn missing_tool(&mut self, tool: &str, line: u32) -> bool {
+        if self.has_tool(tool) {
+            return false;
+        }
+        let name = self.script_name();
+        self.put_err(format!("{name}: line {line}: {tool}: command not found\n").as_bytes());
+        true
+    }
+
+    /// `missing_tool` for a tool that is only asked when `when` holds.
+    pub fn missing_tool_if(&mut self, when: bool, tool: &str, line: u32) -> bool {
+        when && self.missing_tool(tool, line)
     }
 
     /// `git ARGS`, in the repository when there is one.

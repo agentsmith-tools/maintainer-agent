@@ -491,3 +491,50 @@ fn a_very_long_changelog_is_scanned_line_by_line() {
     assert_eq!(got.security, 4);
     assert!(!got.empty);
 }
+
+/// Peak resident memory of this test process, in KiB, from `VmHWM`.
+fn peak_rss_kib() -> u64 {
+    let status =
+        std::fs::read_to_string("/proc/self/status").expect("/proc/self/status is readable");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse().ok())
+        .expect("VmHWM is in /proc/self/status")
+}
+
+#[test]
+fn a_changelog_of_a_quarter_gigabyte_is_read_in_a_bounded_buffer_not_loaded_whole() {
+    // Lead 1 of the review of this PR: the bash reads the file with sed and grep line by line,
+    // so its memory does not grow with the file. The file is sparse, so it costs no disk.
+    use std::io::Write;
+    const SIZE: u64 = 256 << 20;
+    let scratch = Scratch::new("rel-huge");
+    let path = scratch.path("CHANGELOG.md");
+    {
+        let mut file = std::fs::File::create(&path).expect("the changelog can be made");
+        file.write_all(b"## [Unreleased]\n### Security\nit refuses now\n").expect("write");
+        let head = file.metadata().expect("metadata").len();
+        assert!(head < 100, "the head is {head} bytes");
+        file.set_len(SIZE).expect("the file can be extended");
+    }
+    assert_eq!(std::fs::metadata(&path).expect("stat").len(), SIZE, "the file is 256 MiB");
+    let rig = Rig::new();
+    history(&rig, "", "");
+    rig.ok(&["git", "rev-parse", "--abbrev-ref", "HEAD"], "main\n");
+    rig.ok(&["git", "status", "--porcelain", "CHANGELOG.md"], "");
+    rig.ok(&["git", "merge-base", "--is-ancestor", "HEAD", "origin/main"], "");
+    rig.ok(&["git", "rev-list", "--count", "HEAD..origin/main"], "0\n");
+    let settings = settings_with(&scratch.0, "/state", "on", &[("PROD_GLOBS", "crates/*/src/*")]);
+    let before = peak_rss_kib();
+    let got = rig.run(&[], |ctx| cmd_release_check(ctx, &settings).unwrap());
+    let grown = peak_rss_kib().saturating_sub(before);
+    assert_eq!(got.code, 0);
+    assert!(got.out.contains("CHANGELOG Security section: yes"), "the head was read: {}", got.out);
+    assert!(
+        got.out.contains("removed-capability wording: 1 occurrence(s)"),
+        "the head was read: {}",
+        got.out
+    );
+    assert!(grown < 96 * 1024, "peak memory grew by {grown} KiB reading a 256 MiB file");
+}

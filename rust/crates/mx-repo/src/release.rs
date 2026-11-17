@@ -267,13 +267,17 @@ pub fn closing_lines(prod: usize, facts: &ChangelogFacts) -> Vec<String> {
     clippy::naive_bytecount,
     reason = "a path listing is short, and a new dependency for it is not worth it"
 )]
-fn count_paths(ctx: &mut Ctx<'_>, range: &str, globs: &[String]) -> usize {
+fn count_paths(ctx: &mut Ctx<'_>, range: &str, globs: &[String], line: u32) -> Option<usize> {
     let mut argv: Vec<String> =
         ["git", "diff", "--name-only", range, "--"].map(String::from).to_vec();
     argv.extend(globs.iter().cloned());
     let done = ctx.exec(&Call::new(argv).cwd(ctx.cwd.as_deref()));
     ctx.show_err(&done);
-    done.stdout.iter().filter(|byte| **byte == b'\n').count()
+    // Without `wc` the count is the empty string (decision P1H-16).
+    if ctx.missing_tool("wc", line) {
+        return None;
+    }
+    Some(done.stdout.iter().filter(|byte| **byte == b'\n').count())
 }
 
 /// `$(git ARGS)` with git's standard error let through: the stdout without trailing newlines.
@@ -358,6 +362,102 @@ fn print_report(
     }
 }
 
+/// `[ "$v" -gt 0 ]`: an empty value is the shell's "integer expected" error and reads false.
+fn gt_zero(ctx: &mut Ctx<'_>, value: Option<usize>, line: u32) -> bool {
+    if let Some(count) = value {
+        return count > 0;
+    }
+    let name = ctx.script_name();
+    ctx.put_err(format!("{name}: line {line}: [: : integer expected\n").as_bytes());
+    false
+}
+
+fn count_text(value: Option<usize>) -> String {
+    value.map_or_else(String::new, |count| count.to_string())
+}
+
+/// The report on a host that lacks `wc`, `sed`, `grep` or `tr`, line by line as the bash
+/// makes it (decision P1H-16). The first three are where the bash reads the CHANGELOG, so
+/// a missing `sed` or `grep` leaves the Unreleased text empty, a missing `grep` leaves each
+/// count empty, a missing `tr` makes the section read as empty, and an empty count is the
+/// shell's "integer expected" error wherever it is compared. A missing `wc` leaves the
+/// production count empty, which is not `0`, and drops the shipped-surface lines.
+#[allow(clippy::too_many_lines, reason = "one function per bash line would hide the order")]
+fn print_report_without_tools(
+    ctx: &mut Ctx<'_>,
+    tag: &str,
+    prod: Option<usize>,
+    shipped: Option<usize>,
+    facts: &ChangelogFacts,
+) {
+    let sed_ok = ctx.has_tool("sed");
+    let grep_ok = ctx.has_tool("grep");
+    let section_ok = sed_ok && grep_ok;
+    // `sed ... 2>/dev/null | grep -v`: the message of a missing `sed` goes to /dev/null.
+    ctx.missing_tool_if(!grep_ok, "grep", 153);
+    let count = |ctx: &mut Ctx<'_>, line: u32, found: usize| -> Option<usize> {
+        if ctx.missing_tool("grep", line) { None } else { Some(if section_ok { found } else { 0 }) }
+    };
+    let security = count(ctx, 154, facts.security);
+    let added = count(ctx, 155, facts.added);
+    let breaking = count(ctx, 158, facts.breaking);
+    ctx.say(&format!("production files touched:  {}", count_text(prod)));
+    if let Some(count) = shipped {
+        ctx.say(&format!("shipped surface touched:    {count}"));
+        if count == 0 {
+            ctx.say(&format!(
+                "                           nothing that installs has changed since {tag}, so a"
+            ));
+            ctx.say(
+                "                           release would publish byte-identical artifacts and",
+            );
+            ctx.say(
+                "                           any break named below is in CI, not in the product.",
+            );
+        }
+    }
+    let yes_security = gt_zero(ctx, security, 168);
+    ctx.say(&format!("CHANGELOG Security section: {}", if yes_security { "yes" } else { "no" }));
+    let yes_added = gt_zero(ctx, added, 169);
+    ctx.say(&format!("CHANGELOG Added section:    {}", if yes_added { "yes" } else { "no" }));
+    ctx.say(&format!("removed-capability wording: {} occurrence(s)", count_text(breaking)));
+    let tr_missing = ctx.missing_tool("tr", 171);
+    let section_empty = tr_missing || !section_ok || facts.empty;
+    if section_empty {
+        ctx.say("WARNING: the Unreleased section is empty, so the three lines above read");
+        ctx.say("         nothing and this verdict rests on file counts alone.");
+        if grep_ok && let Some(top) = &facts.newest_heading {
+            let heading = top.strip_prefix("## ").unwrap_or(top);
+            ctx.say(&format!(
+                "         The newest version heading is '{heading}'. If you have already"
+            ));
+            ctx.say("         promoted Unreleased into it, read that section instead.");
+        }
+    }
+    ctx.put_out(b"\n");
+    // `[ "$prod" = 0 ]` is a string test; the two `-gt` tests are the shell's.
+    let docs_only = prod == Some(0);
+    let due = !docs_only && (gt_zero(ctx, security, 182) || gt_zero(ctx, breaking, 182));
+    if docs_only {
+        ctx.say("verdict: docs and tests only. A release is optional.");
+    } else if due {
+        ctx.say("verdict: RELEASE DUE. A fix that removes a capability, or a security");
+        ctx.say("         fix, is sitting unreleased, so every installed copy is still");
+        ctx.say("         affected.");
+    } else {
+        ctx.say("verdict: release worthwhile; production code changed.");
+    }
+    if gt_zero(ctx, breaking, 189) || gt_zero(ctx, security, 189) {
+        ctx.say("digit:   middle. Something that used to succeed now refuses, which");
+        ctx.say("         docs/release.md counts as a break in the 0.y series.");
+    } else {
+        ctx.say("digit:   last. Compatible additions and fixes.");
+    }
+    ctx.say("");
+    ctx.say("Cutting one is a human decision: crates.io and npm versions can never be");
+    ctx.say("replaced.");
+}
+
 /// `maintainer-repo release-check`.
 pub fn cmd_release_check(ctx: &mut Ctx<'_>, settings: &Settings) -> R<i32> {
     enter_repo(ctx, settings, 74)?;
@@ -380,16 +480,19 @@ pub fn cmd_release_check(ctx: &mut Ctx<'_>, settings: &Settings) -> R<i32> {
     ctx.put_out(b"\n");
     let log = ctx.git(&["log", "--oneline", &range]);
     ctx.show_err(&log);
-    ctx.put_out(&indent4(&log.stdout));
+    // Without `sed` the log is run and nothing is printed (decision P1H-16).
+    if !ctx.missing_tool("sed", 83) {
+        ctx.put_out(&indent4(&log.stdout));
+    }
     ctx.put_out(b"\n");
 
     let prod_globs = read_words(&settings.tunable(&ctx.vars, "PROD_GLOBS").unwrap_or_default());
     let prod = if prod_globs.is_empty() {
         ctx.say("WARNING: this profile declares no PROD_GLOBS, so the production-file");
         ctx.say("         count below is meaningless. Set it in profile.env.");
-        0
+        Some(0)
     } else {
-        count_paths(ctx, &range, &prod_globs)
+        count_paths(ctx, &range, &prod_globs, 101)
     };
     let shipped_globs =
         read_words(&settings.tunable(&ctx.vars, "SHIPPED_GLOBS").unwrap_or_default());
@@ -399,12 +502,20 @@ pub fn cmd_release_check(ctx: &mut Ctx<'_>, settings: &Settings) -> R<i32> {
         ctx.say("         profile.env. Unset is not the same as untouched.");
         None
     } else {
-        Some(count_paths(ctx, &range, &shipped_globs))
+        count_paths(ctx, &range, &shipped_globs, 119)
     };
 
     changelog_source(ctx);
-    let facts =
-        changelog_facts(std::fs::read(settings.repo_path.join("CHANGELOG.md")).ok().as_deref());
-    print_report(ctx, &tag, prod, shipped, &facts);
+    // Streamed, as `sed` and `grep` read it: memory does not grow with the file. A file that
+    // cannot be opened reads as an empty one (the bash sends the errors to /dev/null).
+    let facts = match std::fs::File::open(settings.repo_path.join("CHANGELOG.md")) {
+        Ok(file) => changelog_facts_from(std::io::BufReader::new(file)),
+        Err(_) => changelog_facts(None),
+    };
+    if ["sed", "grep", "tr"].iter().all(|tool| ctx.has_tool(tool)) && prod.is_some() {
+        print_report(ctx, &tag, prod.unwrap_or(0), shipped, &facts);
+    } else {
+        print_report_without_tools(ctx, &tag, prod, shipped, &facts);
+    }
     Ok(0)
 }

@@ -177,3 +177,24 @@ pub fn settings_with(repo: &Path, state: &str, post: &str, tunables: &[(&str, &s
 pub fn args(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
+
+/// A `PATH` of one directory that holds an executable file for each tool the program runs
+/// except the ones in `missing`. The files are empty: the program only asks whether a tool
+/// is there, and the process fake answers the calls.
+pub fn path_without(scratch: &Scratch, missing: &[&str]) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch.dir("tools");
+    for tool in [
+        "tr", "sed", "grep", "awk", "paste", "wc", "sort", "rm", "mktemp", "sleep", "env",
+        "timeout",
+    ] {
+        if missing.contains(&tool) {
+            continue;
+        }
+        let file = dir.join(tool);
+        std::fs::write(&file, "").expect("a tool file can be written");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+            .expect("the tool file can be made executable");
+    }
+    dir.to_string_lossy().into_owned()
+}

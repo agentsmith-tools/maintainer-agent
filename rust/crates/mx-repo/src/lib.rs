@@ -30,6 +30,7 @@
 //! (a failed `gh pr list`), the function takes the `Fact` and the module says
 //! what it does with `Unreadable`, so the choice is visible and tested.
 
+pub mod cleanup;
 pub mod ctx;
 pub mod fixup;
 pub mod prune;

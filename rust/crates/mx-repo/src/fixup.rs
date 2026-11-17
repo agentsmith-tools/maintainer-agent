@@ -45,9 +45,12 @@
 //! - `FIXUP_COUNT_CMD` is profile text run with `bash -c` inside the scratch
 //!   clone of an untrusted branch. The profile is the maintainer's own, but
 //!   the clone's files are the contributor's.
-//! - The scratch directory is removed on exit by this program only. A kill by
-//!   signal leaves it in the state directory (the bash's `EXIT` trap would run
-//!   for `SIGTERM`; decision P1H-7).
+//! - The scratch clone is removed on SIGHUP, SIGINT and SIGTERM as the bash's
+//!   `EXIT` trap removes it, and the program then dies of the signal (status
+//!   129, 130, 143). A child that git started keeps running when the signal
+//!   names this process alone, as it does in the bash; a terminal's Ctrl-C
+//!   reaches the bash's children and does not reach a child here (decision
+//!   P1H-7).
 
 use crate::ctx::{Call, Ctx, R, Stop};
 use crate::shellish::{
@@ -218,6 +221,14 @@ fn path_text(ctx: &mut Ctx<'_>, path: &Path) -> R<String> {
     }
 }
 
+/// `NAME: unbound variable` under `set -u`: the diagnostic names the script and the line, and a
+/// script file ends with status 1 (bash 5.3.9; only `bash -c` gives 127).
+fn unbound(ctx: &mut Ctx<'_>, name: &str, line: u32) -> Stop {
+    let script = ctx.script_name();
+    ctx.put_err(format!("{script}: line {line}: {name}: unbound variable\n").as_bytes());
+    Stop(1)
+}
+
 /// `${MAINTAINER_STATE:?}`: the state directory, or the shell's own error when it is empty.
 fn require_state(ctx: &mut Ctx<'_>, settings: &Settings, line: u32) -> R<String> {
     if settings.state.is_empty() {
@@ -232,8 +243,8 @@ fn require_state(ctx: &mut Ctx<'_>, settings: &Settings, line: u32) -> R<String>
 }
 
 /// `python3 BIN_DIR/maintainer fixup-check PR`.
-fn fixup_check(ctx: &Ctx<'_>, here: &str, pr: &str) -> crate::ctx::Done {
-    ctx.exec(&Call::new(["python3", &format!("{here}/maintainer"), "fixup-check", pr]))
+fn fixup_check(ctx: &Ctx<'_>, here: &str, pr: &str, line: u32) -> crate::ctx::Done {
+    ctx.exec(&Call::new(["python3", &format!("{here}/maintainer"), "fixup-check", pr]).at(line))
 }
 
 /// `$(gh api ... 2>/dev/null)` for an account lookup.
@@ -255,12 +266,20 @@ pub fn cmd_fixup(ctx: &mut Ctx<'_>, settings: &Settings, tree: &Tree, args: &[Os
         ctx.say("POST=off: rehearsing, nothing will be posted or pushed");
     }
     let here = path_text(ctx, &tree.bin_dir)?;
-    let answered = fixup_check(ctx, &here, &pr);
+    let answered = fixup_check(ctx, &here, &pr, 221);
     ctx.show_err(&answered);
     if !answered.ok() {
         return Err(Stop(1));
     }
     let out = cmd_subst(&answered.stdout);
+    // Eleven `$(sed -n 's/^key=//p')` reads. Without `sed` each prints its message and every
+    // field is empty, so the check below refuses (decision P1H-16).
+    if !ctx.has_tool("sed") {
+        for line in 223..=233 {
+            ctx.missing_tool("sed", line);
+        }
+        return Err(ctx.die("fixup-check answered without a state, head, branch, fork or items; refusing to act on that"));
+    }
     let check = match parse_check(&out) {
         Ok(check) => check,
         Err(why) => return Err(ctx.die(&format!(
@@ -301,16 +320,23 @@ pub fn cmd_fixup(ctx: &mut Ctx<'_>, settings: &Settings, tree: &Tree, args: &[Os
     }
     let work = {
         let state = require_state(ctx, settings, 270)?;
-        let made = ctx.exec(&Call::new(["mktemp", "-d", &format!("{state}/fixup-XXXXXX")]));
+        let made = ctx.exec(&Call::new(["mktemp", "-d", &format!("{state}/fixup-XXXXXX")]).at(270));
         ctx.show_err(&made);
         if !made.ok() {
             return Err(ctx.die("no scratch directory"));
         }
         PathBuf::from(String::from_utf8_lossy(&cmd_subst(&made.stdout)).into_owned())
     };
-    // The bash's EXIT trap: `rm -rf` of the scratch clone however the run ends.
+    // The bash's EXIT trap: `rm -rf` of the scratch clone however the run ends,
+    // a fatal signal included (decision P1H-7).
+    // Without `rm` the trap removes nothing and says so when the run ends.
+    let removable = ctx.has_tool("rm");
+    let scratch = removable.then(|| crate::cleanup::Scratch::arm(&work));
     let result = push_path(ctx, settings, &pr, &check, &work, (&me_id, &me_login), dry);
-    drop(std::fs::remove_dir_all(&work));
+    drop(scratch);
+    if !removable {
+        ctx.missing_tool("rm", 1); // the trap string is line 1 of its own text
+    }
     result
 }
 
@@ -323,7 +349,11 @@ fn notice(
     check: &Check,
     dry: bool,
 ) -> R<i32> {
-    let kinds = join_kinds(&item_kinds(&check.items));
+    // `tr | sed | paste | sed`: a host without `tr` or `paste` leaves the list empty.
+    let no_tr = ctx.missing_tool("tr", 247);
+    let no_paste = ctx.missing_tool("paste", 247);
+    let kinds =
+        if no_tr || no_paste { String::new() } else { join_kinds(&item_kinds(&check.items)) };
     let body = notice_body(&check.review_age, &kinds, &check.notice_due, &check.marker);
     if dry {
         ctx.say(&format!(
@@ -334,7 +364,7 @@ fn notice(
         return Ok(0);
     }
     let state = require_state(ctx, settings, 255)?;
-    let made = ctx.exec(&Call::new(["mktemp", &format!("{state}/fixup-notice.XXXXXX")]));
+    let made = ctx.exec(&Call::new(["mktemp", &format!("{state}/fixup-notice.XXXXXX")]).at(255));
     ctx.show_err(&made);
     if !made.ok() {
         return Err(ctx.die("no scratch file"));
@@ -352,14 +382,17 @@ fn notice(
         "--body-file",
         &file_text,
     ]));
-    drop(std::fs::remove_file(&file));
+    // Without `rm` the file stays where it is.
+    if !ctx.missing_tool("rm", 258) {
+        drop(std::fs::remove_file(&file));
+    }
     if !posted.ok() || written.is_err() {
         return Err(ctx.die(&format!("could not post the heads-up on #{pr}")));
     }
     // Posting is not the same as it being there. Ask again.
-    let again = fixup_check(ctx, here, pr);
+    let again = fixup_check(ctx, here, pr, 262);
     let seen = cmd_subst(&[again.stdout.as_slice(), again.stderr.as_slice()].concat());
-    if !heads_up_confirmed(&seen) {
+    if ctx.missing_tool("grep", 263) || !heads_up_confirmed(&seen) {
         return Err(ctx.die(&format!(
             "posted the heads-up but could not read it back on #{pr}, so I cannot say the author was told"
         )));
@@ -593,7 +626,17 @@ fn push_path(
 /// `grep -v '^rebase$' | sort -u | paste -sd, - | sed 's/,/, /g'` over the kinds.
 /// The sort runs through the `sort` program under the caller's locale, which
 /// decides the order of kinds that are not plain ASCII words.
-fn non_rebase_kinds(ctx: &Ctx<'_>, items: &str) -> String {
+fn non_rebase_kinds(ctx: &mut Ctx<'_>, items: &str) -> String {
+    // `tr | sed | grep | sort | paste | sed`: a host without one of these leaves the
+    // list empty, so no patch is applied (decision P1H-16). That also ends the run before
+    // the `grep`s of the count check (303) and of the sign-off (322) could be asked.
+    let mut gone = false;
+    for tool in ["tr", "grep", "sort", "paste"] {
+        gone |= ctx.missing_tool(tool, 298);
+    }
+    if gone {
+        return String::new();
+    }
     let kept: Vec<String> = item_kinds(items).into_iter().filter(|kind| kind != "rebase").collect();
     if kept.is_empty() {
         return String::new();
@@ -649,7 +692,7 @@ fn check_count(ctx: &mut Ctx<'_>, settings: &Settings, work: &Path, g: &Clone) -
     if !staged.ok() {
         return Err(ctx.die("could not read the staged patch"));
     }
-    if !patch_states_count(&cmd_subst(&staged.stdout), &n) {
+    if ctx.missing_tool("awk", 311) || !patch_states_count(&cmd_subst(&staged.stdout), &n) {
         return Err(ctx.die(&format!(
             "the patch does not state {n}, the count FIXUP_COUNT_CMD derives; a typed count is refused"
         )));
@@ -659,9 +702,13 @@ fn check_count(ctx: &mut Ctx<'_>, settings: &Settings, work: &Path, g: &Clone) -
 
 /// Success is what the pull request reports, not what the push returned.
 fn confirm(ctx: &mut Ctx<'_>, settings: &Settings, pr: &str, check: &Check, new: &str) -> R<i32> {
-    let raw_tries = settings.tunable(&ctx.vars, "GH_TRIES").unwrap_or_default();
+    // `tries="$GH_TRIES"` under `set -u`: a profile that unsets it ends a script file with 1,
+    // after the push (decision P1H-18).
+    let Some(raw_tries) = settings.tunable(&ctx.vars, "GH_TRIES") else {
+        return Err(unbound(ctx, "GH_TRIES", 349));
+    };
     let tries = bash_integer(&raw_tries);
-    let backoff = settings.tunable(&ctx.vars, "GH_BACKOFF").unwrap_or_default();
+    let backoff = settings.tunable(&ctx.vars, "GH_BACKOFF");
     let mut got = String::new();
     let mut i = 1_i64;
     while tries.is_some_and(|limit| i <= limit) {
@@ -684,9 +731,13 @@ fn confirm(ctx: &mut Ctx<'_>, settings: &Settings, pr: &str, check: &Check, new:
         // `[ "$i" -lt "$tries" ]` reads the text as a decimal number, so "010" is
         // ten here and eight in the loop's arithmetic.
         if decimal_integer(&raw_tries).is_some_and(|limit| i < limit) {
+            let Some(backoff) = &backoff else {
+                return Err(unbound(ctx, "GH_BACKOFF", 353));
+            };
             let wait = backoff.trim().parse::<u64>().unwrap_or(0);
             let slept = ctx.exec(
-                &Call::new(["sleep", &backoff])
+                &Call::new(["sleep", backoff])
+                    .at(353)
                     .timeout(Duration::from_secs(wait.saturating_add(60))),
             );
             ctx.show_err(&slept);

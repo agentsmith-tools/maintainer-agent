@@ -6,7 +6,9 @@ seed; the names say what they exercise, so a failure can be repeated with
 DIFF_ONLY=<name>.
 """
 
+import os
 import random
+import shutil
 from pathlib import Path
 
 # Branch names a maintainer might meet. All are valid git ref names. The pipe
@@ -508,12 +510,57 @@ def fixup_notice_scenario(fx, rng):
     return ["fixup", "7"] + (["--dry-run"] if rng.random() < 0.2 else []), {}
 
 
+# Tools the bash program runs that the port replaced by code of its own. A host without one
+# must see the same refusals, diagnostics and half-results (lead 3 of the review).
+MISSING_TOOLS = ("tr", "sed", "grep", "awk", "paste", "wc", "sort", "mktemp", "rm", "sleep", "env", "timeout")
+
+
+def notool_scenario(fx, rng):
+    """Any scenario of the program's own families, on a host that lacks one tool."""
+    tool = rng.choice(MISSING_TOOLS)
+    builder = rng.choice([prune_scenario, release_scenario, fixup_scenario, fixup_scenario, fixup_notice_scenario])
+    args, env = builder(fx, rng)
+    path = fx.work / ("tools-no-" + tool)
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir()
+    for entry in fx.tools.iterdir():
+        if entry.name != tool:
+            (path / entry.name).symlink_to(os.readlink(entry))
+    fx.env["PATH"] = "%s:%s" % (fx.stubs, path)
+    return args, env
+
+
+def unsetvar_scenario(fx, rng):
+    """A deployed profile that unsets one of the variables the program reads (a script file ends
+    with 1 on an unbound variable, and only the command substitution that holds one dies)."""
+    base = rng.choice([fixup_scenario, fixup_scenario, release_scenario, prune_scenario])
+    args, env = base(fx, rng)
+    fx.env.setdefault("MAINTAINER_POST", "on")
+    # Not here: `unset GH_ACCOUNT` (the pinned-unbound-profile scenario) and an `unset` of a name the
+    # caller also exports (PROD_GLOBS, FIXUP_COUNT_CMD): the profile loader child never sees the caller's variable.
+    deployed_profile(fx, rng, rng.choice(["unset GH_TRIES\n", "unset GH_BACKOFF\n",
+                                          "GH_TRIES=\n", "unset GH_TRIES GH_BACKOFF\n"]))
+    return args, env
+
+
+def push_with_profile(fx, extra, tries_env=False):
+    """A fixup that reaches the push and the read-back, from a deployed profile with `extra` lines."""
+    b0, f1, remotes = fixup_fixture(fx, None)
+    Path(fx.dir / "fix.patch").write_text(PATCHES["typo"])
+    fixup_answer(fx, "ready", "typo:docs.md", f1, str(fx.dir / "fix.patch"), {})
+    fx.env.setdefault("MAINTAINER_POST", "on")
+    deployed_profile(fx, None, extra)
+    return ["fixup", "7"], {}
+
+
 def all_scenarios(counts):
     """[(name, builder)] with `counts` of each family."""
     out = []
     for family, builder in (("prune", prune_scenario), ("release", release_scenario), ("fixup", fixup_scenario),
                             ("usage", usage_scenario), ("profile", profile_scenario),
-                            ("notag", release_notag_scenario), ("notice", fixup_notice_scenario)):
+                            ("notag", release_notag_scenario), ("notice", fixup_notice_scenario),
+                            ("notool", notool_scenario), ("unsetvar", unsetvar_scenario)):
         for i in range(counts[family]):
             out.append(("%s-%03d" % (family, i), builder))
     return out

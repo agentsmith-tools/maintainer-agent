@@ -213,6 +213,8 @@ exit "$rc"
 '''
     git = "#!/usr/bin/env bash\n" + log_fn + r'''
 _log git "$@"
+# A clone that takes three seconds and fails: the signal scenarios send their signal while it runs.
+case " $* " in *" clone "*) if [ -e "''' + str(case / "ans" / "git.slow-clone") + r'''" ]; then sleep 3; exit 1; fi ;; esac
 exec ''' + realgit + r''' "$@"
 '''
     for name, text in (("gh", gh), ("git", git)):
@@ -274,6 +276,9 @@ def build_trees(work, root, rust_bin):
 def normalise(text, trees, case):
     for tree in trees:
         text = text.replace(str(tree), "<TREE>")
+    # A host without `sed`: lib/profile.sh (line 36) says so before the program does. mx-profile does
+    # not run that line, which is a finding for the mx-profile crate and not for this one.
+    text = re.sub(r"[^\n]*lib/profile\.sh: line \d+: sed: command not found\n", "", text)
     text = re.sub(r"fixup-notice\.[A-Za-z0-9]{6}", "fixup-notice.X", text)
     text = re.sub(r"fixup-[A-Za-z0-9]{6}\b", "fixup-X", text)
     return text
@@ -319,14 +324,55 @@ def variant_tree(work, tree, variant):
     return copy
 
 
+class Finished:
+    """What run_side reads from a finished process (the shape of subprocess.CompletedProcess)."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def run_signalled(fx, prog, pairs, args):
+    """Starts the program, waits until it has made its scratch clone, sends `fx.signal` to the
+    program's own pid, and waits for it and for the stub child it leaves behind. The pid is the
+    program itself: `env` and the Rust wrapper both exec, and the proof reads /proc/PID/cmdline."""
+    import signal as sigmod
+    group = fx.signal.endswith("-GROUP")  # a terminal's Ctrl-C reaches every process of the group
+    num = getattr(sigmod, "SIG" + fx.signal.replace("-GROUP", ""))
+    proc = subprocess.Popen(["env", "-i"] + pairs + ["bash", str(prog)] + list(args), cwd=fx.dir / "cwd",
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=group,
+                            preexec_fn=lambda: [sigmod.signal(n, sigmod.SIG_DFL) for n in (sigmod.SIGINT, sigmod.SIGTERM, sigmod.SIGHUP)])
+    deadline = time.time() + 30
+    calls = fx.dir / "log" / "calls.log"
+    while time.time() < deadline and not (list((fx.dir / "state").glob("fixup-*")) and " clone " in calls.read_text()):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.02)
+    cmdline = Path("/proc/%d/cmdline" % proc.pid)
+    if proc.poll() is None and "maintainer-repo" not in cmdline.read_bytes().decode(errors="replace"):
+        proc.kill()
+        sys.exit("differential: pid %d is not the program under test" % proc.pid)
+    if proc.poll() is None:
+        if group:
+            os.killpg(proc.pid, num)
+        else:
+            proc.send_signal(num)
+    out, err = proc.communicate(timeout=60)
+    time.sleep(3.5)  # the stub's own `sleep 3` ends, so a late write cannot hit the snapshot
+    return Finished(proc.returncode, out, err)
+
+
 def run_side(fx, tree, args, extra_env, trees, timeout=90, merge=False):
     env = dict(fx.env)
     env.update(extra_env)
     prog = tree / "bin" / "maintainer-repo"
     pairs = ["%s=%s" % (k, v) for k, v in env.items()]
-    cp = subprocess.run(["env", "-i"] + pairs + ["timeout", str(timeout), "bash", str(prog)] + list(args),
-                        cwd=fx.dir / "cwd", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT if merge else subprocess.PIPE)
+    if getattr(fx, "signal", None):
+        cp = run_signalled(fx, prog, pairs, args)
+    else:
+        cp = subprocess.run(["env", "-i"] + pairs + ["timeout", str(timeout), "bash", str(prog)] + list(args),
+                            cwd=fx.dir / "cwd", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT if merge else subprocess.PIPE)
     raw_calls = (fx.dir / "log" / "calls.log").read_text(errors="replace")
     calls = raw_calls
     if args and args[0] == "prune":
@@ -398,8 +444,8 @@ def check_python_missing(bash, rust):
     problems = []
     if "python3: command not found" not in bash["stderr"] or bash["rc"] != "1":
         problems.append("bash: %s %r" % (bash["rc"], bash["stderr"]))
-    if rust["stderr"].strip().endswith("python3: command not found") is False or rust["rc"] != "1" or rust["stdout"] != bash["stdout"]:
-        problems.append("rust: %s %r" % (rust["rc"], rust["stderr"]))
+    if rust["rc"] != bash["rc"] or rust["stdout"] != bash["stdout"] or rust["stderr"] != bash["stderr"]:
+        problems.append("rust differs from bash, line number included: %s %r" % (rust["rc"], rust["stderr"]))
     return problems
 
 
@@ -460,7 +506,81 @@ def check_unbound_profile(bash, rust):
     return problems
 
 
+def check_int_pid(bash, rust):
+    """SIGINT sent to the program's pid alone (P1H-7): the bash waits for the foreground git and goes on
+    when it exits by itself, so the failed clone ends the run with 1; the port dies of the signal at once.
+    Both leave no scratch clone behind."""
+    problems = []
+    if bash["rc"] != "1" or "could not clone" not in bash["stderr"]:
+        problems.append("bash: %s %r" % (bash["rc"], bash["stderr"]))
+    if rust["rc"] != "-2":
+        problems.append("rust: died with %s, expected -2" % rust["rc"])
+    for side, got in (("bash", bash), ("rust", rust)):
+        if "fixup-X" in got["state"]:
+            problems.append("%s: the scratch clone is still in the state directory" % side)
+    return problems
+
+
+def pinned_unset_tries(fx):
+    from differential_scenarios import push_with_profile
+    return push_with_profile(fx, "unset GH_TRIES\n")
+
+
+def pinned_unset_backoff(fx):
+    from differential_scenarios import push_with_profile
+    # the first read-back sees the wrong head, so the loop reaches `sleep "$GH_BACKOFF"`
+    fx.env.pop("MAINTAINER_GH_BACKOFF", None)  # the caller's copy would set it again
+    args, env = push_with_profile(fx, "unset GH_BACKOFF\nGH_TRIES=2\n")
+    (fx.dir / "ans" / "gh.pr-view.fromgit").unlink()
+    fx.gh("pr-view", "0123456789012345678901234567890123456789")
+    return args, env
+
+
+def check_same(bash, rust):
+    """Every field equal, and the bash side really ended on the unbound variable."""
+    problems = ["%s differs: bash %r rust %r" % (f, bash[f][-300:], rust[f][-300:]) for f in FIELDS if bash[f] != rust[f]]
+    if "unbound variable" not in bash["stderr"] or bash["rc"] != "1":
+        problems.append("bash did not stop on an unbound variable: %s %r" % (bash["rc"], bash["stderr"]))
+    return problems
+
+
+def pinned_signal(sig):
+    def build(fx):
+        from differential_scenarios import fixup_answer, fixup_fixture, PATCHES
+        b0, f1, remotes = fixup_fixture(fx, None)
+        Path(fx.dir / "fix.patch").write_text(PATCHES["typo"])
+        fixup_answer(fx, "ready", "typo:docs.md", f1, str(fx.dir / "fix.patch"), {})
+        (fx.dir / "ans" / "git.slow-clone").write_text("")
+        fx.signal = sig
+        return ["fixup", "7"], {}
+    return build
+
+
+def check_signal(sig):
+    def check(bash, rust):
+        problems = []
+        want = str(-{"TERM": 15, "INT": 2, "HUP": 1, "INT-GROUP": 2}[sig])
+        for side, got in (("bash", bash), ("rust", rust)):
+            if got["rc"] != want:
+                problems.append("%s: died with %s, expected %s (killed by SIG%s)" % (side, got["rc"], want, sig))
+            if "fixup-X" in got["state"]:
+                problems.append("%s: the scratch clone is still in the state directory" % side)
+            if "git -c core.hooksPath=/dev/null clone" not in got["calls"]:
+                problems.append("%s: the signal did not arrive during the clone" % side)
+        for field in ("stdout", "stderr", "calls", "state"):
+            if bash[field] != rust[field]:
+                problems.append("%s differs between bash and rust" % field)
+        return problems
+    return check
+
+
 PINNED = [
+    ("pinned-unset-tries", pinned_unset_tries, check_same),
+    ("pinned-unset-backoff", pinned_unset_backoff, check_same),
+    ("pinned-signal-term", pinned_signal("TERM"), check_signal("TERM")),
+    ("pinned-signal-int", pinned_signal("INT-GROUP"), check_signal("INT-GROUP")),
+    ("pinned-signal-int-pid", pinned_signal("INT"), check_int_pid),
+    ("pinned-signal-hup", pinned_signal("HUP"), check_signal("HUP")),
     ("pinned-unbound-profile", pinned_unbound_profile, check_unbound_profile),
     ("pinned-loop-stdin", pinned_loop_stdin, check_loop_stdin),
     ("pinned-nonutf8-branch", pinned_nonutf8_branch, check_nonutf8_branch),
@@ -531,7 +651,7 @@ def main():
     tree_bash, tree_rust = build_trees(work, root, rust_bin)
     trees = (tree_bash, tree_rust)
     fx = Fx(work, realgit)
-    counts = {"prune": 150, "release": 110, "fixup": 140, "usage": 18, "profile": 24, "notag": 6, "notice": 20}
+    counts = {"prune": 150, "release": 110, "fixup": 140, "usage": 18, "profile": 24, "notag": 6, "notice": 20, "notool": 160, "unsetvar": 80}
     scenarios = [(n, b, None) for n, b in sc.all_scenarios(counts)]
     scenarios += [(n, b, c) for n, b, c in PINNED]
     wanted = [w for w in only.split(",") if w]
@@ -549,6 +669,7 @@ def main():
         rng = random.Random("%s/%s" % (seed, name))
         fx.reset()
         fx.variant = None
+        fx.signal = None
         try:
             args, extra = builder(fx, rng) if check is None else builder(fx)
         except Exception as error:  # a fixture that cannot be built is a harness fault, not a pass

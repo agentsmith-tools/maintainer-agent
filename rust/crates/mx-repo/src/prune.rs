@@ -187,7 +187,12 @@ pub fn cmd_prune(ctx: &mut Ctx<'_>, settings: &Settings, args: &[OsString]) -> R
         "--jq",
         ".[].headRefName",
     ]));
-    let open_heads = listing.stdout_fact().map(|bytes| join_open_heads(&bytes));
+    // Without `tr` the pipeline prints nothing and the list reads empty (decision P1H-16).
+    let open_heads = if ctx.missing_tool("tr", 38) {
+        Fact::Known(String::new())
+    } else {
+        listing.stdout_fact().map(|bytes| join_open_heads(&bytes))
+    };
 
     ctx.say("remote branches merged into main:");
     let refs = ctx.git(&["for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin"]);
@@ -195,7 +200,19 @@ pub fn cmd_prune(ctx: &mut Ctx<'_>, settings: &Settings, args: &[OsString]) -> R
     let remote = names(ctx, &refs.stdout)?;
     let mut deletable = 0_u32;
     for branch in &remote {
-        match decide_remote(branch, &open_heads, || is_ancestor(ctx, &format!("origin/{branch}"))) {
+        // `[ -n "$open_heads" ] && grep -qx ...` runs `grep` only for a branch that is
+        // not protected, and a host without it reads as "no match" (decision P1H-16).
+        let heads = match &open_heads {
+            Fact::Known(heads)
+                if !heads.is_empty()
+                    && !is_protected(branch, true)
+                    && ctx.missing_tool("grep", 45) =>
+            {
+                Fact::Known(String::new())
+            }
+            other => other.clone(),
+        };
+        match decide_remote(branch, &heads, || is_ancestor(ctx, &format!("origin/{branch}"))) {
             Verdict::Skip => {}
             Verdict::KeepOpenPr => ctx.say(&format!("  keep   {branch} (open PR)")),
             Verdict::Delete => {
