@@ -70,15 +70,27 @@ if [ "$uninstall" = 1 ]; then
     _failed=""
     step() { if "$@"; then :; else _failed="$_failed
   $*"; fi; }
+    _systemctl_user=0
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        _systemctl_user=1
         for t in "$units"/maintainer@*.timer; do
             [ -e "$t" ] || continue
             step run systemctl --user disable --now "$(basename "$t")"
         done
-        for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
-            [ -e "$u" ] || continue
-            run rm -f "$u"
-        done
+    fi
+    # Removing installed files does not require a live systemd user session.
+    # SSH sessions often lack XDG_RUNTIME_DIR, but the units still need to go.
+    for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
+        [ -e "$u" ] || continue
+        step run rm -f "$u"
+    done
+    # --timers creates one stamp per profile. Remove only our stamps; this
+    # directory can contain state owned by other software.
+    for s in "$HOME"/.local/share/systemd/timers/stamp-*; do
+        [ -e "$s" ] || continue
+        step run rm -f "$s"
+    done
+    if [ "$_systemctl_user" = 1 ]; then
         run systemctl --user daemon-reload
     fi
     if [ "$(uname -s)" = Darwin ]; then
@@ -97,7 +109,7 @@ if [ "$uninstall" = 1 ]; then
                 "$root/platform/posix/install-cron.sh" --remove
         done
     fi
-    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo; do
+    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo maintainer-mcp; do
         [ -e "$bin/$f" ] && run rm -f "$bin/$f"
     done
     step run rm -rf "$share"
@@ -108,7 +120,7 @@ if [ "$uninstall" = 1 ]; then
         printf '%s\n' "$_failed" >&2
         say ""
     fi
-    say "removed: $share, the four commands in $bin, and every scheduler entry."
+    say "removed: $share, the five commands in $bin, and every scheduler entry."
     say "kept:    the audit trail. Delete it yourself if you want it gone:"
     for pe in "$root"/profiles/*/profile.env; do
         [ -e "$pe" ] || continue
@@ -226,7 +238,8 @@ run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/mai
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.
-if [ "$dry" = 0 ] && [ ! -d "$share/profiles/sysknife" ]; then
+# Any profile will do: a fork carries its own, not sysknife's.
+if [ "$dry" = 0 ] && ! ls "$share"/profiles/*/profile.env >/dev/null 2>&1; then
     echo "install.sh: profiles did not land where run.sh expects" >&2
     exit 1
 fi

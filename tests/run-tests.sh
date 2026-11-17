@@ -725,6 +725,16 @@ echo "== a failure that retries itself does not raise a critical alert =="
 tn="$stub_dir/toasthome"; rm -rf "$tn"; mkdir -p "$tn"
 tn_repo="$tn/repo"; git init -q -b main "$tn_repo"
 tn_state="$tn/state"; mkdir -p "$tn_state"
+# Lock contention is a transient skip, not a broken run. This drives the
+# lock-timeout branch all the way through run.sh instead of counting its text.
+make_stub flock 'exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_FORCE=1 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a held run lock exits 75 so the next slot can retry" \
+    || bad "lock contention no longer exits 75 (rc=$rc): $out"
+make_stub flock 'exit 0'
 # notify-send records its arguments instead of reaching a desktop.
 cat > "$stub_dir/notify-send" <<'NEOF'
 #!/usr/bin/env bash
@@ -768,6 +778,15 @@ grep -q '^failed review' "$tn/marker.log" \
 grep -q 'could not reach GitHub' "$tn/marker.log" \
     && ok "with the reason the run recorded" \
     || bad "the marker does not carry the reason"
+# A valid first identity check followed by an unreadable pinned-token identity
+# is also transient. The GH_TOKEN check distinguishes the two API calls.
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unresolved pinned-token identity exits 75" \
+    || bad "an unresolved pinned-token identity no longer exits 75 (rc=$rc): $out"
 # A real refusal is NOT transient and must still be critical: a wrong identity is
 # somebody else's name on this account and no retry fixes it.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
@@ -779,11 +798,32 @@ NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=
 grep -q 'u critical' "$tn/notify.log" \
     && ok "a wrong identity is still critical, because no retry fixes it" \
     || bad "the wrong-account refusal was downgraded along with the transient ones"
+# A backend usage-window failure with no report reaches the post-backend
+# transient branch. Keep the helper local and make finish refuse the empty run.
+mkdir -p "$tn/.local/bin"
+cat > "$tn/.local/bin/maintainer" <<'MEOF'
+case "$1" in
+    start) printf '=== start 206-transient ===\n' ;;
+    finish) printf 'no report\n'; exit 1 ;;
+    *) exit 0 ;;
+esac
+MEOF
+chmod +x "$tn/.local/bin/maintainer"
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) echo vladimirrott;; esac'
+make_stub claude 'printf "You\047ve hit your session limit; resets at 10:10pm\\n" >&2; exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      MAINTAINER_SCRIPTS="$tn/no-scripts" \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a transient backend failure without a report exits 75" \
+    || bad "the transient no-report branch no longer exits 75 (rc=$rc): $out"
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 rm -f "$stub_dir/notify-send" "$stub_dir/gh"
 make_stub notify-send 'exit 0'
 # systemd must not fire OnFailure for the transient code either, or the second
 # toast arrives whatever run.sh does about the first.
-grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
+grep -q '^SuccessExitStatus=75$' "$root/platform/linux/maintainer@.service" \
     && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
     || bad "systemd still calls a transient failure a unit failure"
 
@@ -1013,6 +1053,53 @@ if [ "$ih_rc" = 69 ] && grep -q 'in flight' <<<"$ih_out" && [ "$ih_files" = 0 ];
 else
     bad "a refused install still wrote $ih_files file(s) (rc=$ih_rc): $(find "$ihome" -type f | head -3 | tr '\n' ' ')"
 fi
+
+echo "== install.sh accepts a checkout with no sysknife profile (#207) =="
+# install.sh used to test for profiles/sysknife by name after copying, and a fork
+# that carries only its own profile stopped with "profiles did not land where
+# run.sh expects" and never installed the units. Each case installs from a
+# scratch copy of this checkout into a scratch HOME. Offline.
+ins_dir="$(mktemp -d)"
+ins_home="$ins_dir/home"; mkdir -p "$ins_home"
+# Unset the caller's state dir: a held run lock there makes install exit 69.
+ins_src="$ins_dir/repo"; mkdir -p "$ins_src"
+cp -r "$root/." "$ins_src/" && rm -rf "$ins_src/.git" "$ins_src/profiles/sysknife"
+if [ -e "$ins_src/profiles/sysknife" ]; then
+    bad "the fixture still has profiles/sysknife, so the case proves nothing"
+else
+    ok "the fixture has no sysknife profile"
+fi
+ins_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins_home" bash "$ins_src/install.sh" 2>&1)"; ins_rc=$?
+if [ "$ins_rc" = 0 ]; then
+    ok "install.sh exits 0 without a sysknife profile"
+else
+    bad "install.sh exited $ins_rc without a sysknife profile (expected 0): $(tail -n 3 <<<"$ins_out" | tr '\n' ' ')"
+fi
+ins_deployed="$ins_home/.local/share/maintainer/profiles/magent/profile.env"
+if [ -f "$ins_deployed" ]; then
+    ok "the magent profile is deployed"
+else
+    bad "the magent profile was not deployed to $ins_deployed"
+fi
+if [ "$(uname -s)" = Linux ]; then
+    if ls "$ins_home"/.config/systemd/user/maintainer@*.service >/dev/null 2>&1; then
+        ok "the systemd units are copied without a sysknife profile"
+    else
+        bad "no systemd units were copied without a sysknife profile"
+    fi
+fi
+# A checkout with no profile at all is still refused, before anything is written.
+ins2_src="$ins_dir/empty"; mkdir -p "$ins2_src"
+cp -r "$root/." "$ins2_src/" && rm -rf "$ins2_src/.git" "$ins2_src/profiles"
+mkdir -p "$ins2_src/profiles"
+ins2_home="$ins_dir/home2"; mkdir -p "$ins2_home"
+ins2_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins2_home" bash "$ins2_src/install.sh" 2>&1)"; ins2_rc=$?
+if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
+    ok "install.sh refuses a checkout with no profile at all"
+else
+    bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
+fi
+rm -rf "$ins_dir"
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
 # sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
@@ -2122,6 +2209,55 @@ done
 # The profile's own name must be substituted into the shared doctrine, or the
 # agent is told to protect a repository that is not the one it is reviewing.
 grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+echo "== prompt assembly refuses missing inputs and preserves literal names =="
+# Run the same assembly from an isolated copy, so missing-input cases cannot
+# disturb the checkout. A backend sentinel proves no partial prompt reaches it.
+pf_tree="$stub_dir/prompt-failure-tree"
+pf_bin="$stub_dir/prompt-failure-bin"
+mkdir -p "$pf_tree" "$pf_bin"
+cp -R "$root/lib" "$root/profiles" "$pf_tree/"
+printf '#!/usr/bin/env bash\nprintf called > "%s"; exit 0\n' "$stub_dir/prompt-backend-called" > "$pf_bin/claude"
+chmod +x "$pf_bin/claude"
+pf_run() {
+    PATH="$pf_bin:$stub_dir:$PATH" MAINTAINER_STATE_DIR="$stub_dir/state-root" \
+        bash "$pf_tree/lib/run.sh" --show-prompt sysknife review 2>&1
+}
+pf_task="$pf_tree/profiles/sysknife/prompts/review.md"
+mv "$pf_task" "$pf_task.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_task" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing task prompt stops assembly before the backend"
+else
+    bad "a missing task prompt did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_task.saved" "$pf_task"
+pf_common="$pf_tree/profiles/sysknife/prompts/common-preamble.md"
+mv "$pf_common" "$pf_common.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_common" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing common preamble stops assembly before the backend"
+else
+    bad "a missing common preamble did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_common.saved" "$pf_common"
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="a|b"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'a|b reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a maintainer name containing the sed delimiter reaches the prompt literally"
+else
+    bad "a maintainer name containing the sed delimiter was damaged (rc=$pf_rc)"
+fi
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="Smith \& Sons"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'Smith & Sons reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "an ampersand in the maintainer name is preserved literally"
+else
+    bad "an ampersand in the maintainer name expanded in the prompt (rc=$pf_rc)"
+fi
 echo "== the run stamps its own build into the prompt =="
 # A report is only auditable if it names the build that wrote it, and the
 # doctrine tells the agent to take that from the first line of the prompt.
@@ -2665,6 +2801,10 @@ if sc_case 2; then
 grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
 grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
 sc_end; fi
+# Cron output routing is in its own file so it can run alone (the full suite is
+# slower than a single-case gate allows). It reads the tree under test from MX_TREE.
+if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
+grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
@@ -3204,6 +3344,11 @@ left=$(find "$fresh" -type f 2>/dev/null | wc -l)
 check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
+if bash "$suite_root/tests/install-uninstall-artifacts.sh" "$root"; then
+    ok "uninstall removes installed artifacts without a systemd user session"
+else
+    bad "uninstall leaves installed artifacts when systemctl is unavailable"
+fi
 uh="$stub_dir/unin"; mkdir -p "$uh"
 HOME="$uh" "$root/install.sh" >/dev/null 2>&1
 mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
@@ -7309,13 +7454,10 @@ check_transient "$tfix/does-not-exist.log" >/dev/null \
 sc_end; fi
 
 # run.sh has to USE it, on both alert paths, or the classifier is decoration.
-if sc_case 2; then
+if sc_case 1; then
 grep -q 'backend_transient_reason' "$root/lib/run.sh" \
     && ok "run.sh consults the classifier" \
     || bad "the classifier exists and run.sh never calls it"
-n=$(grep -c 'exit 75' "$root/lib/run.sh")
-[ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
-    || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
 sc_end; fi
 
 echo "== the pinned token never survives the run that used it =="

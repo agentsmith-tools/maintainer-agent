@@ -24,13 +24,18 @@ pub struct ProcSpec {
     pub stdin: Option<Vec<u8>>,
     /// How long the whole call may take. There is no unbounded call.
     pub timeout: Duration,
+    /// The locale the child runs under, as the value of `LC_ALL`. `None` means
+    /// `C`. The adapter accepts only names made of `A-Z a-z 0-9 _ . @ -` and
+    /// falls back to `C` for anything else, so this field cannot carry a
+    /// variable name, a path or a secret.
+    pub locale: Option<String>,
 }
 
 impl ProcSpec {
     /// A call with an argument vector and a timeout.
     #[must_use]
     pub fn new(argv: NonEmpty<String>, timeout: Duration) -> Self {
-        Self { argv, env: Vec::new(), cwd: None, stdin: None, timeout }
+        Self { argv, env: Vec::new(), cwd: None, stdin: None, timeout, locale: None }
     }
 
     /// A call from a program name and its arguments.
@@ -57,6 +62,13 @@ impl ProcSpec {
         self
     }
 
+    /// Runs the child under this locale (`LC_ALL`) instead of `C`.
+    #[must_use]
+    pub fn locale(mut self, name: impl Into<String>) -> Self {
+        self.locale = Some(name.into());
+        self
+    }
+
     /// Sets the bytes the child reads from standard input.
     #[must_use]
     pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
@@ -74,6 +86,7 @@ impl fmt::Debug for ProcSpec {
             .field("cwd", &self.cwd)
             .field("stdin_bytes", &self.stdin.as_ref().map(Vec::len))
             .field("timeout", &self.timeout)
+            .field("locale", &self.locale)
             .finish()
     }
 }
@@ -222,6 +235,13 @@ mod tests {
         assert_eq!(spec.env, vec![("A".to_string(), "1".to_string())]);
         assert_eq!(spec.cwd, Some(PathBuf::from("/work")));
         assert_eq!(spec.stdin, Some(b"hi".to_vec()));
+    }
+
+    #[test]
+    fn locale_is_none_by_default_and_set_by_the_builder() {
+        let spec = ProcSpec::command("grep", ["x"], SECOND);
+        assert_eq!(spec.locale, None);
+        assert_eq!(spec.locale("en_US.UTF-8").locale.as_deref(), Some("en_US.UTF-8"));
     }
 
     #[test]
