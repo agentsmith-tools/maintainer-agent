@@ -11693,6 +11693,13 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
 
+echo "== refresh() notes a PR head it could not fetch =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_refresh_pr_fetch.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
+    && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
+    || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
