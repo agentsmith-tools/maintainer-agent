@@ -8434,7 +8434,7 @@ grep -q 'gh run list --limit 5 ... --repo owner/name' <<<"$out" \
     || bad "a claim with out-of-order fragments passed the audit"
 # A short head would let any record holding the tail pass: the 12-character floor stays.
 printf '# r\n\n```\n$ gh ... --force-with-lease\n```\n' > "$au/runs/2026-01-14T00-00-review.md"
-printf '$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
+printf '$ gh pr list\n$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
 out="$(aurun 2026-01-14T00-00-review)"
 grep -q 'gh ... --force-with-lease' <<<"$out" \
     && ok "an abridged claim with a head shorter than 12 characters is not matched" \
