@@ -412,7 +412,12 @@ fn without_sha256sum_the_recipe_is_empty_and_an_unstamped_image_reads_as_current
         0,
         "",
     );
-    rig.host.file(&format!("{HOME}/.config/systemd/user/podman-userns-warmup.service"), b"", false, 0);
+    rig.host.file(
+        &format!("{HOME}/.config/systemd/user/podman-userns-warmup.service"),
+        b"",
+        false,
+        0,
+    );
     let mut o = out();
     hostchecks::container_verification(&rig.ctx(), &mut o);
     assert!(
@@ -504,4 +509,42 @@ fn only_the_exact_answer_yes_means_lingering() {
             "{answer:?}"
         );
     }
+}
+
+#[test]
+fn an_unset_lease_limit_with_a_leases_directory_prints_line_452_then_line_461() {
+    let mut rig = Rig::new(&[("STATE_DIR", "/state"), ("GH_ACCOUNT", "a")]);
+    without(&mut rig, "DOCTOR_LEASE_HOURS", &[("STATE_DIR", "/state"), ("GH_ACCOUNT", "a")]);
+    rig.host.dir("/state/leases");
+    rig.proc.on(&["gh", "auth", "token", "--user", "a"], 1, "");
+    let mut o = out();
+    let stop = audit::audit_trail(&rig.ctx(), &mut o).unwrap_err();
+    assert_eq!(stop, Stop::Exit(1));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stderr),
+        "maintainer-doctor: line 452: DOCTOR_LEASE_HOURS: unbound variable\nmaintainer-doctor: line 461: DOCTOR_LEASE_HOURS: unbound variable\n"
+    );
+}
+
+#[test]
+fn a_reader_that_is_interrupted_once_is_read_again_and_the_token_is_still_found() {
+    struct Flaky {
+        data: Vec<u8>,
+        at: usize,
+        interrupted: bool,
+    }
+    impl std::io::Read for Flaky {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let n = buf.len().min(self.data.len() - self.at).min(3);
+            buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+    let flaky = Flaky { data: b"xxghp_tokenyy".to_vec(), at: 0, interrupted: false };
+    assert!(stream_contains(flaky, &[b"ghp_token".to_vec()], 3).unwrap());
 }
