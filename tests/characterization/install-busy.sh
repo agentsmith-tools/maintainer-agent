@@ -194,24 +194,25 @@ case_busy_state_dir_override() {
 }
 ci_case "busy: MAINTAINER_STATE_DIR in the environment redirects every profile's lock (pins current behaviour)" case_busy_state_dir_override
 
-# Pins current behaviour. With no flock on PATH the call fails, which reads as
-# "held": the install refuses. It fails closed by accident.
+# #243: install.sh names flock as a prerequisite and refuses before it looks at
+# any lock, so a missing flock no longer reads as a held lock by accident.
 case_busy_flock_missing() {
     ci_fixture_profiles; mklock "$(LOCK_S)"
     ci_drop_tool flock
     ci_install
-    cz_expect_rc 69
-    cz_expect_stderr_first "install.sh: a run is in flight for: sysknife"
+    cz_expect_rc 1
+    cz_expect_stderr_first "install.sh: flock is required to install and protect active runs; install flock and ensure it is on PATH."
 }
-ci_case "busy: without flock on PATH an existing lock file reads as held (pins current behaviour)" case_busy_flock_missing
+ci_case "busy: without flock on PATH the install refuses and names flock, whatever lock files exist" case_busy_flock_missing
 
 case_busy_flock_missing_no_lock() {
     ci_fixture_profiles
     ci_drop_tool flock
     ci_install
-    cz_expect_rc 0
+    cz_expect_rc 1
+    cz_expect_stderr_first "install.sh: flock is required to install and protect active runs; install flock and ensure it is on PATH."
 }
-ci_case "busy: without flock and without a lock file the install goes ahead" case_busy_flock_missing_no_lock
+ci_case "busy: without flock and without a lock file the install still refuses" case_busy_flock_missing_no_lock
 
 # The real flock against a lock another process holds. The holder is python3
 # started on its own, so $! is its pid, and the case reads /proc to prove it.

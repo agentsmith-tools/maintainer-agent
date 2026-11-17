@@ -24,7 +24,7 @@ DR_REPO="$MX_TREE/bin/maintainer-repo"
 
 # Plain tools the two programs use, resolved once from the host. `type -P`
 # ignores shell functions and aliases.
-DR_TOOL_NAMES="bash sh env python3 git sed grep awk sort uniq cut tr head tail wc cat ls find dirname basename readlink stat date mktemp rm mkdir rmdir touch cp mv chmod sha256sum paste sleep timeout true false tee tar xargs ln"
+DR_TOOL_NAMES="bash sh env python3 git sed grep awk sort uniq cut tr head tail wc cat ls find dirname basename readlink stat date mktemp rm mkdir rmdir touch cp mv chmod sha256sum paste sleep timeout true false tee tar xargs ln flock"
 
 dr_init() {
     local p
@@ -255,8 +255,8 @@ STUB
 
 # dr_present NAME...: tools that exist on PATH and must not run (command -v finds them).
 dr_present() { local t; for t in "$@"; do cz_stub_tool "$t"; done; }
-# dr_absent NAME...: removes a default stub, so the tool is not on PATH.
-dr_absent() { local t; for t in "$@"; do rm -f "$CZ_CASE/bin/$t"; done; }
+# dr_absent NAME...: removes a default stub and a tool-farm link, so it is not on PATH.
+dr_absent() { local t; for t in "$@"; do rm -f "$CZ_CASE/bin/$t" "$DR_TOOLS/$t"; done; }
 
 dr_ans() {  # $1 = key, $2 = text printed ("" for nothing), $3 = exit code (default 0)
     if [ -n "$2" ]; then printf '%s\n' "$2" > "$CZ_CASE/ans/$1.out"; else : > "$CZ_CASE/ans/$1.out"; fi
@@ -400,7 +400,15 @@ PYEOF
 # dr_install: a healthy deployment of profile magent, for Linux, with every
 # answer a healthy machine gives. Individual cases then break one thing.
 dr_install() {
-    local pdir="$DR_SHARE/profiles/$DR_PROFILE" bin="$DR_HOME/.local/bin"
+    local pdir="$DR_SHARE/profiles/$DR_PROFILE" bin="$DR_HOME/.local/bin" _t _p
+    # dr_absent removes a link from the farm, and the farm is shared by every case
+    # in the file, so a case that removed a tool would leave it missing for the
+    # cases after it. Restore any link a previous case removed.
+    for _t in $DR_TOOL_NAMES; do
+        [ -e "$DR_TOOLS/$_t" ] && continue
+        _p="$(PATH=/usr/local/bin:/usr/bin:/bin type -P "$_t")" || continue
+        ln -s "$_p" "$DR_TOOLS/$_t"
+    done
     mkdir -p "$pdir" "$DR_SHARE/backends" "$bin" "$CZ_STATE"
     printf '#!/bin/sh\n' > "$DR_SHARE/run.sh"; chmod +x "$DR_SHARE/run.sh"
     printf '#!/bin/sh\n' > "$DR_SHARE/run-instance.sh"; chmod +x "$DR_SHARE/run-instance.sh"
@@ -472,6 +480,7 @@ dr_exp_healthy() {
     dr_exp_ok "credential Read rules use the home-relative form that actually denies"
     dr_exp_ok "rehearsal wall present, 120 rules (POST=off posts nothing)"
     dr_exp_head "Backend"
+    dr_exp_ok "flock on PATH"
     dr_exp_ok "backend 'claude' installed"
     dr_exp_ok "claude on PATH (2.0.0 (Claude Code))"
     dr_exp_head "Commands the prompts tell the agent to run"
@@ -507,7 +516,7 @@ dr_exp_healthy() {
     dr_exp_ok "every task has completed since its last failure"
     printf '%s\n' "" "${DR_ESC}[1mDeployed code${DR_ESC}[0m"
     dr_exp_ok "deployed code is that tree's HEAD ($DR_SHORT)"
-    if [ "${1:-}" = quick ]; then dr_exp_sum 30 1 0; else dr_exp_sum 32 0 0; fi
+    if [ "${1:-}" = quick ]; then dr_exp_sum 31 1 0; else dr_exp_sum 33 0 0; fi
 }
 
 # dr_tree PARTS...: a copy of the program files in $CZ_CASE/tree, so a case can

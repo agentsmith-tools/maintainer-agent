@@ -57,10 +57,27 @@ The file name is the suite name.
 | `suite_mutate_glob` | yes | one glob per line, the files a mutation may touch |
 | `suite_ran <log>` | yes | how many tests the clean run executed, read from its log |
 | `suite_needs` | no | binaries the image must contain; `maintainer-doctor` checks them |
+| `suite_named_only` | no | defined means the suite runs only when named, never by inference |
 | `suite_requires <runtime>` | no | refuse a runtime the suite cannot use |
 | `suite_podman_args <runtime> <tree>` | no | extra container flags, one per line |
 | `suite_prefetch_command`, `suite_prefetch_guard` | no | the networked fetch, and a host-side check that runs first |
 | `suite_memory`, `suite_cpus`, `suite_pids`, `suite_tmpfs` | no | this suite's own resources, above the profile and below `MAINTAINER_VERIFY_*` |
+
+The magent profile has a suite named `characterization` that runs one case file of
+`tests/characterization/` through `tests/run-characterization.sh`. The gate's
+filter argument is the case file name, and it must match
+`^[a-z]+-[a-z0-9-]+\.sh$` and exist. The suite defines `suite_named_only`, which
+tells `pick_suite` and `coverage_map` never to infer it: it covers the same
+`bin/` and `lib/` paths as the `shell` suite, so you name it:
+
+```sh
+maintainer-merge verify <pr> <sha> <case-file> '<sed>' characterization
+```
+
+Use it for a change to the orchestrator, the backends, the failure-shape
+classifier, the installers, the doctor or the repo tool, which
+`tests/run-tests.sh` does not pin. CI runs the characterization runner as
+its own job; the pre-commit hook does not, because the cases take about 155 s.
 
 `suite_ran` cannot be generic: cargo prints `test result: ok. N passed`, and a
 shell test prints whatever its author chose. A suite that cannot say how many

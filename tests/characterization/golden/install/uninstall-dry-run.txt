@@ -14,6 +14,12 @@
   would: rm -f @HOME@/.config/systemd/user/maintainer@sysknife-issues.timer
   would: rm -f @HOME@/.config/systemd/user/maintainer@sysknife-review.timer
   would: rm -f @HOME@/.config/systemd/user/podman-userns-warmup.service
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@magent-issues.timer
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@magent-review.timer
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-audit.timer
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-ci.timer
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-issues.timer
+  would: rm -f @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-review.timer
   would: systemctl --user daemon-reload
   would: env MAINTAINER_PROFILE=magent @TREE@/platform/posix/install-cron.sh --remove
   would: env MAINTAINER_PROFILE=sysknife @TREE@/platform/posix/install-cron.sh --remove
@@ -21,9 +27,10 @@
   would: rm -f @HOME@/.local/bin/maintainer-merge
   would: rm -f @HOME@/.local/bin/maintainer-doctor
   would: rm -f @HOME@/.local/bin/maintainer-repo
+  would: rm -f @HOME@/.local/bin/maintainer-mcp
   would: rm -rf @HOME@/.local/share/maintainer
   
-  removed: @HOME@/.local/share/maintainer, the four commands in @HOME@/.local/bin, and every scheduler entry.
+  removed: @HOME@/.local/share/maintainer, the five commands in @HOME@/.local/bin, and every scheduler entry.
   kept:    the audit trail. Delete it yourself if you want it gone:
            ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/__PROFILE__-maint}
            ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/magent-maint}

@@ -276,28 +276,39 @@ case_lock_wait_override() {
 }
 cz_case "lock: MAINTAINER_LOCK_WAIT sets the wait and the wording" case_lock_wait_override
 
-# Pins current behaviour: any non-zero from flock, not only a timeout, reads as
-# "held". A flock that is not installed is the same exit 75. No plan decision yet.
+# A missing flock is a broken host, not a profile that is merely waiting. The
+# exit-1 assertion also rejects a mutation back to the former `if ! flock` case.
 case_flock_missing() {
     rz_setup
     rm "$CZ_CASE/bin/flock"
     rz_run fx review
-    cz_expect_rc 75
+    cz_expect_rc 1
     cz_expect_stdout_empty
-    cz_expect_matches stderr "run.sh: line [0-9]+: flock: command not found"
-    cz_expect_stderr_has "$(lock_alert 3600)"
+    cz_expect_stderr "flock is required to run; install flock and ensure it is on PATH"
     rz_expect_helper_count "failed review" 1
 }
-cz_case "lock: flock missing from PATH is reported as a held lock, exit 75" case_flock_missing
+cz_case "lock: missing flock is reported as a host failure, exit 1" case_flock_missing
 
 case_flock_other_failure() {
     rz_setup
     printf '2' > "$CZ_CASE/flock.rc"
     rz_run fx review
-    cz_expect_rc 75
-    cz_expect_stderr_has "$(lock_alert 3600)"
+    cz_expect_rc 1
+    cz_expect_stderr_has "flock failed to acquire the run lock (exit 2); check flock and the run.lock file"
+    rz_expect_notify_count 1
 }
-cz_case "lock: a flock exit status other than 1 is also a held lock, exit 75" case_flock_other_failure
+cz_case "lock: a flock error other than contention alerts and exits 1" case_flock_other_failure
+
+case_flock_bad_wait() {
+    rz_setup
+    printf '64' > "$CZ_CASE/flock.rc"
+    cz_set MAINTAINER_LOCK_WAIT abc
+    rz_run fx review
+    cz_expect_rc 1
+    cz_expect_stderr_has "flock rejected MAINTAINER_LOCK_WAIT=abc; set it to a valid non-negative number"
+    rz_expect_notify_count 1
+}
+cz_case "lock: invalid MAINTAINER_LOCK_WAIT is reported as configuration failure, exit 1" case_flock_bad_wait
 
 # Pins current behaviour: when the lock file cannot be opened, `exec 9>` fails
 # but the script goes on, and the flock that follows fails on the missing
@@ -307,13 +318,13 @@ case_lock_file_unopenable() {
     ln -sf "$RZ_REAL_FLOCK" "$CZ_CASE/bin/flock"
     mkdir -p "$RZ_STATE/run.lock"
     rz_run fx review
-    cz_expect_rc 75
+    cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_matches stderr "run.sh: line [0-9]+: $RZ_STATE/run.lock: Is a directory"
-    cz_expect_stderr_has "$(lock_alert 3600)"
+    cz_expect_stderr_has "flock failed to acquire the run lock"
     rz_expect_helper_count "failed review" 1
 }
-cz_case "lock: a run.lock that cannot be opened ends as a held lock, exit 75 (no plan decision yet)" case_lock_file_unopenable
+cz_case "lock: a run.lock that cannot be opened is reported as a lock error, exit 1" case_lock_file_unopenable
 
 case_real_lock_held() {
     rz_setup

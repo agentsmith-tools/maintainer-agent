@@ -383,12 +383,27 @@ if [ "$show" = 0 ]; then
 # Two at once would fight over HEAD and over target/, and the loser would review
 # a tree it did not create. Wait rather than fail: a skipped run is a silent gap
 # in the audit trail.
+if ! command -v flock >/dev/null 2>&1; then
+    alert "flock is required to run; install flock and ensure it is on PATH"
+    exit 1
+fi
 exec 9>"$STATE_DIR/run.lock"
-if ! flock -w "$LOCK_WAIT" 9; then
-    # 75, not 1. Another run of this profile is still working; this one is
-    # superseded rather than broken, and the next catch-up slot picks it up.
-    alert_transient "another run held the lock for over ${LOCK_WAIT}s, so this one never started"
-    exit 75
+if flock -w "$LOCK_WAIT" 9; then
+    :
+else
+    flock_rc=$?
+    if [ "$flock_rc" = 1 ]; then
+        # 75, not 1. Another run of this profile is still working; this one is
+        # superseded rather than broken, and the next catch-up slot picks it up.
+        alert_transient "another run held the lock for over ${LOCK_WAIT}s, so this one never started"
+        exit 75
+    elif [ "$flock_rc" = 64 ]; then
+        alert "flock rejected MAINTAINER_LOCK_WAIT=${LOCK_WAIT}; set it to a valid non-negative number"
+        exit 1
+    else
+        alert "flock failed to acquire the run lock (exit $flock_rc); check flock and the run.lock file"
+        exit 1
+    fi
 fi
 
 # And read the cadence gate again, now that we hold the lock.

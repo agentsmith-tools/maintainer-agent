@@ -80,6 +80,14 @@ A characterization case records what the bash gate does now. Where the bash prog
 bash tests/run-characterization.sh gate-merge-path.sh
 ```
 
+CI runs the characterization runner as its own job, `characterization`, in parallel with the other jobs. The pre-commit hook does not run it: the cases take about 155 s, and the hook already runs `tests/run-tests.sh`. To get a merge receipt for a change that only a case file pins (the orchestrator `lib/run.sh`, `lib/backends/*`, `lib/failure-shapes.json`, the installers, the doctor, the repo tool), name the suite and one case file:
+
+```sh
+maintainer-merge verify <pr> <sha> run-backends.sh '<sed>' characterization
+```
+
+The filter must match `^[a-z]+-[a-z0-9-]+\.sh$` and name a file under `tests/characterization/`. The gate never picks this suite by itself, because it covers the same `bin/` and `lib/` paths as the shell suite.
+
 Each case file ends by printing `SUMMARY cases=N pass=P fail=F`. The runner refuses a file with no summary, a summary whose total does not equal the `PASS`/`FAIL` lines it printed, and a run of zero cases, so a file that dies half way cannot read as a pass. `MX_TREE` works here as well.
 
 `tests/characterization/lib.sh` holds the helpers. A case is a function run in a fresh sandbox:
@@ -304,7 +312,7 @@ Do not type a count in a document you write. Point at the command that prints it
 
 ## 7. Running the gates locally
 
-CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `rust` and `the Windows installer parses`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
+CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `characterization`, `rust` and `the Windows installer parses`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
 
 | step | what it protects |
 |---|---|

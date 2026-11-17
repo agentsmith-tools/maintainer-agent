@@ -752,6 +752,15 @@ suite_dir() {
     return 1
 }
 
+# A suite that defines suite_named_only is never chosen by inference: it runs
+# only when the caller names it. The magent characterization suite covers the
+# same bin/ and lib/ paths as the shell suite, and alphabetical order would
+# otherwise hand it every shell pull request.
+suite_inferable() {  # $1 = suite file
+    # shellcheck disable=SC1090
+    ( . "$1" >/dev/null 2>&1; ! declare -F suite_named_only >/dev/null )
+}
+
 # Which suite would cover each path, for a refusal that says what to do next.
 #
 # The gate refused sysknife#370 for the right reason: the PR spans *.md, *.py
@@ -769,6 +778,7 @@ coverage_map() {  # $1 = suite dir, $2... = paths -> "path<TAB>suite-or-none" li
         for s in "$dir"/*.sh; do
             [ -e "$s" ] || continue
             name="$(basename "$s" .sh)"
+            suite_inferable "$s" || continue
             # shellcheck disable=SC1090
             if ( . "$s"; suite_covers "$p" ); then hit="$name"; break; fi
         done
@@ -1056,6 +1066,7 @@ $(coverage_map "$dir" "$@")
     for s in "$dir"/*.sh; do
         [ -e "$s" ] || continue
         name="$(basename "$s" .sh)"
+        suite_inferable "$s" || continue
         # shellcheck disable=SC1090
         ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
     done
@@ -1064,6 +1075,7 @@ $(coverage_map "$dir" "$@")
     if [ -z "$covered" ]; then
         for s in "$dir"/*.sh; do
             [ -e "$s" ] || continue
+            suite_inferable "$s" || continue
             covers_production "$s" "$dir" "$@" \
                 && { covered="$(basename "$s" .sh)"; break; }
         done

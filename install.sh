@@ -86,7 +86,7 @@ if [ "$uninstall" = 1 ]; then
     done
     # --timers creates one stamp per profile. Remove only our stamps; this
     # directory can contain state owned by other software.
-    for s in "$HOME"/.local/share/systemd/timers/stamp-*; do
+    for s in "$HOME"/.local/share/systemd/timers/stamp-maintainer@*.timer; do
         [ -e "$s" ] || continue
         step run rm -f "$s"
     done
@@ -127,6 +127,11 @@ if [ "$uninstall" = 1 ]; then
         say "         $(grep -m1 '^STATE_DIR=' "$pe" | sed 's/.*="//; s/"$//; s|\$HOME|'"$HOME"'|')"
     done
     exit 0
+fi
+
+if ! command -v flock >/dev/null 2>&1; then
+    echo "install.sh: flock is required to install and protect active runs; install flock and ensure it is on PATH." >&2
+    exit 1
 fi
 
 # Stamp the deployed tree with what it came from. Three versions are in play and
@@ -291,6 +296,16 @@ if [ "$timers" = 1 ]; then
     for t in "$root"/platform/linux/*.timer; do
         [ -e "$t" ] || continue
         name="$(basename "$t")"
+        profile_task="${name#maintainer@}"
+        # The task is the text after the LAST hyphen (run-instance.sh splits the
+        # same way): a profile may be named after a hyphenated repository.
+        profile="${profile_task%-*}"
+        # Judge the checkout's profiles, not $share: a dry run has not copied them
+        # there yet, and the real install copies every profile the checkout holds.
+        if [ ! -f "$root/profiles/$profile/profile.env" ]; then
+            say "skipped $name (profile $profile is not deployed)"
+            continue
+        fi
         # Write a stamp first. A fresh Persistent=true timer treats "never run"
         # as a missed slot and fires a catch-up run the instant it is enabled,
         # which lands a job on top of whatever a human is doing right now.
