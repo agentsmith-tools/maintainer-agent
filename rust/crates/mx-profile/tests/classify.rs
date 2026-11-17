@@ -48,7 +48,7 @@ fn with_table(table: &str, log_text: &[u8]) -> (String, i32) {
 
 /// One case per shipped shape: id, class, a log line that triggers it, the text
 /// grep reports.
-const SHAPES: [(&str, &str, &str, &str); 20] = [
+const SHAPES: [(&str, &str, &str, &str); 21] = [
     (
         "session-limit",
         "transient",
@@ -134,6 +134,12 @@ const SHAPES: [(&str, &str, &str, &str); 20] = [
     ),
     ("killed-silently", "needs_human", "Killed", "Killed"),
     (
+        "argument-list-too-long",
+        "needs_human",
+        "cursor prompt is too large for a single argument (argument list too long); reduce the context",
+        "argument list too long",
+    ),
+    (
         "no-doctrine",
         "needs_human",
         "preamble-core.md is missing; refusing",
@@ -151,7 +157,7 @@ fn each_shipped_shape_classifies_its_sample_log_as_the_bash_does() {
         assert_eq!((printed.as_str(), code), (format!("{class}\t{id}\t{hit}").as_str(), 0), "{id}");
         ran += 1;
     }
-    assert_eq!(ran, 20);
+    assert_eq!(ran, 21);
     println!("{ran} shipped shapes classified");
 }
 
@@ -167,7 +173,7 @@ fn the_sample_list_covers_every_id_of_the_shipped_table_but_the_never_matching_o
     sample_ids.push("died-without-saying");
     sample_ids.sort_unstable();
     assert_eq!(sample_ids, table_ids);
-    assert_eq!(table_ids.len(), 21);
+    assert_eq!(table_ids.len(), 22);
 }
 
 // The table's own note says died-without-saying "is never matched by pattern".

@@ -155,14 +155,14 @@ mod tests {
     const ONE: &str = r#"{"id": "a", "class": "transient", "pattern": "boom"}"#;
 
     #[test]
-    fn the_shipped_table_parses_to_its_21_shapes_in_file_order() {
+    fn the_shipped_table_parses_to_its_22_shapes_in_file_order() {
         let path = format!("{}/../../../lib/failure-shapes.json", env!("CARGO_MANIFEST_DIR"));
         let bytes = std::fs::read(&path).unwrap();
         let shapes = parse_shapes(&bytes).unwrap();
-        assert_eq!(shapes.len(), 21, "the shipped table holds 21 shapes");
+        assert_eq!(shapes.len(), 22, "the shipped table holds 22 shapes");
         assert_eq!(shapes[0].id, "session-limit");
-        assert_eq!(shapes[20].id, "died-without-saying");
-        assert_eq!(shapes[20].pattern, "(?!x)x");
+        assert_eq!(shapes[21].id, "died-without-saying");
+        assert_eq!(shapes[21].pattern, "(?!x)x");
     }
 
     #[test]
