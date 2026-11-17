@@ -22,7 +22,7 @@ If you read one section, read [Writing a test that can fail](#3-writing-a-test-t
 | layer | what it proves | add a case when | run it | time |
 |---|---|---|---|---|
 | `tests/run-tests.sh` | The black-box oracle. Every program, profile, script and document refuses what it must and says so. Cases that read program text carry an `sc_case` tag. | You add or change a guard, a prompt rule, a profile file, a script or a doc claim. This is the default home for a new case. | `bash tests/run-tests.sh` | about 4 minutes on a loaded laptop |
-| `tests/characterization/` | What `bin/maintainer-merge` does today, odd behaviour included, by exit code, stream and `gh` argv, so a port can be held to it. | You change the merge gate's observable behaviour: its argv, its exit codes, its messages, its order of calls. | `bash tests/run-characterization.sh` | about 1 minute |
+| `tests/characterization/` | What `bin/maintainer-merge`, `bin/maintainer-doctor` and `bin/maintainer-repo` do today, odd behaviour included, by exit code, stream and `gh` argv, so a port can be held to it. | You change the merge gate's observable behaviour: its argv, its exit codes, its messages, its order of calls. | `bash tests/run-characterization.sh` | about 2.5 to 4 minutes |
 | `tests/diff/` | That two program trees (the bash tree and a Rust tree) behave the same on the scenarios in `tests/diff/scenarios/`: argv per stub tool, exit code, stdout, stderr, state tree. | You add a scenario for a program that a port will replace. | `bash tests/diff/record.sh`, `compare.sh`; the recorder's own checks are `selftest.sh` and `prove.sh` | `selftest.sh` about 25 s, `prove.sh` under 2 minutes |
 | `scripts/rust-gate.sh` | The Rust workspace formats, lints clean, passes its tests, keeps process spawning inside `mx-ports`, and exchanges receipts with the bash gate. | You touch anything under `rust/`. | `scripts/rust-gate.sh` | about 30 s once built |
 
@@ -79,6 +79,14 @@ A characterization case records what the bash gate does now. Where the bash prog
 ```sh
 bash tests/run-characterization.sh gate-merge-path.sh
 ```
+
+CI runs the characterization runner as its own job, `characterization`, in parallel with the other jobs. The pre-commit hook does not run it: the cases take about 155 s, and the hook already runs `tests/run-tests.sh`. To get a merge receipt for a change that only a case file pins (the orchestrator `lib/run.sh`, `lib/backends/*`, `lib/failure-shapes.json`, the installers, the doctor, the repo tool), name the suite and one case file:
+
+```sh
+maintainer-merge verify <pr> <sha> run-backends.sh '<sed>' characterization
+```
+
+The filter must match `^[a-z]+-[a-z0-9-]+\.sh$` and name a file under `tests/characterization/`. The gate never picks this suite by itself, because it covers the same `bin/` and `lib/` paths as the shell suite.
 
 Each case file ends by printing `SUMMARY cases=N pass=P fail=F`. The runner refuses a file with no summary, a summary whose total does not equal the `PASS`/`FAIL` lines it printed, and a run of zero cases, so a file that dies half way cannot read as a pass. `MX_TREE` works here as well.
 
@@ -304,7 +312,7 @@ Do not type a count in a document you write. Point at the command that prints it
 
 ## 7. Running the gates locally
 
-CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `rust` and `the Windows installer parses`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
+CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `characterization`, `rust` and `the Windows installer parses`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
 
 | step | what it protects |
 |---|---|

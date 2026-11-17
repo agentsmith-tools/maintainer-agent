@@ -134,58 +134,58 @@ case_name_unset() {
 }
 cz_case "profile override: with no MAINTAINER_NAME the doctrine says 'the maintainer'" case_name_unset
 
-# Pins current behaviour: the name goes into a sed replacement, where & means the
-# matched text. A name with & comes out with the placeholder inside it. No plan
-# decision yet.
+# PR #242: the name goes into a sed replacement, where & means the matched text.
+# run.sh escapes it, so a name with & reaches the doctrine literally.
 case_name_ampersand() {
     rz_setup
     rz_profile_add 'MAINTAINER_NAME="A&B"'
     rz_run --show-prompt fx review
     cz_expect_rc 0
-    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT" yes "A__MAINTAINER__B"
+    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT" yes "A&B"
     cz_expect_file_equals "$CZ_CASE/stdout" "$CZ_CASE/want.prompt" "the prompt"
 }
-cz_case "profile override: an & in the maintainer name expands to the placeholder (no plan decision yet)" case_name_ampersand
+cz_case "profile override: an & in the maintainer name reaches the doctrine literally" case_name_ampersand
 
-# Pins current behaviour: | is the sed delimiter, so a name holding one breaks the
-# doctrine step. sed complains, the doctrine section is empty, the preview still
-# exits 0. No plan decision yet.
+# PR #242: | is the sed delimiter. run.sh escapes it, so a name holding one
+# reaches the doctrine literally and sed stays quiet.
 case_name_pipe() {
     rz_setup
     rz_profile_add 'MAINTAINER_NAME="A|B"'
     rz_run --show-prompt fx review
     cz_expect_rc 0
-    cz_expect_matches stderr "^sed: -e expression #1, char [0-9]+: unknown option to .s'\$"
-    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT" yes
-    sed -i '/^CORE doctrine/d' "$CZ_CASE/want.prompt"
-    cz_expect_file_equals "$CZ_CASE/stdout" "$CZ_CASE/want.prompt" "the prompt without its doctrine line"
+    cz_expect_stderr_empty
+    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT" yes "A|B"
+    cz_expect_file_equals "$CZ_CASE/stdout" "$CZ_CASE/want.prompt" "the prompt"
 }
-cz_case "profile override: a | in the maintainer name breaks the doctrine step, sed complains, exit 0 (no plan decision yet)" case_name_pipe
+cz_case "profile override: a | in the maintainer name reaches the doctrine literally" case_name_pipe
 
+# PR #242: every required prompt input is checked before assembly. A missing one
+# is reported through the alert path and stops the run, even for a preview.
 case_missing_task_file() {
     rz_setup
     rm "$RZ_PROFILE_DIR/prompts/review.md"
     rz_run --show-prompt fx review
-    cz_expect_rc 0
-    cz_expect_stderr "cat: $RZ_PROFILE_DIR/prompts/review.md: No such file or directory"
-    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT"
-    sed -i '/^TASK review body$/d' "$CZ_CASE/want.prompt"
-    cz_expect_file_equals "$CZ_CASE/stdout" "$CZ_CASE/want.prompt" "the prompt without its task"
+    local msg="required prompt input is missing or unreadable: $RZ_PROFILE_DIR/prompts/review.md; refusing to run"
+    cz_expect_rc 1
+    cz_expect_stdout_empty
+    cz_expect_stderr "$msg"
+    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
+    rz_expect_notify_count 1
 }
-# Pins current behaviour: the error is cat's and the prompt goes ahead without the task.
-cz_case "missing file: a missing task file is cat's error on stderr and the prompt carries on without it, exit 0" case_missing_task_file
+cz_case "missing file: a missing task file exits 1 before any prompt is printed, with a marker and a toast" case_missing_task_file
 
 case_missing_preamble_file() {
     rz_setup
     rm "$RZ_PROFILE_DIR/prompts/common-preamble.md"
     rz_run --show-prompt fx review
-    cz_expect_rc 0
-    cz_expect_stderr "cat: $RZ_PROFILE_DIR/prompts/common-preamble.md: No such file or directory"
-    rz_want_prompt "$CZ_CASE/want.prompt" review claude on "$RZ_PREVIEW_CONTEXT"
-    sed -i -e '/^COMMON-PREAMBLE for fx$/d' -e '/^second preamble line$/d' "$CZ_CASE/want.prompt"
-    cz_expect_file_equals "$CZ_CASE/stdout" "$CZ_CASE/want.prompt" "the prompt without its preamble"
+    local msg="required prompt input is missing or unreadable: $RZ_PROFILE_DIR/prompts/common-preamble.md; refusing to run"
+    cz_expect_rc 1
+    cz_expect_stdout_empty
+    cz_expect_stderr "$msg"
+    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
+    rz_expect_notify_count 1
 }
-cz_case "missing file: a missing profile preamble is cat's error on stderr and the prompt carries on, exit 0" case_missing_preamble_file
+cz_case "missing file: a missing profile preamble exits 1 before any prompt is printed, with a marker and a toast" case_missing_preamble_file
 
 # Pins current behaviour: even a preview reports a missing doctrine through the
 # alert path, so it calls the helper's failed verb with /dev/null as the log and

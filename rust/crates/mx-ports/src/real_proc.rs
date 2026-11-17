@@ -25,7 +25,8 @@ const UNKNOWN_EXIT: i32 = 255;
 ///   an absolute path.
 /// - The child starts with an empty environment. It gets the variables the
 ///   adapter was built with, then the call's own, then `PATH` (the search
-///   path) and `LC_ALL=C`, which a call cannot override.
+///   path) and `LC_ALL`, which a call cannot override through `env`. `LC_ALL` is
+///   `C` unless the call sets [`ProcSpec::locale`] to a plain locale name.
 /// - The child leads its own process group. When the timeout expires the
 ///   whole group gets `SIGKILL`, so `sh -c 'sleep 30 &'` leaves nothing behind.
 /// - A child that dies of signal `n` reports exit code `128 + n`.
@@ -87,7 +88,7 @@ impl Proc for RealProc {
         }
         command
             .env("PATH", std::env::join_paths(&self.search_dirs).unwrap_or_default())
-            .env("LC_ALL", "C");
+            .env("LC_ALL", locale_of(spec));
         if let Some(dir) = &spec.cwd {
             command.current_dir(dir);
         }
@@ -168,6 +169,19 @@ impl Proc for RealProc {
                 stderr: err.snapshot(),
             }),
         }
+    }
+}
+
+/// The `LC_ALL` of a call: its locale when that is a plain name, else `C`.
+fn locale_of(spec: &ProcSpec) -> &str {
+    match spec.locale.as_deref() {
+        Some(name)
+            if !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.@-".contains(&b)) =>
+        {
+            name
+        }
+        _ => "C",
     }
 }
 
@@ -551,6 +565,25 @@ mod tests {
         let seen = env_of_child(&proc(), &spec);
         assert_eq!(seen.get("LC_ALL").map(String::as_str), Some("C"));
         assert_eq!(seen.get("PATH").map(String::as_str), Some(SEARCH_PATH));
+    }
+
+    #[test]
+    fn a_calls_locale_becomes_lc_all_and_env_still_cannot_set_it() {
+        let seen = env_of_child(&proc(), &call("printenv", &[]).locale("en_US.UTF-8"));
+        assert_eq!(seen.get("LC_ALL").map(String::as_str), Some("en_US.UTF-8"));
+        let seen = env_of_child(
+            &proc(),
+            &call("printenv", &[]).locale("C.UTF-8").env("LC_ALL", "de_DE.UTF-8"),
+        );
+        assert_eq!(seen.get("LC_ALL").map(String::as_str), Some("C.UTF-8"));
+    }
+
+    #[test]
+    fn a_locale_that_is_not_a_plain_name_falls_back_to_c() {
+        for bad in ["", "x y", "a;b", "$(id)", "/etc/passwd", "a\nb", "é"] {
+            let seen = env_of_child(&proc(), &call("printenv", &[]).locale(bad));
+            assert_eq!(seen.get("LC_ALL").map(String::as_str), Some("C"), "{bad:?}");
+        }
     }
 
     #[test]

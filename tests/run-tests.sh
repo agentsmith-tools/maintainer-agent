@@ -725,6 +725,16 @@ echo "== a failure that retries itself does not raise a critical alert =="
 tn="$stub_dir/toasthome"; rm -rf "$tn"; mkdir -p "$tn"
 tn_repo="$tn/repo"; git init -q -b main "$tn_repo"
 tn_state="$tn/state"; mkdir -p "$tn_state"
+# Lock contention is a transient skip, not a broken run. This drives the
+# lock-timeout branch all the way through run.sh instead of counting its text.
+make_stub flock 'exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_FORCE=1 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a held run lock exits 75 so the next slot can retry" \
+    || bad "lock contention no longer exits 75 (rc=$rc): $out"
+make_stub flock 'exit 0'
 # notify-send records its arguments instead of reaching a desktop.
 cat > "$stub_dir/notify-send" <<'NEOF'
 #!/usr/bin/env bash
@@ -768,6 +778,15 @@ grep -q '^failed review' "$tn/marker.log" \
 grep -q 'could not reach GitHub' "$tn/marker.log" \
     && ok "with the reason the run recorded" \
     || bad "the marker does not carry the reason"
+# A valid first identity check followed by an unreadable pinned-token identity
+# is also transient. The GH_TOKEN check distinguishes the two API calls.
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unresolved pinned-token identity exits 75" \
+    || bad "an unresolved pinned-token identity no longer exits 75 (rc=$rc): $out"
 # A real refusal is NOT transient and must still be critical: a wrong identity is
 # somebody else's name on this account and no retry fixes it.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
@@ -779,11 +798,32 @@ NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=
 grep -q 'u critical' "$tn/notify.log" \
     && ok "a wrong identity is still critical, because no retry fixes it" \
     || bad "the wrong-account refusal was downgraded along with the transient ones"
+# A backend usage-window failure with no report reaches the post-backend
+# transient branch. Keep the helper local and make finish refuse the empty run.
+mkdir -p "$tn/.local/bin"
+cat > "$tn/.local/bin/maintainer" <<'MEOF'
+case "$1" in
+    start) printf '=== start 206-transient ===\n' ;;
+    finish) printf 'no report\n'; exit 1 ;;
+    *) exit 0 ;;
+esac
+MEOF
+chmod +x "$tn/.local/bin/maintainer"
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) echo vladimirrott;; esac'
+make_stub claude 'printf "You\047ve hit your session limit; resets at 10:10pm\\n" >&2; exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      MAINTAINER_SCRIPTS="$tn/no-scripts" \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a transient backend failure without a report exits 75" \
+    || bad "the transient no-report branch no longer exits 75 (rc=$rc): $out"
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 rm -f "$stub_dir/notify-send" "$stub_dir/gh"
 make_stub notify-send 'exit 0'
 # systemd must not fire OnFailure for the transient code either, or the second
 # toast arrives whatever run.sh does about the first.
-grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
+grep -q '^SuccessExitStatus=75$' "$root/platform/linux/maintainer@.service" \
     && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
     || bad "systemd still calls a transient failure a unit failure"
 
@@ -1013,6 +1053,67 @@ if [ "$ih_rc" = 69 ] && grep -q 'in flight' <<<"$ih_out" && [ "$ih_files" = 0 ];
 else
     bad "a refused install still wrote $ih_files file(s) (rc=$ih_rc): $(find "$ihome" -type f | head -3 | tr '\n' ' ')"
 fi
+
+echo "== install.sh accepts a checkout with no sysknife profile (#207) =="
+# install.sh used to test for profiles/sysknife by name after copying, and a fork
+# that carries only its own profile stopped with "profiles did not land where
+# run.sh expects" and never installed the units. Each case installs from a
+# scratch copy of this checkout into a scratch HOME. Offline.
+ins_dir="$(mktemp -d)"
+ins_home="$ins_dir/home"; mkdir -p "$ins_home"
+# Unset the caller's state dir: a held run lock there makes install exit 69.
+ins_src="$ins_dir/repo"; mkdir -p "$ins_src"
+cp -r "$root/." "$ins_src/" && rm -rf "$ins_src/.git" "$ins_src/profiles/sysknife"
+if [ -e "$ins_src/profiles/sysknife" ]; then
+    bad "the fixture still has profiles/sysknife, so the case proves nothing"
+else
+    ok "the fixture has no sysknife profile"
+fi
+ins_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins_home" bash "$ins_src/install.sh" 2>&1)"; ins_rc=$?
+if [ "$ins_rc" = 0 ]; then
+    ok "install.sh exits 0 without a sysknife profile"
+else
+    bad "install.sh exited $ins_rc without a sysknife profile (expected 0): $(tail -n 3 <<<"$ins_out" | tr '\n' ' ')"
+fi
+ins_deployed="$ins_home/.local/share/maintainer/profiles/magent/profile.env"
+if [ -f "$ins_deployed" ]; then
+    ok "the magent profile is deployed"
+else
+    bad "the magent profile was not deployed to $ins_deployed"
+fi
+if [ "$(uname -s)" = Linux ]; then
+    if ls "$ins_home"/.config/systemd/user/maintainer@*.service >/dev/null 2>&1; then
+        ok "the systemd units are copied without a sysknife profile"
+    else
+        bad "no systemd units were copied without a sysknife profile"
+    fi
+fi
+# A checkout with no profile at all is still refused, before anything is written.
+ins2_src="$ins_dir/empty"; mkdir -p "$ins2_src"
+cp -r "$root/." "$ins2_src/" && rm -rf "$ins2_src/.git" "$ins2_src/profiles"
+mkdir -p "$ins2_src/profiles"
+ins2_home="$ins_dir/home2"; mkdir -p "$ins2_home"
+ins2_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins2_home" bash "$ins2_src/install.sh" 2>&1)"; ins2_rc=$?
+if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
+    ok "install.sh refuses a checkout with no profile at all"
+else
+    bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
+fi
+# flock is required to distinguish an active run from a broken lock tool. Keep
+# only dirname on PATH so the installer reaches the prerequisite check without
+# finding the host's flock or modifying the scratch HOME.
+ins3_home="$ins_dir/home3"; ins3_path="$ins_dir/no-flock-bin"
+mkdir -p "$ins3_home" "$ins3_path"
+ln -s "$(command -v dirname)" "$ins3_path/dirname"
+ins_bash="$(command -v bash)"
+ins3_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins3_home" PATH="$ins3_path" "$ins_bash" "$ins_src/install.sh" 2>&1)"; ins3_rc=$?
+if [ "$ins3_rc" = 1 ] && grep -q 'flock is required to install and protect active runs' <<<"$ins3_out" \
+   && [ ! -e "$ins3_home/.local/share/maintainer" ]; then
+    ok "install.sh explains that flock is required and refuses before writing"
+else
+    bad "install.sh without flock did not refuse before writing (rc=$ins3_rc): $(tail -n 2 <<<"$ins3_out" | tr '\n' ' ')"
+fi
+rm -rf "$ins_dir"
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
 # sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
@@ -2122,6 +2223,55 @@ done
 # The profile's own name must be substituted into the shared doctrine, or the
 # agent is told to protect a repository that is not the one it is reviewing.
 grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+echo "== prompt assembly refuses missing inputs and preserves literal names =="
+# Run the same assembly from an isolated copy, so missing-input cases cannot
+# disturb the checkout. A backend sentinel proves no partial prompt reaches it.
+pf_tree="$stub_dir/prompt-failure-tree"
+pf_bin="$stub_dir/prompt-failure-bin"
+mkdir -p "$pf_tree" "$pf_bin"
+cp -R "$root/lib" "$root/profiles" "$pf_tree/"
+printf '#!/usr/bin/env bash\nprintf called > "%s"; exit 0\n' "$stub_dir/prompt-backend-called" > "$pf_bin/claude"
+chmod +x "$pf_bin/claude"
+pf_run() {
+    PATH="$pf_bin:$stub_dir:$PATH" MAINTAINER_STATE_DIR="$stub_dir/state-root" \
+        bash "$pf_tree/lib/run.sh" --show-prompt sysknife review 2>&1
+}
+pf_task="$pf_tree/profiles/sysknife/prompts/review.md"
+mv "$pf_task" "$pf_task.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_task" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing task prompt stops assembly before the backend"
+else
+    bad "a missing task prompt did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_task.saved" "$pf_task"
+pf_common="$pf_tree/profiles/sysknife/prompts/common-preamble.md"
+mv "$pf_common" "$pf_common.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_common" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing common preamble stops assembly before the backend"
+else
+    bad "a missing common preamble did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_common.saved" "$pf_common"
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="a|b"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'a|b reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a maintainer name containing the sed delimiter reaches the prompt literally"
+else
+    bad "a maintainer name containing the sed delimiter was damaged (rc=$pf_rc)"
+fi
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="Smith \& Sons"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'Smith & Sons reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "an ampersand in the maintainer name is preserved literally"
+else
+    bad "an ampersand in the maintainer name expanded in the prompt (rc=$pf_rc)"
+fi
 echo "== the run stamps its own build into the prompt =="
 # A report is only auditable if it names the build that wrote it, and the
 # doctrine tells the agent to take that from the first line of the prompt.
@@ -2453,6 +2603,18 @@ want=$(python3 -c "import json;print(len(json.load(open('$s'))['permissions']['d
 got=$(python3 -c "import json;print(len(json.load(open('$ih/.local/share/maintainer/profiles/sysknife/settings.json'))['permissions']['deny']))" 2>/dev/null)
 if [ "$got" = "$want" ]; then ok "reinstall refreshes the deny wall ($got rules)"; else bad "deployed deny wall has $got rules, the repo has $want"; fi
 if [ -d "$ih/.local/share/maintainer/profiles/_template" ]; then bad "the scaffolding template was deployed as a runnable profile"; else ok "_template is not deployed"; fi
+# Every verify.d suite of the magent profile reaches the deployment, byte for
+# byte: the merge gate reads suites from there, and a suite that stayed behind
+# would make `verify ... characterization` fail with "no suite" on the machine
+# that runs the timers.
+inst_missing=""
+for _vf in "$root"/profiles/magent/verify.d/*.sh; do
+    cmp -s "$_vf" "$ih/.local/share/maintainer/profiles/magent/verify.d/$(basename "$_vf")" \
+        || inst_missing="$inst_missing $(basename "$_vf")"
+done
+[ -f "$root/profiles/magent/verify.d/characterization.sh" ] && [ -z "$inst_missing" ] \
+    && ok "install deploys every magent verify.d suite, the characterization suite included" \
+    || bad "install did not deploy these magent suites intact:${inst_missing:- characterization.sh is not in the tree}"
 # Every deployed entry point must be executable. A clean install once left
 # run-instance.sh unexecutable because chmod ran before the platform dispatch
 # that copies it, and systemd would have failed with a permission error.
@@ -2653,6 +2815,15 @@ if sc_case 2; then
 grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
 grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
 sc_end; fi
+# Cron output routing is in its own file so it can run alone (the full suite is
+# slower than a single-case gate allows). It reads the tree under test from MX_TREE.
+if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
+grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
+if MX_TREE="$root" bash "$suite_root/tests/install-cron-crontab-errors.sh" >/dev/null 2>&1; then
+    ok "cron install keeps the crontab when crontab -l fails, and installs when there is none"
+else
+    bad "cron install overwrites the crontab when crontab -l fails (run tests/install-cron-crontab-errors.sh)"
+fi
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
@@ -3034,6 +3205,50 @@ grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an une
 [ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
     || bad "no stamp written; enabling fires every missed slot at once"
 
+# A checkout may carry timer units for profiles it does not deploy. Only the
+# deployed profile's units may be enabled; the others are reported and skipped.
+timer_src="$stub_dir/timer-src"; timer_home="$stub_dir/timer-home"
+mkdir -p "$timer_src" "$timer_home"
+cp -r "$root/." "$timer_src/"
+rm -rf "$timer_src/.git" "$timer_src/profiles/sysknife"
+SYSTEMCTL_LOG="$stub_dir/systemctl-filter.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$timer_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$timer_src/install.sh" --timers > "$stub_dir/timer-filter.out" 2>&1
+if ! grep -q 'enable --now maintainer@sysknife-' "$SYSTEMCTL_LOG" \
+    && [ "$(grep -c 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG")" = 2 ] \
+    && grep -q 'skipped maintainer@sysknife-' "$stub_dir/timer-filter.out"; then
+    ok "--timers enables only deployed profiles and reports skipped profile units"
+else
+    bad "--timers enabled an undeployed profile or failed to report skipped units: $(cat "$SYSTEMCTL_LOG")"
+fi
+
+# A profile named after a hyphenated repository: the task is the text after the
+# LAST hyphen, as in platform/linux/run-instance.sh.
+hy_src="$stub_dir/hy-src"; hy_home="$stub_dir/hy-home"
+mkdir -p "$hy_src" "$hy_home"
+cp -r "$root/." "$hy_src/"
+rm -rf "$hy_src/.git" "$hy_src/profiles/sysknife"
+mv "$hy_src/profiles/magent" "$hy_src/profiles/my-repo"
+cp "$hy_src/platform/linux/maintainer@magent-review.timer" "$hy_src/platform/linux/maintainer@my-repo-review.timer"
+SYSTEMCTL_LOG="$stub_dir/systemctl-hy.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$hy_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$hy_src/install.sh" --timers > "$stub_dir/timer-hy.out" 2>&1
+if grep -q 'enable --now maintainer@my-repo-review.timer' "$SYSTEMCTL_LOG" \
+    && ! grep -q 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG"; then
+    ok "--timers splits a hyphenated profile name at the last hyphen"
+else
+    bad "--timers mis-split a hyphenated profile name: $(cat "$SYSTEMCTL_LOG") $(cat "$stub_dir/timer-hy.out")"
+fi
+# A dry run has copied nothing to the share directory yet, so it must still
+# report every unit as one it would enable.
+dr_home="$stub_dir/dry-home"; mkdir -p "$dr_home"
+dr_out="$(PATH="$stub_dir:$PATH" HOME="$dr_home" "$root/install.sh" --dry-run --timers 2>&1)"; dr_rc=$?
+if [ "$dr_rc" = 0 ] && ! grep -q 'skipped maintainer@' <<<"$dr_out" && grep -q 'enable --now maintainer@magent-' <<<"$dr_out"; then
+    ok "--dry-run --timers lists the units it would enable and skips none"
+else
+    bad "--dry-run --timers skipped units or failed (rc=$dr_rc): $(printf '%s' "$dr_out" | head -5 | tr '\n' ' ')"
+fi
+
 echo "== every command the prompt names is declared, and resolves =="
 # A prompt told an unattended run to call `sysknife-maint screen <pr>` after that
 # command had been renamed to `maintainer screen`. The run report carried a
@@ -3192,6 +3407,11 @@ left=$(find "$fresh" -type f 2>/dev/null | wc -l)
 check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
+if bash "$suite_root/tests/install-uninstall-artifacts.sh" "$root"; then
+    ok "uninstall removes installed artifacts without a systemd user session"
+else
+    bad "uninstall leaves installed artifacts when systemctl is unavailable"
+fi
 uh="$stub_dir/unin"; mkdir -p "$uh"
 HOME="$uh" "$root/install.sh" >/dev/null 2>&1
 mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
@@ -7297,13 +7517,10 @@ check_transient "$tfix/does-not-exist.log" >/dev/null \
 sc_end; fi
 
 # run.sh has to USE it, on both alert paths, or the classifier is decoration.
-if sc_case 2; then
+if sc_case 1; then
 grep -q 'backend_transient_reason' "$root/lib/run.sh" \
     && ok "run.sh consults the classifier" \
     || bad "the classifier exists and run.sh never calls it"
-n=$(grep -c 'exit 75' "$root/lib/run.sh")
-[ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
-    || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
 sc_end; fi
 
 echo "== the pinned token never survives the run that used it =="
@@ -8258,6 +8475,63 @@ printf '$ gh pr list --state open\n' > "$au/logs/2026-01-02T00-00-review.command
 aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
     && ok "a command the report recommends is not counted as one it ran" \
     || bad "the audit treats a recommendation as a claim, which fires on every report"
+# A claim over 40 characters is matched whole, not on its first 40: a changed
+# flag in the tail is exactly what the audit exists to catch. An abridged claim
+# with `...` must still have each fragment in the record, so a changed tail
+# after the ellipsis is caught too.
+printf '# r\n\n```\n$ gh pr merge 5 --repo owner/name --squash --admin\n$ gh run list --repo owner/name ... --json databaseId,status\n```\n' \
+    > "$au/runs/2026-01-09T00-00-review.md"
+printf '$ gh pr merge 5 --repo owner/name --squash --rebase\n$ gh run list --repo owner/name --json databaseId,conclusion\n' \
+    > "$au/logs/2026-01-09T00-00-review.commands"
+out="$(aurun 2026-01-09T00-00-review)"
+grep -q 'gh pr merge 5 --repo owner/name --squash --admin' <<<"$out" \
+    && grep -q 'gh run list --repo owner/name ... --json databaseId,status' <<<"$out" \
+    && ok "a long claim with a changed tail, and an abridged claim with a changed tail, are both reported as missing" \
+    || bad "a claim whose tail differs from the record passes the audit: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# A shell continuation at the end of an abridged command is report formatting,
+# not a required fragment in the transcript.
+printf '# r\n\n```\n$ gh run list --repo owner/name ... --json databaseId,status,... \\\n```\n' \
+    > "$au/runs/2026-01-10T00-00-review.md"
+printf '$ gh run list --repo owner/name --json databaseId,status,conclusion\n' \
+    > "$au/logs/2026-01-10T00-00-review.commands"
+out="$(aurun 2026-01-10T00-00-review)"
+grep -q 'all 1 quoted command(s) appear' <<<"$out" \
+    && ok "an abridged claim ending in a shell continuation matches the complete command" \
+    || bad "the shell continuation is treated as a required command fragment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# Require both fragments and their original order.
+printf '# r\n\n```\n$ gh run list --limit 5 ... --repo owner/name\n```\n' \
+    > "$au/runs/2026-01-11T00-00-review.md"
+printf '$ --repo owner/name gh run list --limit 5\n' \
+    > "$au/logs/2026-01-11T00-00-review.commands"
+out="$(aurun 2026-01-11T00-00-review)"
+grep -q 'gh run list --limit 5 ... --repo owner/name' <<<"$out" \
+    && ok "abridged command fragments must appear in order" \
+    || bad "a claim with out-of-order fragments passed the audit"
+# A short head would let any record holding the tail pass: the 12-character floor stays.
+printf '# r\n\n```\n$ gh ... --force-with-lease\n```\n' > "$au/runs/2026-01-14T00-00-review.md"
+printf '$ gh pr list\n$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
+out="$(aurun 2026-01-14T00-00-review)"
+grep -q 'gh ... --force-with-lease' <<<"$out" \
+    && ok "an abridged claim with a head shorter than 12 characters is not matched" \
+    || bad "a claim with a short head passed the audit"
+# An ellipsis-only claim has no evidence and must not pass as an empty sequence.
+printf '# r\n\n```\n$ ...\n```\n' > "$au/runs/2026-01-12T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-12T00-00-review.commands"
+out="$(aurun 2026-01-12T00-00-review)"
+grep -q '1 of 1 quoted command(s) are not in the record' <<<"$out" \
+    && ok "an ellipsis-only claim is rejected" \
+    || bad "an empty fragment list passed the audit"
+# The first fragment is evidence too; matching only a later fragment is not a
+# match for the command the report claims it ran.
+printf '# r\n\n```\n$ gha ... --json databaseId\n```\n' \
+    > "$au/runs/2026-01-13T00-00-review.md"
+printf '$ gh run list --json databaseId\n' \
+    > "$au/logs/2026-01-13T00-00-review.commands"
+out="$(aurun 2026-01-13T00-00-review)"
+grep -q 'gha ... --json databaseId' <<<"$out" \
+    && ok "the first abridged fragment must also appear" \
+    || bad "a claim with a missing first fragment passed the audit"
+
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
@@ -11550,6 +11824,259 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
+
+echo "== refresh() notes a PR head it could not fetch =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_refresh_pr_fetch.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
+    && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
+    || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
+
+echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
+# tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
+# revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
+out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'PASS  an unreadable comment thread' <<<"$out" \
+    && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
+    || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
+
+echo "== the characterization suite is a gate suite that only a named verify runs =="
+# tests/run-tests.sh does not run the cases that pin the orchestrator, the
+# backends, the classifier, the installers, the doctor and the repo tool. Under
+# the shell suite a change to lib/backends/*, lib/failure-shapes.json or
+# lib/run.sh stayed green when mutated, so verify refused it with THE GUARD DOES
+# NOT BITE and no receipt was reachable. profiles/magent/verify.d/
+# characterization.sh runs tests/run-characterization.sh for one case file.
+mgv="$root/profiles/magent/verify.d"
+cs="$mgv/characterization.sh"
+cdir="$suite_root/tests/characterization"
+[ -f "$cs" ] && ok "the magent profile ships a characterization suite" \
+    || bad "profiles/magent/verify.d/characterization.sh is missing"
+for fn in suite_covers suite_image suite_needs suite_mutate_glob suite_command suite_ran; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; declare -F "$fn" >/dev/null ) \
+        && ok "the characterization suite defines $fn" \
+        || bad "the characterization suite does not define $fn"
+done
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_image )" = "docker.io/library/python:3.12" ] \
+    && ok "the characterization suite runs in the same python:3.12 image as the shell suite" \
+    || bad "the characterization suite image is not docker.io/library/python:3.12"
+
+# The filter is one case file name. Each refusal is checked twice: the validator
+# says no, and suite_command turns the value into a command that prints the rule
+# and exits 64 instead of running anything.
+chf_n=0
+for chf in '../x.sh' '-c' 'a b.sh' '' 'run-x;id.sh' $'run-backends.sh\nid' 'run-backends.sh;id' \
+           'run-nothere.sh' 'RUN-BACKENDS.sh' 'run-backends.sh ' '/etc/passwd' 'lib.sh'; do
+    chf_n=$((chf_n + 1))
+    chf_show="$(printf '%s' "$chf" | tr '\n' '~')"
+    # Two passes. With the case directory, a name that is no file is refused by
+    # the existence check as well, which could hide a rule that had gone soft.
+    # Without it, only the name rule stands between the value and the command.
+    # run-nothere.sh follows the rule on purpose: only the directory pass can
+    # refuse it.
+    chf_bad=""
+    for chf_dir in "$cdir" ""; do
+        [ "$chf_dir" = "" ] && [ "$chf" = run-nothere.sh ] && continue
+        # shellcheck disable=SC1090
+        if ( . "$cs" >/dev/null 2>&1; suite_filter_ok "$chf" "$chf_dir" ); then
+            chf_bad="$chf_bad validator-accepts(dir='${chf_dir:+set}')"
+        fi
+        # shellcheck disable=SC1090
+        chf_cmd="$( . "$cs" >/dev/null 2>&1; unset work; CHARACTERIZATION_DIR="$chf_dir" suite_command "$chf" )"
+        if ! { grep -q 'exit 64' <<<"$chf_cmd" && grep -qF '^[a-z]+-[a-z0-9-]+' <<<"$chf_cmd" \
+               && ! grep -q 'run-characterization' <<<"$chf_cmd"; }; then
+            chf_bad="$chf_bad runnable-command(dir='${chf_dir:+set}')"
+        fi
+    done
+    [ -z "$chf_bad" ] \
+        && ok "the filter '$chf_show' is refused with a command that names the rule and runs nothing" \
+        || bad "the filter '$chf_show' got through:$chf_bad"
+done
+[ "$chf_n" = 12 ] && ok "the refusal loop ran all 12 filters" || bad "the refusal loop ran $chf_n filters, not 12"
+# shellcheck disable=SC1090
+( . "$cs" >/dev/null 2>&1; suite_filter_ok run-backends.sh "$cdir" ) \
+    && ok "the filter validator accepts a case file that exists" \
+    || bad "the filter validator refuses run-backends.sh"
+# shellcheck disable=SC1090
+chf_cmd="$( . "$cs" >/dev/null 2>&1; CHARACTERIZATION_DIR="$cdir" suite_command run-backends.sh )"
+[ "$chf_cmd" = "cp -r /repo /tmp/w && cd /tmp/w && bash tests/run-characterization.sh 'run-backends.sh'" ] \
+    && ok "the command for a valid filter passes the quoted name to the runner and nothing else" \
+    || bad "the command for run-backends.sh is: $chf_cmd"
+# A value that carries a command must not run it, whatever the validator did.
+chf_dir="$stub_dir/chfpwn"; rm -rf "$chf_dir"; mkdir -p "$chf_dir"
+# shellcheck disable=SC1090
+chf_cmd="$( . "$cs" >/dev/null 2>&1; CHARACTERIZATION_DIR="$cdir" suite_command "run-backends.sh'; touch $chf_dir/PWNED; '" )"
+( cd "$chf_dir" && sh -c "$chf_cmd" >/dev/null 2>&1 )
+[ ! -e "$chf_dir/PWNED" ] \
+    && ok "a filter that carries a shell command does not run it" \
+    || bad "a filter ran a command in the verify container's shell"
+
+# suite_covers: the paths the cases exercise, and not the documentation.
+for cp in bin/maintainer-merge lib/run.sh lib/backends/opencode.sh lib/failure-shapes.json \
+          install.sh new-profile.sh platform/linux/maintainer.service evals/run-evals.sh; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$cp" ) \
+        && ok "the characterization suite covers $cp" \
+        || bad "the characterization suite does not cover $cp"
+done
+for cp in docs/verifying.md README.md CHANGELOG.md; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$cp" ) \
+        && bad "the characterization suite claims $cp, which no case runs" \
+        || ok "the characterization suite does not cover $cp"
+done
+
+# suite_ran counts PASSED cases, and 0 whenever the summary line is missing.
+chl="$stub_dir/chlog"; rm -rf "$chl"; mkdir -p "$chl"
+printf '== run-backends.sh: 52 cases\nPASS  one\n52 cases, 50 passed, 2 failed\nfiles run: 1\n' > "$chl/with"
+printf '== run-backends.sh: 52 cases\nPASS  one\nfiles run: 1\n' > "$chl/without"
+: > "$chl/empty"
+printf '0 cases, 0 passed, 0 failed\n' > "$chl/zero"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/with" )" = 50 ] \
+    && ok "suite_ran reports the passed count, not the case total" \
+    || bad "suite_ran on a log with the summary printed '$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/with" )', not 50"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/without" )" = 0 ] \
+    && ok "suite_ran reports 0 for a log without the summary line" \
+    || bad "suite_ran counted a log that has no summary line"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/empty" )" = 0 ] \
+    && ok "suite_ran reports 0 for an empty log" \
+    || bad "suite_ran counted an empty log"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/zero" )" = 0 ] \
+    && ok "suite_ran reports 0 for a run of zero cases" \
+    || bad "suite_ran counted a run of zero cases"
+
+# The gate must never infer this suite. Alphabetical order puts it before docs
+# and shell, and it covers the same bin/ and lib/ paths as shell.
+pk() {  # $1 = suite name or "", then paths
+    PROFILE_DIR="$root/profiles/magent" MAINTAINER_PROFILE='' \
+        bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "$@"' _ "$@" 2>/dev/null
+}
+[ "$(pk "" lib/backends/opencode.sh)" = shell ] \
+    && ok "a pull request on lib/backends/opencode.sh is still given the shell suite when none is named" \
+    || bad "an inferred suite for lib/backends/opencode.sh is '$(pk "" lib/backends/opencode.sh)', not shell"
+[ "$(pk "" bin/maintainer-merge tests/run-tests.sh)" = shell ] \
+    && ok "a pull request on bin/maintainer-merge and a test is still given the shell suite" \
+    || bad "an inferred suite for bin/ plus tests/ is '$(pk "" bin/maintainer-merge tests/run-tests.sh)', not shell"
+[ "$(pk "" docs/verifying.md README.md)" = docs ] \
+    && ok "a documentation-only pull request is still given the docs suite" \
+    || bad "an inferred suite for two documents is '$(pk "" docs/verifying.md README.md)', not docs"
+[ "$(pk characterization lib/backends/opencode.sh)" = characterization ] \
+    && ok "naming the characterization suite selects it for a path it covers" \
+    || bad "naming characterization for lib/backends/opencode.sh returned '$(pk characterization lib/backends/opencode.sh)'"
+pk characterization docs/verifying.md >/dev/null; [ "$?" != 0 ] \
+    && ok "naming the characterization suite for a document is refused" \
+    || bad "the characterization suite was accepted for docs/verifying.md"
+# The map a refusal prints names a suite that can be inferred.
+cm="$(PROFILE_DIR="$root/profiles/magent" MAINTAINER_PROFILE='' bash -c '. "'"$root"'/bin/maintainer-merge"; coverage_map "'"$mgv"'" lib/run.sh' 2>/dev/null)"
+grep -q 'shell' <<<"$cm" && ! grep -q 'characterization' <<<"$cm" \
+    && ok "the coverage map names the shell suite for lib/run.sh, never the named-only suite" \
+    || bad "the coverage map for lib/run.sh says: $cm"
+
+# Every production file the suite covers is reachable by a mutation, the same
+# check the shell suite has above.
+# shellcheck disable=SC1090
+mapfile -t chg < <( . "$cs" >/dev/null 2>&1; suite_mutate_glob )
+chg_prod_raw="$( . "$root/profiles/magent/profile.env" >/dev/null 2>&1; printf '%s' "${PROD_GLOBS:-}" )"
+read -r -a chg_prod <<< "$chg_prod_raw"
+chg_checked=0; chg_unreachable=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    chg_isprod=0
+    # shellcheck disable=SC2254  # PROD_GLOBS entries are globs
+    for pat in "${chg_prod[@]}"; do case "$f" in $pat) chg_isprod=1; break ;; esac; done
+    [ "$chg_isprod" = 1 ] || continue
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$f" ) || continue
+    chg_checked=$((chg_checked + 1)); base="${f##*/}"; hit=0
+    # shellcheck disable=SC2254  # a mutate glob is a glob
+    for g in "${chg[@]}"; do [ -n "$g" ] || continue; case "$base" in $g) hit=1; break ;; esac; done
+    [ "$hit" = 1 ] || chg_unreachable="$chg_unreachable $f"
+done < <(git -C "$root" ls-files 2>/dev/null)
+[ "$chg_checked" -gt 0 ] \
+    && ok "the characterization suite covers $chg_checked tracked file(s)" \
+    || bad "no tracked file is covered by the characterization suite; the reachability check is vacuous"
+[ -z "$chg_unreachable" ] \
+    && ok "and a mutation can land on every one of them" \
+    || bad "no mutation can land on:$(printf '%s' "$chg_unreachable" | cut -c1-200)"
+
+# CI runs the cases as a job of their own.
+ci="$root/.github/workflows/ci.yml"
+cjob="$(awk '/^  characterization:$/ {f=1; next} f && /^  [a-z]/ {exit} f' "$ci")"
+[ -n "$cjob" ] && ok "CI has a characterization job" || bad "ci.yml has no characterization job"
+grep -qE '^ +bash tests/run-characterization\.sh( |$)' <<<"$cjob" \
+    && ok "the CI job runs bash tests/run-characterization.sh" \
+    || bad "the CI characterization job does not run the runner"
+grep -qE 'exit "\$rc"' <<<"$cjob" \
+    && ok "the CI job exits with the runner's status" \
+    || bad "the CI characterization job does not exit with the runner's status"
+ci_pin="$(grep -m1 -oE 'actions/checkout@[0-9a-f]{40}' "$ci")"
+[ -n "$ci_pin" ] && grep -q "$ci_pin" <<<"$cjob" \
+    && ok "the CI job uses the same pinned checkout as the other jobs" \
+    || bad "the CI characterization job does not use the pinned checkout"
+[ "$(grep -c 'uses:' <<<"$cjob")" = 1 ] \
+    && ok "the CI job adds no action beyond checkout" \
+    || bad "the CI characterization job uses another action"
+for doc in docs/contributing/trust-boundary.md docs/contributing/testing.md docs/contributing/review-process.md docs/verifying.md; do
+    grep -q 'run-characterization' "$root/$doc" && grep -q 'characterization' "$root/$doc" \
+        && grep -qiE 'CI runs (it|the characterization|them)' "$root/$doc" \
+        && ok "$doc says CI runs the characterization cases" \
+        || bad "$doc does not say that CI runs the characterization cases"
+done
+grep -rqE 'and neither does CI|the hook and CI do not run' "$root/docs" \
+    && bad "a document still says CI does not run the characterization cases" \
+    || ok "no document says CI skips the characterization cases"
+
+# End to end through the real gate, with gh stubbed. A scratch repository holds a
+# copy of this tree; the pull request "changes" one production file and the
+# named case file pins it.
+chrt=""
+command -v podman >/dev/null 2>&1 && chrt=podman
+[ -z "$chrt" ] && command -v docker >/dev/null 2>&1 && chrt=docker
+if [ -n "$chrt" ] && ( "$chrt" image inspect docker.io/library/python:3.12 >/dev/null 2>&1 \
+                       || "$chrt" pull -q docker.io/library/python:3.12 >/dev/null 2>&1 ); then
+    cr="$stub_dir/charrepo"; rm -rf "$cr"; mkdir -p "$cr"
+    tar --exclude=.git -C "$root" -cf - . | tar -C "$cr" -xf -
+    git -C "$cr" init -q -b main; git -C "$cr" config user.email t@t; git -C "$cr" config user.name t
+    git -C "$cr" add -A; git -C "$cr" commit -qm base
+    git -C "$cr" remote add origin "$cr"
+    chead="$(git -C "$cr" rev-parse HEAD)"
+    git -C "$cr" update-ref refs/pull/61/head "$chead"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo lib/backends/opencode.sh;;
+    esac"
+    chverify() {  # $1 = state tag, $2 = filter, $3 = sed
+        PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/chstate-$1" MAINTAINER_ACCOUNT=testuser \
+            MAINTAINER_SLUG=o/r MAINTAINER_REPO="$cr" PROFILE_DIR="$root/profiles/magent" \
+            PROD_GLOBS="bin/* lib/* lib/backends/* scripts/* profiles/*/*.json profiles/*/*.env .github/* install.sh new-profile.sh" \
+            timeout 900 bash "$mg" verify 61 "$chead" "$2" "$3" characterization 2>&1
+    }
+    out="$(chverify pinned run-backends.sh "s/backend_name() { printf 'opencode'; }/backend_name() { printf 'opencodeX'; }/")"; rc=$?
+    [ "$rc" = 0 ] && grep -q 'receipt recorded' <<<"$out" && grep -qE 'evidence of [1-9][0-9]* executed' <<<"$out" \
+        && ok "verify through the characterization suite records a receipt for a change a case file pins" \
+        || bad "no receipt for a pinned mutation (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    out="$(chverify unpinned run-backends.sh 's/^# opencode backend, provider-agnostic, wired here to Groq\./# opencode backend, provider agnostic, wired here to Groq./')"; rc=$?
+    [ "$rc" != 0 ] && grep -q 'THE GUARD DOES NOT BITE' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
+        && ok "verify refuses a comment-only change no case pins as a guard that does not bite" \
+        || bad "an unpinned mutation was not refused as not biting (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    out="$(chverify badfilter '../x.sh' 's/a/b/')"; rc=$?
+    [ "$rc" != 0 ] && grep -qF '^[a-z]+-[a-z0-9-]+' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
+        && ok "verify refuses a path as the filter and the log names the filter rule" \
+        || bad "a path filter was not refused with the rule (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    rm -rf "$cr"
+else
+    noenv "verify through the characterization suite records a receipt for a change a case file pins (needs podman or docker)"
+    noenv "verify refuses a comment-only change no case pins as a guard that does not bite (needs podman or docker)"
+    noenv "verify refuses a path as the filter and the log names the filter rule (needs podman or docker)"
+fi
+rm -f "$stub_dir/gh"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"

@@ -52,10 +52,14 @@ Two limits apply to the whole page.
 The tests live in `tests/run-tests.sh` unless the entry names
 `tests/characterization/`. The pre-commit hook runs `tests/run-tests.sh`, the
 shellcheck sweep and the drift, figures and claims checks. It does not run
-`tests/run-characterization.sh`, and neither does CI. That script holds
-the cases that pin what `maintainer-merge` does, so run it yourself
+`tests/run-characterization.sh`: the cases take about 155 s, and running them
+there would double the time of every commit. CI runs it as its own job,
+`characterization`. That script holds the cases that pin what `maintainer-merge`
+and the other programs do, so run it yourself
 (`bash tests/run-characterization.sh`) whenever a change touches the merge
-gate.
+gate. A change to the orchestrator, the backends, the classifier, the
+installers, the doctor or the repo tool gets its receipt from
+`maintainer-merge verify <pr> <sha> <case-file> <sed> characterization`.
 
 ## The fifteen rules
 
@@ -213,9 +217,9 @@ catches both. The fence fails several cases, among them "merge success: gh pr
 merge argv carries --squash, --delete-branch and --match-head-commit <head>".
 The head read fails "merge: an empty head from a successful read refuses (F9,
 fixed)" and "merge: a head that is not a commit id refuses (F9, fixed)".
-The pre-commit hook and CI do not run that script. After any change to
-`cmd_merge`, run `bash tests/run-characterization.sh` yourself and paste the
-summary line in the pull request.
+The pre-commit hook does not run that script (155 s), and CI runs it as its own
+job. After any change to `cmd_merge`, run `bash tests/run-characterization.sh`
+yourself and paste the summary line in the pull request.
 
 **A change that breaks it.** Treating an empty board as green "because the
 repository has no CI"; adding `--admin` to the merge call; reading the head
@@ -777,8 +781,8 @@ pinned by the case "a mutation of production code the pull request did not
 change earns no receipt" in `tests/run-tests.sh`. We deleted each fix on a copy.
 Deleting the off-diff check turns cases in `tests/run-tests.sh` red. Deleting
 the head refusal turns characterization cases red and nothing in
-`tests/run-tests.sh`, so the step "a pin that bites" holds for it only when
-someone runs `tests/run-characterization.sh`.
+`tests/run-tests.sh`, so the step "a pin that bites" holds for it through the
+CI `characterization` job or a local `tests/run-characterization.sh`.
 
 **4. An entry that says what was wrong.** The changelog names the defect, how it
 was found, and the exact refusal that now exists. It does not say the code is
@@ -817,7 +821,8 @@ lines that do not apply and say why.
 - [ ] What this change does not stop: <the bound>
 - [ ] CHANGELOG text proposed (Security section if it closes a hole)
 - [ ] `bash tests/run-characterization.sh` passes (required when the change
-      touches `bin/maintainer-merge`; the hook and CI do not run it)
+      touches `bin/maintainer-merge`; the hook does not run it and CI runs it
+      as its own job)
 - [ ] `python3 scripts/check_drift.py`, `python3 scripts/render_figures.py
       --check --no-tests` and `bash scripts/check_claims.sh` pass
 ```
