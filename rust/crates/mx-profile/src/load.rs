@@ -81,7 +81,12 @@ pub struct LoadEnv {
     pub home: Option<String>,
     /// `$PROFILE_DIR`, which a run exports.
     pub profile_dir: Option<String>,
-    /// Every `MAINTAINER_*` variable of the caller.
+    /// Variables of the caller passed to the child that sources the files, as
+    /// `NAME=value`. [`LoadEnv::from_vars`] keeps only `MAINTAINER_*`; a program
+    /// that must reproduce the environment its bash tool had, as the doctor does,
+    /// fills this with more, and then owns what it excludes (it must keep
+    /// `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `PATH` and
+    /// `LC_ALL` out).
     pub maintainer: Vec<(String, String)>,
     /// How long one child bash may run.
     pub eval_timeout: Duration,
@@ -179,7 +184,8 @@ pub enum LoadError {
     HomeUnbound,
     /// A source of one of the five exported names is unset. The tools that call
     /// the function run under `set -u`, so the bash stops with
-    /// `NAME: unbound variable` and exits 127. Set and empty is fine.
+    /// `NAME: unbound variable` and exits 1 (a script file; only `bash -c` gives 127).
+    /// Set and empty is fine.
     #[error("{name}: unbound variable")]
     Unbound { name: String },
     /// A sourced file ended the shell with `exit`. The bash tool would have
@@ -243,17 +249,17 @@ impl LoadError {
     }
 
     /// The status a tool built on the bash function ends with: 1 for the
-    /// function's own refusals, 127 for an unbound variable as for any
-    /// non-interactive bash, and the `exit` status of a file that ended the
-    /// shell. A timeout is 124, as `timeout` reports it.
+    /// function's own refusals and for an unbound variable (the tools are script
+    /// files, and bash ends a script file with 1; 127 is what `bash -c` gives),
+    /// the `exit` status of a file that ended the shell, and 124 for a timeout,
+    /// as `timeout` reports it.
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::ShellExited { code } => *code,
             Self::EvalTimedOut => 124,
-            // A non-interactive bash ends with 127 on an unbound variable.
-            Self::Unbound { .. } => 127,
-            Self::DefaultsMissing
+            Self::Unbound { .. }
+            | Self::DefaultsMissing
             | Self::HomeUnbound
             | Self::DefaultsFailed { .. }
             | Self::NoProfileDeployed
@@ -294,6 +300,54 @@ pub fn load_profile(proc: &dyn Proc, env: &LoadEnv) -> Load {
     let mut shown = Streams::default();
     let result = resolve(proc, env, &mut shown);
     Load { stdout: shown.stdout, stderr: shown.stderr, result }
+}
+
+/// What `bin/maintainer-doctor` does before its first check: source `defaults.env`,
+/// source `profile_env` when it is a file, then apply the `MAINTAINER_<KEY>`
+/// overrides. The doctor names its own profile and tolerates a profile with no
+/// `profile.env`, so it cannot use [`load_profile`], which refuses both.
+///
+/// A missing `defaults.env` and a `defaults.env` whose last command fails are
+/// the two refusals, as for `maintainer_load_defaults`. The five exported names
+/// are not derived: the doctor reads the profile's own variables.
+#[must_use]
+pub fn load_for_doctor(proc: &dyn Proc, env: &LoadEnv, profile_env: &Path) -> Load {
+    let mut shown = Streams::default();
+    let result = resolve_for_doctor(proc, env, profile_env, &mut shown);
+    Load { stdout: shown.stdout, stderr: shown.stderr, result }
+}
+
+fn resolve_for_doctor(
+    proc: &dyn Proc,
+    env: &LoadEnv,
+    profile_env: &Path,
+    shown: &mut Streams,
+) -> Result<Profile, LoadError> {
+    // `$HOME` is the first expansion of the defaults search, as in `resolve`.
+    if env.home.is_none() {
+        return Err(LoadError::HomeUnbound);
+    }
+    let defaults = defaults_path(env).ok_or(LoadError::DefaultsMissing)?;
+    let first = evaluate(proc, env, std::slice::from_ref(&defaults));
+    let after_defaults = match &first.outcome {
+        Ok(dump) if dump.last_status == 0 => dump.vars.clone(),
+        Ok(dump) => {
+            shown.keep(&first);
+            return Err(LoadError::DefaultsFailed { status: dump.last_status });
+        }
+        Err(error) => {
+            shown.keep(&first);
+            return Err(error.clone());
+        }
+    };
+    let mut vars = if is_file(profile_env) {
+        source(proc, env, &[defaults.clone(), profile_env.to_path_buf()], shown)?
+    } else {
+        shown.keep(&first);
+        after_defaults
+    };
+    apply_overrides(&mut vars, &defaults);
+    Ok(Profile { vars, exported: Vec::new(), deployed_name: None })
 }
 
 /// What the sourced files printed, in the order the bash would have printed it.

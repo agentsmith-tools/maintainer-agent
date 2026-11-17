@@ -133,7 +133,12 @@ pub(crate) fn evaluate(proc: &dyn Proc, env: &LoadEnv, files: &[PathBuf]) -> Eva
     };
     let marker = [b"\0MX-PROFILE-".as_slice(), token.as_bytes(), b"\0"].concat();
     let Some(at) = rfind(&output.stdout, &marker) else {
-        // The shell ended before the read-back: the file called `exit`.
+        // The shell ended before the read-back: the file called `exit`, or `set -u`
+        // stopped it. This child runs under `bash -c`, which ends with 127 on an
+        // unbound variable; the tools that source these files are script files,
+        // which end with 1, so that status is reported as 1 (correction to P1F-9).
+        let unbound = output.stderr.ends_with(b": unbound variable\n");
+        let code = if code == 127 && unbound { 1 } else { code };
         return Evaluation {
             stdout: output.stdout,
             stderr: output.stderr,

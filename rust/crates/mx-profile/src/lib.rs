@@ -45,7 +45,7 @@ pub mod scrub;
 mod shell;
 pub mod table;
 
-pub use load::{Load, LoadEnv, LoadError, Profile, load_profile};
+pub use load::{Load, LoadEnv, LoadError, Profile, load_for_doctor, load_profile};
 
 #[cfg(test)]
 mod testutil;
