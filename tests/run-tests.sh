@@ -3174,6 +3174,50 @@ grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an une
 [ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
     || bad "no stamp written; enabling fires every missed slot at once"
 
+# A checkout may carry timer units for profiles it does not deploy. Only the
+# deployed profile's units may be enabled; the others are reported and skipped.
+timer_src="$stub_dir/timer-src"; timer_home="$stub_dir/timer-home"
+mkdir -p "$timer_src" "$timer_home"
+cp -r "$root/." "$timer_src/"
+rm -rf "$timer_src/.git" "$timer_src/profiles/sysknife"
+SYSTEMCTL_LOG="$stub_dir/systemctl-filter.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$timer_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$timer_src/install.sh" --timers > "$stub_dir/timer-filter.out" 2>&1
+if ! grep -q 'enable --now maintainer@sysknife-' "$SYSTEMCTL_LOG" \
+    && [ "$(grep -c 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG")" = 2 ] \
+    && grep -q 'skipped maintainer@sysknife-' "$stub_dir/timer-filter.out"; then
+    ok "--timers enables only deployed profiles and reports skipped profile units"
+else
+    bad "--timers enabled an undeployed profile or failed to report skipped units: $(cat "$SYSTEMCTL_LOG")"
+fi
+
+# A profile named after a hyphenated repository: the task is the text after the
+# LAST hyphen, as in platform/linux/run-instance.sh.
+hy_src="$stub_dir/hy-src"; hy_home="$stub_dir/hy-home"
+mkdir -p "$hy_src" "$hy_home"
+cp -r "$root/." "$hy_src/"
+rm -rf "$hy_src/.git" "$hy_src/profiles/sysknife"
+mv "$hy_src/profiles/magent" "$hy_src/profiles/my-repo"
+cp "$hy_src/platform/linux/maintainer@magent-review.timer" "$hy_src/platform/linux/maintainer@my-repo-review.timer"
+SYSTEMCTL_LOG="$stub_dir/systemctl-hy.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$hy_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$hy_src/install.sh" --timers > "$stub_dir/timer-hy.out" 2>&1
+if grep -q 'enable --now maintainer@my-repo-review.timer' "$SYSTEMCTL_LOG" \
+    && ! grep -q 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG"; then
+    ok "--timers splits a hyphenated profile name at the last hyphen"
+else
+    bad "--timers mis-split a hyphenated profile name: $(cat "$SYSTEMCTL_LOG") $(cat "$stub_dir/timer-hy.out")"
+fi
+# A dry run has copied nothing to the share directory yet, so it must still
+# report every unit as one it would enable.
+dr_home="$stub_dir/dry-home"; mkdir -p "$dr_home"
+dr_out="$(PATH="$stub_dir:$PATH" HOME="$dr_home" "$root/install.sh" --dry-run --timers 2>&1)"; dr_rc=$?
+if [ "$dr_rc" = 0 ] && ! grep -q 'skipped maintainer@' <<<"$dr_out" && grep -q 'enable --now maintainer@magent-' <<<"$dr_out"; then
+    ok "--dry-run --timers lists the units it would enable and skips none"
+else
+    bad "--dry-run --timers skipped units or failed (rc=$dr_rc): $(printf '%s' "$dr_out" | head -5 | tr '\n' ' ')"
+fi
+
 echo "== every command the prompt names is declared, and resolves =="
 # A prompt told an unattended run to call `sysknife-maint screen <pr>` after that
 # command had been renamed to `maintainer screen`. The run report carried a
@@ -11749,6 +11793,13 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
+
+echo "== refresh() notes a PR head it could not fetch =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_refresh_pr_fetch.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
+    && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
+    || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
