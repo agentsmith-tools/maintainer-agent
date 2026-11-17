@@ -661,7 +661,7 @@ fn a_profile_that_leaves_a_source_variable_unset_is_an_unbound_variable_error() 
         tree.profile("fx", &body);
         let (error, _, _) = load_err(&tree, &[]);
         assert_eq!(error, LoadError::Unbound { name: source.to_string() }, "{source}");
-        assert_eq!(error.exit_code(), 127);
+        assert_eq!(error.exit_code(), 1, "a script file ends with 1; only bash -c gives 127");
         assert_eq!(
             error.message(),
             format!("maintainer: {source}: unbound variable\n").into_bytes()
@@ -703,14 +703,14 @@ fn an_unset_home_is_an_unbound_variable_error() {
 }
 
 // The child runs under `set -u` too, so a profile that reads an unset variable
-// ends the shell with status 127, as it ends the calling tool.
+// ends the shell with status 1, as it ends the calling script file.
 #[test]
-fn a_profile_that_reads_an_unset_variable_ends_the_shell_with_status_127() {
+fn a_profile_that_reads_an_unset_variable_ends_the_shell_with_status_1() {
     let tree = Tree::new("profile-unbound");
     tree.profile("fx", &format!("X=\"$NOT_SET_ANYWHERE\"\n{PROFILE_FX}"));
     let loaded = load_profile(&real_proc(), &tree.env(&[]));
     assert!(String::from_utf8_lossy(&loaded.stderr).contains("NOT_SET_ANYWHERE: unbound variable"));
-    assert_eq!(err_of(loaded), LoadError::ShellExited { code: 127 });
+    assert_eq!(err_of(loaded), LoadError::ShellExited { code: 1 });
 }
 
 // Bash drops the newline with `$(basename ...)`, lists `a`, and then finds no
