@@ -400,7 +400,15 @@ PYEOF
 # dr_install: a healthy deployment of profile magent, for Linux, with every
 # answer a healthy machine gives. Individual cases then break one thing.
 dr_install() {
-    local pdir="$DR_SHARE/profiles/$DR_PROFILE" bin="$DR_HOME/.local/bin"
+    local pdir="$DR_SHARE/profiles/$DR_PROFILE" bin="$DR_HOME/.local/bin" _t _p
+    # dr_absent removes a link from the farm, and the farm is shared by every case
+    # in the file, so a case that removed a tool would leave it missing for the
+    # cases after it. Restore any link a previous case removed.
+    for _t in $DR_TOOL_NAMES; do
+        [ -e "$DR_TOOLS/$_t" ] && continue
+        _p="$(PATH=/usr/local/bin:/usr/bin:/bin type -P "$_t")" || continue
+        ln -s "$_p" "$DR_TOOLS/$_t"
+    done
     mkdir -p "$pdir" "$DR_SHARE/backends" "$bin" "$CZ_STATE"
     printf '#!/bin/sh\n' > "$DR_SHARE/run.sh"; chmod +x "$DR_SHARE/run.sh"
     printf '#!/bin/sh\n' > "$DR_SHARE/run-instance.sh"; chmod +x "$DR_SHARE/run-instance.sh"
@@ -472,8 +480,8 @@ dr_exp_healthy() {
     dr_exp_ok "credential Read rules use the home-relative form that actually denies"
     dr_exp_ok "rehearsal wall present, 120 rules (POST=off posts nothing)"
     dr_exp_head "Backend"
-    dr_exp_ok "backend 'claude' installed"
     dr_exp_ok "flock on PATH"
+    dr_exp_ok "backend 'claude' installed"
     dr_exp_ok "claude on PATH (2.0.0 (Claude Code))"
     dr_exp_head "Commands the prompts tell the agent to run"
     dr_exp_ok "gh resolves"
