@@ -627,7 +627,27 @@ core="$(libfile preamble-core.md)" || {
 }
 prose="$(libfile prose-style.md || true)"
 
-{
+# Fail before constructing even a partial prompt. In particular, the doctrine
+# and task are required inputs: a write-capable backend must never see a prompt
+# that silently lost either one after `cat` failed.
+common_preamble="$PROFILE_DIR/prompts/common-preamble.md"
+task_prompt="$PROFILE_DIR/prompts/$task.md"
+for required_prompt in "$common_preamble" "$core" "$task_prompt"; do
+    if [ ! -r "$required_prompt" ]; then
+        alert "required prompt input is missing or unreadable: $required_prompt; refusing to run"
+        exit 1
+    fi
+done
+
+# `&` expands to the matched text in a sed replacement, and the delimiter and
+# backslash also have meaning there. Escape the maintainer's literal name so
+# punctuation in a configured name cannot corrupt the shared doctrine.
+maintainer_name="${MAINTAINER_NAME:-the maintainer}"
+maintainer_name="${maintainer_name//\\/\\\\}"
+maintainer_name="${maintainer_name//&/\\&}"
+maintainer_name="${maintainer_name//|/\\|}"
+
+(
     # 0. Provenance, first, because the doctrine tells the agent to open its
     #    report with the build that wrote it and this is the only place that
     #    build appears. Without these lines the instruction pointed at nothing,
@@ -639,16 +659,16 @@ prose="$(libfile prose-style.md || true)"
         "$MAINTAINER_VERSION" "$MAINTAINER_COMMIT" "$profile" "$task" "$(backend_name)" "$(date -Is)"
     printf 'Open your run report with that version and that commit, copied from this line. Do not copy them from an earlier report; an earlier report was written by an earlier build.\n\n'
     # 1. Who this profile is, and what it is authorised to do.
-    cat "$PROFILE_DIR/prompts/common-preamble.md"
+    cat "$common_preamble" || exit 1
     printf '\n\n'
     # 2. The doctrine, shared by every profile so it cannot drift between repos.
-    sed -e "s|__MAINTAINER__|${MAINTAINER_NAME:-the maintainer}|g" \
-        -e "s|__SLUG__|$REPO_SLUG|g" "$core"
+    sed -e "s|__MAINTAINER__|$maintainer_name|g" \
+        -e "s|__SLUG__|$REPO_SLUG|g" "$core" || exit 1
     printf '\n\n'
     # 3. Prose discipline. Opt-OUT, not opt-in: anything other than an explicit
     #    "raw" gets it, so a missing or misspelled value still writes well.
     if [ "${PROSE_STYLE:-stop-slop}" != "raw" ] && [ -n "$prose" ]; then
-        cat "$prose"
+        cat "$prose" || exit 1
         printf '\n\n'
     fi
     # 4. Rehearsal, last before the task so it overrides anything above it.
@@ -686,9 +706,12 @@ POSTING
         printf '\n\n'
     fi
     # 5. The task, then what changed since this task last ran.
-    cat "$PROFILE_DIR/prompts/$task.md"
+    cat "$task_prompt" || exit 1
     printf '\n\n## Context for this run, computed just now\n\n```\n%s\n```\n' "$context"
-} > "$prompt_file"
+) > "$prompt_file" || {
+    alert "prompt assembly failed; refusing to start the backend"
+    exit 1
+}
 
 if [ "$show" = 1 ]; then
     cat "$prompt_file"

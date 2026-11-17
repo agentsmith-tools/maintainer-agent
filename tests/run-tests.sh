@@ -725,6 +725,16 @@ echo "== a failure that retries itself does not raise a critical alert =="
 tn="$stub_dir/toasthome"; rm -rf "$tn"; mkdir -p "$tn"
 tn_repo="$tn/repo"; git init -q -b main "$tn_repo"
 tn_state="$tn/state"; mkdir -p "$tn_state"
+# Lock contention is a transient skip, not a broken run. This drives the
+# lock-timeout branch all the way through run.sh instead of counting its text.
+make_stub flock 'exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_FORCE=1 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a held run lock exits 75 so the next slot can retry" \
+    || bad "lock contention no longer exits 75 (rc=$rc): $out"
+make_stub flock 'exit 0'
 # notify-send records its arguments instead of reaching a desktop.
 cat > "$stub_dir/notify-send" <<'NEOF'
 #!/usr/bin/env bash
@@ -768,6 +778,15 @@ grep -q '^failed review' "$tn/marker.log" \
 grep -q 'could not reach GitHub' "$tn/marker.log" \
     && ok "with the reason the run recorded" \
     || bad "the marker does not carry the reason"
+# A valid first identity check followed by an unreadable pinned-token identity
+# is also transient. The GH_TOKEN check distinguishes the two API calls.
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unresolved pinned-token identity exits 75" \
+    || bad "an unresolved pinned-token identity no longer exits 75 (rc=$rc): $out"
 # A real refusal is NOT transient and must still be critical: a wrong identity is
 # somebody else's name on this account and no retry fixes it.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
@@ -779,11 +798,32 @@ NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=
 grep -q 'u critical' "$tn/notify.log" \
     && ok "a wrong identity is still critical, because no retry fixes it" \
     || bad "the wrong-account refusal was downgraded along with the transient ones"
+# A backend usage-window failure with no report reaches the post-backend
+# transient branch. Keep the helper local and make finish refuse the empty run.
+mkdir -p "$tn/.local/bin"
+cat > "$tn/.local/bin/maintainer" <<'MEOF'
+case "$1" in
+    start) printf '=== start 206-transient ===\n' ;;
+    finish) printf 'no report\n'; exit 1 ;;
+    *) exit 0 ;;
+esac
+MEOF
+chmod +x "$tn/.local/bin/maintainer"
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) echo vladimirrott;; esac'
+make_stub claude 'printf "You\047ve hit your session limit; resets at 10:10pm\\n" >&2; exit 1'
+out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      MAINTAINER_SCRIPTS="$tn/no-scripts" \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "a transient backend failure without a report exits 75" \
+    || bad "the transient no-report branch no longer exits 75 (rc=$rc): $out"
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 rm -f "$stub_dir/notify-send" "$stub_dir/gh"
 make_stub notify-send 'exit 0'
 # systemd must not fire OnFailure for the transient code either, or the second
 # toast arrives whatever run.sh does about the first.
-grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
+grep -q '^SuccessExitStatus=75$' "$root/platform/linux/maintainer@.service" \
     && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
     || bad "systemd still calls a transient failure a unit failure"
 
@@ -2183,6 +2223,55 @@ done
 # The profile's own name must be substituted into the shared doctrine, or the
 # agent is told to protect a repository that is not the one it is reviewing.
 grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+echo "== prompt assembly refuses missing inputs and preserves literal names =="
+# Run the same assembly from an isolated copy, so missing-input cases cannot
+# disturb the checkout. A backend sentinel proves no partial prompt reaches it.
+pf_tree="$stub_dir/prompt-failure-tree"
+pf_bin="$stub_dir/prompt-failure-bin"
+mkdir -p "$pf_tree" "$pf_bin"
+cp -R "$root/lib" "$root/profiles" "$pf_tree/"
+printf '#!/usr/bin/env bash\nprintf called > "%s"; exit 0\n' "$stub_dir/prompt-backend-called" > "$pf_bin/claude"
+chmod +x "$pf_bin/claude"
+pf_run() {
+    PATH="$pf_bin:$stub_dir:$PATH" MAINTAINER_STATE_DIR="$stub_dir/state-root" \
+        bash "$pf_tree/lib/run.sh" --show-prompt sysknife review 2>&1
+}
+pf_task="$pf_tree/profiles/sysknife/prompts/review.md"
+mv "$pf_task" "$pf_task.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_task" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing task prompt stops assembly before the backend"
+else
+    bad "a missing task prompt did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_task.saved" "$pf_task"
+pf_common="$pf_tree/profiles/sysknife/prompts/common-preamble.md"
+mv "$pf_common" "$pf_common.saved"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" -ne 0 ] && grep -Fq "$pf_common" <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a missing common preamble stops assembly before the backend"
+else
+    bad "a missing common preamble did not fail closed before the backend (rc=$pf_rc)"
+fi
+mv "$pf_common.saved" "$pf_common"
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="a|b"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'a|b reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "a maintainer name containing the sed delimiter reaches the prompt literally"
+else
+    bad "a maintainer name containing the sed delimiter was damaged (rc=$pf_rc)"
+fi
+sed -i 's/^MAINTAINER_NAME=.*/MAINTAINER_NAME="Smith \& Sons"/' "$pf_tree/profiles/sysknife/profile.env"
+pf_out="$(pf_run)"; pf_rc=$?
+if [ "$pf_rc" = 0 ] && grep -Fq 'Smith & Sons reads the reports' <<<"$pf_out" \
+   && [ ! -e "$stub_dir/prompt-backend-called" ]; then
+    ok "an ampersand in the maintainer name is preserved literally"
+else
+    bad "an ampersand in the maintainer name expanded in the prompt (rc=$pf_rc)"
+fi
 echo "== the run stamps its own build into the prompt =="
 # A report is only auditable if it names the build that wrote it, and the
 # doctrine tells the agent to take that from the first line of the prompt.
@@ -2718,6 +2807,11 @@ sc_end; fi
 # slower than a single-case gate allows). It reads the tree under test from MX_TREE.
 if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
 grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
+if MX_TREE="$root" bash "$suite_root/tests/install-cron-crontab-errors.sh" >/dev/null 2>&1; then
+    ok "cron install keeps the crontab when crontab -l fails, and installs when there is none"
+else
+    bad "cron install overwrites the crontab when crontab -l fails (run tests/install-cron-crontab-errors.sh)"
+fi
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
@@ -3099,6 +3193,50 @@ grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an une
 [ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
     || bad "no stamp written; enabling fires every missed slot at once"
 
+# A checkout may carry timer units for profiles it does not deploy. Only the
+# deployed profile's units may be enabled; the others are reported and skipped.
+timer_src="$stub_dir/timer-src"; timer_home="$stub_dir/timer-home"
+mkdir -p "$timer_src" "$timer_home"
+cp -r "$root/." "$timer_src/"
+rm -rf "$timer_src/.git" "$timer_src/profiles/sysknife"
+SYSTEMCTL_LOG="$stub_dir/systemctl-filter.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$timer_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$timer_src/install.sh" --timers > "$stub_dir/timer-filter.out" 2>&1
+if ! grep -q 'enable --now maintainer@sysknife-' "$SYSTEMCTL_LOG" \
+    && [ "$(grep -c 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG")" = 2 ] \
+    && grep -q 'skipped maintainer@sysknife-' "$stub_dir/timer-filter.out"; then
+    ok "--timers enables only deployed profiles and reports skipped profile units"
+else
+    bad "--timers enabled an undeployed profile or failed to report skipped units: $(cat "$SYSTEMCTL_LOG")"
+fi
+
+# A profile named after a hyphenated repository: the task is the text after the
+# LAST hyphen, as in platform/linux/run-instance.sh.
+hy_src="$stub_dir/hy-src"; hy_home="$stub_dir/hy-home"
+mkdir -p "$hy_src" "$hy_home"
+cp -r "$root/." "$hy_src/"
+rm -rf "$hy_src/.git" "$hy_src/profiles/sysknife"
+mv "$hy_src/profiles/magent" "$hy_src/profiles/my-repo"
+cp "$hy_src/platform/linux/maintainer@magent-review.timer" "$hy_src/platform/linux/maintainer@my-repo-review.timer"
+SYSTEMCTL_LOG="$stub_dir/systemctl-hy.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$hy_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$hy_src/install.sh" --timers > "$stub_dir/timer-hy.out" 2>&1
+if grep -q 'enable --now maintainer@my-repo-review.timer' "$SYSTEMCTL_LOG" \
+    && ! grep -q 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG"; then
+    ok "--timers splits a hyphenated profile name at the last hyphen"
+else
+    bad "--timers mis-split a hyphenated profile name: $(cat "$SYSTEMCTL_LOG") $(cat "$stub_dir/timer-hy.out")"
+fi
+# A dry run has copied nothing to the share directory yet, so it must still
+# report every unit as one it would enable.
+dr_home="$stub_dir/dry-home"; mkdir -p "$dr_home"
+dr_out="$(PATH="$stub_dir:$PATH" HOME="$dr_home" "$root/install.sh" --dry-run --timers 2>&1)"; dr_rc=$?
+if [ "$dr_rc" = 0 ] && ! grep -q 'skipped maintainer@' <<<"$dr_out" && grep -q 'enable --now maintainer@magent-' <<<"$dr_out"; then
+    ok "--dry-run --timers lists the units it would enable and skips none"
+else
+    bad "--dry-run --timers skipped units or failed (rc=$dr_rc): $(printf '%s' "$dr_out" | head -5 | tr '\n' ' ')"
+fi
+
 echo "== every command the prompt names is declared, and resolves =="
 # A prompt told an unattended run to call `sysknife-maint screen <pr>` after that
 # command had been renamed to `maintainer screen`. The run report carried a
@@ -3257,6 +3395,11 @@ left=$(find "$fresh" -type f 2>/dev/null | wc -l)
 check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
+if bash "$suite_root/tests/install-uninstall-artifacts.sh" "$root"; then
+    ok "uninstall removes installed artifacts without a systemd user session"
+else
+    bad "uninstall leaves installed artifacts when systemctl is unavailable"
+fi
 uh="$stub_dir/unin"; mkdir -p "$uh"
 HOME="$uh" "$root/install.sh" >/dev/null 2>&1
 mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
@@ -7362,13 +7505,10 @@ check_transient "$tfix/does-not-exist.log" >/dev/null \
 sc_end; fi
 
 # run.sh has to USE it, on both alert paths, or the classifier is decoration.
-if sc_case 2; then
+if sc_case 1; then
 grep -q 'backend_transient_reason' "$root/lib/run.sh" \
     && ok "run.sh consults the classifier" \
     || bad "the classifier exists and run.sh never calls it"
-n=$(grep -c 'exit 75' "$root/lib/run.sh")
-[ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
-    || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
 sc_end; fi
 
 echo "== the pinned token never survives the run that used it =="
@@ -8323,6 +8463,63 @@ printf '$ gh pr list --state open\n' > "$au/logs/2026-01-02T00-00-review.command
 aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
     && ok "a command the report recommends is not counted as one it ran" \
     || bad "the audit treats a recommendation as a claim, which fires on every report"
+# A claim over 40 characters is matched whole, not on its first 40: a changed
+# flag in the tail is exactly what the audit exists to catch. An abridged claim
+# with `...` must still have each fragment in the record, so a changed tail
+# after the ellipsis is caught too.
+printf '# r\n\n```\n$ gh pr merge 5 --repo owner/name --squash --admin\n$ gh run list --repo owner/name ... --json databaseId,status\n```\n' \
+    > "$au/runs/2026-01-09T00-00-review.md"
+printf '$ gh pr merge 5 --repo owner/name --squash --rebase\n$ gh run list --repo owner/name --json databaseId,conclusion\n' \
+    > "$au/logs/2026-01-09T00-00-review.commands"
+out="$(aurun 2026-01-09T00-00-review)"
+grep -q 'gh pr merge 5 --repo owner/name --squash --admin' <<<"$out" \
+    && grep -q 'gh run list --repo owner/name ... --json databaseId,status' <<<"$out" \
+    && ok "a long claim with a changed tail, and an abridged claim with a changed tail, are both reported as missing" \
+    || bad "a claim whose tail differs from the record passes the audit: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# A shell continuation at the end of an abridged command is report formatting,
+# not a required fragment in the transcript.
+printf '# r\n\n```\n$ gh run list --repo owner/name ... --json databaseId,status,... \\\n```\n' \
+    > "$au/runs/2026-01-10T00-00-review.md"
+printf '$ gh run list --repo owner/name --json databaseId,status,conclusion\n' \
+    > "$au/logs/2026-01-10T00-00-review.commands"
+out="$(aurun 2026-01-10T00-00-review)"
+grep -q 'all 1 quoted command(s) appear' <<<"$out" \
+    && ok "an abridged claim ending in a shell continuation matches the complete command" \
+    || bad "the shell continuation is treated as a required command fragment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# Require both fragments and their original order.
+printf '# r\n\n```\n$ gh run list --limit 5 ... --repo owner/name\n```\n' \
+    > "$au/runs/2026-01-11T00-00-review.md"
+printf '$ --repo owner/name gh run list --limit 5\n' \
+    > "$au/logs/2026-01-11T00-00-review.commands"
+out="$(aurun 2026-01-11T00-00-review)"
+grep -q 'gh run list --limit 5 ... --repo owner/name' <<<"$out" \
+    && ok "abridged command fragments must appear in order" \
+    || bad "a claim with out-of-order fragments passed the audit"
+# A short head would let any record holding the tail pass: the 12-character floor stays.
+printf '# r\n\n```\n$ gh ... --force-with-lease\n```\n' > "$au/runs/2026-01-14T00-00-review.md"
+printf '$ gh pr list\n$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
+out="$(aurun 2026-01-14T00-00-review)"
+grep -q 'gh ... --force-with-lease' <<<"$out" \
+    && ok "an abridged claim with a head shorter than 12 characters is not matched" \
+    || bad "a claim with a short head passed the audit"
+# An ellipsis-only claim has no evidence and must not pass as an empty sequence.
+printf '# r\n\n```\n$ ...\n```\n' > "$au/runs/2026-01-12T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-12T00-00-review.commands"
+out="$(aurun 2026-01-12T00-00-review)"
+grep -q '1 of 1 quoted command(s) are not in the record' <<<"$out" \
+    && ok "an ellipsis-only claim is rejected" \
+    || bad "an empty fragment list passed the audit"
+# The first fragment is evidence too; matching only a later fragment is not a
+# match for the command the report claims it ran.
+printf '# r\n\n```\n$ gha ... --json databaseId\n```\n' \
+    > "$au/runs/2026-01-13T00-00-review.md"
+printf '$ gh run list --json databaseId\n' \
+    > "$au/logs/2026-01-13T00-00-review.commands"
+out="$(aurun 2026-01-13T00-00-review)"
+grep -q 'gha ... --json databaseId' <<<"$out" \
+    && ok "the first abridged fragment must also appear" \
+    || bad "a claim with a missing first fragment passed the audit"
+
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
@@ -11615,6 +11812,21 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
+
+echo "== refresh() notes a PR head it could not fetch =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_refresh_pr_fetch.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
+    && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
+    || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
+
+echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
+# tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
+# revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
+out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'PASS  an unreadable comment thread' <<<"$out" \
+    && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
+    || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"

@@ -70,15 +70,27 @@ if [ "$uninstall" = 1 ]; then
     _failed=""
     step() { if "$@"; then :; else _failed="$_failed
   $*"; fi; }
+    _systemctl_user=0
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        _systemctl_user=1
         for t in "$units"/maintainer@*.timer; do
             [ -e "$t" ] || continue
             step run systemctl --user disable --now "$(basename "$t")"
         done
-        for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
-            [ -e "$u" ] || continue
-            run rm -f "$u"
-        done
+    fi
+    # Removing installed files does not require a live systemd user session.
+    # SSH sessions often lack XDG_RUNTIME_DIR, but the units still need to go.
+    for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
+        [ -e "$u" ] || continue
+        step run rm -f "$u"
+    done
+    # --timers creates one stamp per profile. Remove only our stamps; this
+    # directory can contain state owned by other software.
+    for s in "$HOME"/.local/share/systemd/timers/stamp-maintainer@*.timer; do
+        [ -e "$s" ] || continue
+        step run rm -f "$s"
+    done
+    if [ "$_systemctl_user" = 1 ]; then
         run systemctl --user daemon-reload
     fi
     if [ "$(uname -s)" = Darwin ]; then
@@ -97,7 +109,7 @@ if [ "$uninstall" = 1 ]; then
                 "$root/platform/posix/install-cron.sh" --remove
         done
     fi
-    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo; do
+    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo maintainer-mcp; do
         [ -e "$bin/$f" ] && run rm -f "$bin/$f"
     done
     step run rm -rf "$share"
@@ -108,7 +120,7 @@ if [ "$uninstall" = 1 ]; then
         printf '%s\n' "$_failed" >&2
         say ""
     fi
-    say "removed: $share, the four commands in $bin, and every scheduler entry."
+    say "removed: $share, the five commands in $bin, and every scheduler entry."
     say "kept:    the audit trail. Delete it yourself if you want it gone:"
     for pe in "$root"/profiles/*/profile.env; do
         [ -e "$pe" ] || continue
@@ -284,6 +296,16 @@ if [ "$timers" = 1 ]; then
     for t in "$root"/platform/linux/*.timer; do
         [ -e "$t" ] || continue
         name="$(basename "$t")"
+        profile_task="${name#maintainer@}"
+        # The task is the text after the LAST hyphen (run-instance.sh splits the
+        # same way): a profile may be named after a hyphenated repository.
+        profile="${profile_task%-*}"
+        # Judge the checkout's profiles, not $share: a dry run has not copied them
+        # there yet, and the real install copies every profile the checkout holds.
+        if [ ! -f "$root/profiles/$profile/profile.env" ]; then
+            say "skipped $name (profile $profile is not deployed)"
+            continue
+        fi
         # Write a stamp first. A fresh Persistent=true timer treats "never run"
         # as a missed slot and fires a catch-up run the instant it is enabled,
         # which lands a job on top of whatever a human is doing right now.
