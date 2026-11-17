@@ -613,17 +613,40 @@ def _claim_in(claim: str, record: str) -> bool:
         inside a harness script the agent wrote and ran. The record holds the
         outer invocation, not each line the script then executed.
 
-    So: a claim carrying an explicit `...` is compared on the part before it,
-    because the author already said it was abridged, and a long claim matches on
-    a generous prefix. Both weaken the check, and the check is a warning whose
-    only job is to put a human's eye on the right line.
+    So: a claim carrying an explicit `...` is abridged on purpose, and only its
+    fragments between the ellipses must occur in the record, in order. Anything
+    else must occur whole. A prefix match would pass a claim whose flags differ
+    from the record's (`--squash --admin` against `--rebase`), which is the case
+    this check exists to catch.
     """
     if claim in record:
         return True
-    head = claim.split("...", 1)[0].strip() if "..." in claim else claim
-    if len(head) >= 12 and head in record:
-        return True
-    return len(claim) > 40 and claim[:40] in record
+    if "..." not in claim:
+        return False
+    # The text before the first ellipsis has to say something: with a short head
+    # (`$ gh ... --force-with-lease`, `$ ... $`) any record that contains the
+    # tail would pass, which is the loosening the 12-character floor prevented.
+    if len(claim.split("...", 1)[0].strip()) < 12:
+        return False
+    frags = []
+    for part in claim.split("..."):
+        frag = part.strip()
+        # Report prose sometimes writes an abridged shell command with a final
+        # line-continuation slash. It is formatting, not part of the command
+        # recorded by the runner; drop it before checking the final fragment.
+        if frag.endswith("\\"):
+            frag = frag[:-1].rstrip()
+        if frag:
+            frags.append(frag)
+    if not frags:
+        return False
+    pos = 0
+    for frag in frags:
+        i = record.find(frag, pos)
+        if i < 0:
+            return False
+        pos = i + len(frag)
+    return True
 
 
 def audit_run(run_id: str) -> tuple[str, list[str], int]:
@@ -1000,12 +1023,18 @@ def _issue_parties(number) -> dict:
     }
 
 
-def _claimant_idle_days(number: int, assignees: list, comments=None) -> int:
-    """Days since the person who claimed this issue last said anything on it."""
+def _claimant_idle_days(number: int, assignees: list, comments=None):
+    """Days since the person who claimed this issue last said anything on it.
+
+    None when the thread cannot be read: that is not an idle claim, and -1 here
+    used to print as "-1d, active" during an outage.
+    """
     who = {_login(a["login"]) for a in assignees}
     if comments is None:
         comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
                            "--jq", "[.[]|{u:.user.login,at:.created_at}]")
+    if comments is None:
+        return None
     if not comments:
         return -1
     theirs = [c["at"] for c in comments if not who or _login(c["u"]) in who]
@@ -1061,6 +1090,7 @@ def cmd_claims() -> None:
     # the thread tells them apart.
     to_assign: list = []
     unreadable_prs = False
+    unreadable_threads = False
     for i in issues:
         assignees = i.get("assignees") or []
         who = ", ".join(a["login"] for a in assignees) or "-"
@@ -1082,6 +1112,10 @@ def cmd_claims() -> None:
         # maintainer does to an issue moves updatedAt, which makes it useless
         # for measuring whether the contributor has gone quiet.
         idle = _claimant_idle_days(i["number"], assignees, parties["comments"])
+        if idle is None:
+            unreadable_threads = True
+            print(f"UNREADABLE #{i['number']:<5} {who:22} could not read its comments, so idle time is unknown")
+            continue
         if assignees:
             flag = "stale, a check-in is due" if idle >= stale_days else "active"
         elif answered:
@@ -1116,6 +1150,8 @@ def cmd_claims() -> None:
             print(f"  maintainer assign {n} {w}")
         print("\nGitHub returns 200 for an assignee it silently drops, so read the list")
         print("back before telling anybody they are assigned.")
+    if unreadable_threads:
+        raise SystemExit(1)
 
 
 def cmd_assign(number: str, who: str) -> None:
