@@ -1099,6 +1099,20 @@ if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
 else
     bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
 fi
+# flock is required to distinguish an active run from a broken lock tool. Keep
+# only dirname on PATH so the installer reaches the prerequisite check without
+# finding the host's flock or modifying the scratch HOME.
+ins3_home="$ins_dir/home3"; ins3_path="$ins_dir/no-flock-bin"
+mkdir -p "$ins3_home" "$ins3_path"
+ln -s "$(command -v dirname)" "$ins3_path/dirname"
+ins_bash="$(command -v bash)"
+ins3_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins3_home" PATH="$ins3_path" "$ins_bash" "$ins_src/install.sh" 2>&1)"; ins3_rc=$?
+if [ "$ins3_rc" = 1 ] && grep -q 'flock is required to install and protect active runs' <<<"$ins3_out" \
+   && [ ! -e "$ins3_home/.local/share/maintainer" ]; then
+    ok "install.sh explains that flock is required and refuses before writing"
+else
+    bad "install.sh without flock did not refuse before writing (rc=$ins3_rc): $(tail -n 2 <<<"$ins3_out" | tr '\n' ' ')"
+fi
 rm -rf "$ins_dir"
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
@@ -11805,6 +11819,14 @@ echo "== refresh() notes a PR head it could not fetch =="
 MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
     && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
     || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
+
+echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
+# tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
+# revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
+out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'PASS  an unreadable comment thread' <<<"$out" \
+    && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
+    || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"

@@ -1,9 +1,10 @@
 # magent in Rust
 
-A Cargo workspace for the programs that replace magent's shell scripts. Nothing is ported yet. This is the typed foundation and its gate.
+A Cargo workspace for the programs that replace magent's shell scripts, and the typed foundation and gate they share.
 
 - `crates/mx-core`: `Fact<T>`, `Refusal`, `NonEmpty<T>`. No I/O.
 - `crates/mx-ports`: the `Gh`, `Git`, `Containers`, `Clock`, `Fs` and `Proc` traits, an in-memory fake for each, and `RealProc`, the one real adapter.
+- `crates/mx-repo`: `bin/maintainer-repo` (`prune`, `release-check`, `fixup`) as a library and a binary named `maintainer-repo`. `tests/differential.sh` runs the bash program and the Rust binary on generated scenarios and compares everything they print, call and write; `tests/mutants.py` is the mutation proof.
 
 Run the gate from the repository root: `scripts/rust-gate.sh`. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` (more than 15 tests must run), and a probe that adds a crate calling `Command::new` and demands clippy refuse it. CI runs the same script as the `rust` job.
 
@@ -13,7 +14,9 @@ Three rules:
 2. `Refusal::exit_code` has no `_` arm. A new variant does not compile until it has an exit code, and a test fails when a code changes.
 3. `Fact::Unreadable` never becomes `Fact::Absent`. A read that failed is not a read that found nothing.
 
-A binary's `main` restores the default `SIGPIPE` action, because Rust ignores it.
+A binary's `main` deals with `SIGPIPE`, because Rust ignores it. Restoring the default action needs `unsafe`, which the workspace forbids, so `maintainer-repo` ends with status 141 (128 + `SIGPIPE`) when a write meets a closed pipe.
+
+`maintainer-repo fixup` removes its scratch clone when SIGHUP, SIGINT or SIGTERM arrives, as the bash program's `EXIT` trap does, and then dies of the signal (status 129, 130, 143). Installing a handler needs `unsafe` too, so the workspace takes it from `signal-hook`, whose API is safe, pinned to one version in `rust/Cargo.toml`.
 
 ## mx-doctor
 
