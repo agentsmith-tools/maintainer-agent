@@ -482,9 +482,10 @@ case_cursor_preview_refused() {
     cz_expect_rc 78
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
+    rz_expect_helper
+    rz_expect_notify_count 0
 }
-cz_case "cursor: the preview of a refused task exits 78 too, through the alert path with /dev/null as the log" case_cursor_preview_refused
+cz_case "cursor: the preview of a refused task exits 78 too, but records no failure (#209)" case_cursor_preview_refused
 
 # The cursor backend's own argv, reached by sourcing the file, because run.sh
 # never gets as far as calling it (see the two cases above).
@@ -605,6 +606,22 @@ case_backend_unknown() {
     rz_expect_notify 1 critical "$CRIT_TITLE" "$(printf '%s\nlog  %s' "$msg" "$RZ_LOGS/$RZ_STAMP-review.log")"
 }
 cz_case "backend: an unknown BACKEND exits 64 with bash's source error and the alert" case_backend_unknown
+
+# #209: a preview prints the refusal and stops. It used to reach the helper's
+# failed verb, so a harmless preview marked the task failed in `maintainer status`.
+case_backend_unknown_preview() {
+    setup
+    rz_profile_add 'BACKEND=nosuch'
+    cz_set MAINTAINER_ALERT_CMD "touch $CZ_CASE/alert.ran"
+    rz_run --show-prompt fx review
+    cz_expect_rc 64
+    cz_expect_stdout_empty
+    cz_expect_stderr_has "no backend 'nosuch'"
+    rz_expect_helper
+    rz_expect_notify_count 0
+    cz_expect_no_file "$CZ_CASE/alert.ran"
+}
+cz_case "backend: the preview of an unknown BACKEND exits 64 with no marker, toast or alert command (#209)" case_backend_unknown_preview
 
 case_backend_from_profile() {
     setup

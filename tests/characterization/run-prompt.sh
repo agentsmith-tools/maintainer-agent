@@ -5,7 +5,7 @@
 # Each expected prompt is composed in the test from literals (rz_want_prompt in
 # lib-run.sh), so the test shares no code with the program.
 #
-# Pins current behaviour. Plan decision F6 covers the leaked temp file.
+# Pins current behaviour. The prompt temp file is removed on every exit (#209).
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/lib-run.sh"
@@ -50,18 +50,17 @@ case_show_touches_nothing() {
 }
 cz_case "show-prompt: leaves no log, lock, lease, helper call, gh call or toast" case_show_touches_nothing
 
-# Pins plan decision F6: the prompt temp file is removed by a RETURN trap, and the
-# preview leaves through `exit 0`, so the file stays behind.
-case_show_leaks_tempfile() {
+# #209: the prompt temp file used to be removed by a RETURN trap, which never
+# fires on the preview's `exit 0`, so each preview left the whole prompt behind.
+case_show_no_tempfile() {
     rz_setup
     rz_run --show-prompt fx review
     cz_expect_rc 0
-    cz_check "files left in TMPDIR" "$(rz_tmp_count)" 1
-    local f; f="$(ls "$RZ_TMP")"
-    cz_expect_file_equals "$RZ_TMP/$f" "$CZ_CASE/stdout" "the leaked temp file"
-    cz_check "temp file mode" "$(stat -c %a "$RZ_TMP/$f")" 600
+    rz_run --show-prompt fx review
+    cz_expect_rc 0
+    cz_check "files left in TMPDIR after two previews" "$(rz_tmp_count)" 0
 }
-cz_case "show-prompt: leaves its prompt temp file in TMPDIR, mode 600 (plan decision F6)" case_show_leaks_tempfile
+cz_case "show-prompt: two previews leave nothing in TMPDIR (#209)" case_show_no_tempfile
 
 case_run_success_no_leak() {
     rz_setup
@@ -71,16 +70,16 @@ case_run_success_no_leak() {
 }
 cz_case "show-prompt: a run that reaches the end of the script removes its prompt temp file" case_run_success_no_leak
 
-# Pins plan decision F6 again: a run that leaves through `exit 1` after the prompt
-# was written keeps the file, so every aborted run leaks one.
-case_run_failure_leaks() {
+# #209: a run that leaves through `exit 1` after the prompt was written removes it
+# too, through the same EXIT handler that scrubs the token.
+case_run_failure_no_leak() {
     rz_setup
     printf '1' > "$CZ_CASE/h/finish.rc"
     rz_run fx review
     cz_expect_rc 1
-    cz_check "files left in TMPDIR" "$(rz_tmp_count)" 1
+    cz_check "files left in TMPDIR" "$(rz_tmp_count)" 0
 }
-cz_case "show-prompt: a run that exits 1 after assembly leaves its prompt temp file behind (plan decision F6)" case_run_failure_leaks
+cz_case "show-prompt: a run that exits 1 after assembly removes its prompt temp file (#209)" case_run_failure_no_leak
 
 case_refusal_before_assembly_no_leak() {
     rz_setup
@@ -160,7 +159,8 @@ case_name_pipe() {
 cz_case "profile override: a | in the maintainer name reaches the doctrine literally" case_name_pipe
 
 # PR #242: every required prompt input is checked before assembly. A missing one
-# is reported through the alert path and stops the run, even for a preview.
+# stops the run, even for a preview. A preview prints the refusal and records
+# nothing (#209): no failure marker and no toast.
 case_missing_task_file() {
     rz_setup
     rm "$RZ_PROFILE_DIR/prompts/review.md"
@@ -169,10 +169,10 @@ case_missing_task_file() {
     cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
-    rz_expect_notify_count 1
+    rz_expect_helper
+    rz_expect_notify_count 0
 }
-cz_case "missing file: a missing task file exits 1 before any prompt is printed, with a marker and a toast" case_missing_task_file
+cz_case "missing file: a missing task file exits 1 before any prompt is printed, with no marker or toast (#209)" case_missing_task_file
 
 case_missing_preamble_file() {
     rz_setup
@@ -182,14 +182,13 @@ case_missing_preamble_file() {
     cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
-    rz_expect_notify_count 1
+    rz_expect_helper
+    rz_expect_notify_count 0
 }
-cz_case "missing file: a missing profile preamble exits 1 before any prompt is printed, with a marker and a toast" case_missing_preamble_file
+cz_case "missing file: a missing profile preamble exits 1 before any prompt is printed, with no marker or toast (#209)" case_missing_preamble_file
 
-# Pins current behaviour: even a preview reports a missing doctrine through the
-# alert path, so it calls the helper's failed verb with /dev/null as the log and
-# raises a toast.
+# A preview still refuses a missing doctrine and says why, but records nothing:
+# no failure marker, no toast, and no prompt temp file left behind (#209).
 case_missing_core_preview() {
     rz_setup
     rm "$RZ_TREE/lib/preamble-core.md"
@@ -198,11 +197,11 @@ case_missing_core_preview() {
     cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
-    rz_expect_notify_count 1
-    rz_expect_notify 1 critical "maintainer · fx review · FAILED" "$(printf '%s\nlog  /dev/null' "$msg")"
+    rz_expect_helper
+    rz_expect_notify_count 0
+    cz_check "files left in TMPDIR" "$(rz_tmp_count)" 0
 }
-cz_case "missing file: no preamble-core.md exits 1 even for a preview, with a marker and a toast" case_missing_core_preview
+cz_case "missing file: no preamble-core.md exits 1 even for a preview, with no marker, toast or temp file (#209)" case_missing_core_preview
 
 case_missing_core_run() {
     rz_setup

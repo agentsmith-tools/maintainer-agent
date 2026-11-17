@@ -453,7 +453,7 @@ rz_plant_leak() {
 }
 RZ_MASK="REDACTED_BY_MAINTAINER_ROTATE_THIS_SECRET"
 
-# Number of entries left in the run's TMPDIR (the prompt temp file leak, plan F6).
+# Number of entries left in the run's TMPDIR (the prompt temp file, #209).
 rz_tmp_count() { local n=0 f; for f in "$RZ_TMP"/*; do [ -e "$f" ] && n=$((n + 1)); done; printf '%s' "$n"; }
 
 # rz_last_ran TASK SECONDS_AGO: the cadence stamp, last-<task>.json, written as
