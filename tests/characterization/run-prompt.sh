@@ -159,7 +159,8 @@ case_name_pipe() {
 cz_case "profile override: a | in the maintainer name reaches the doctrine literally" case_name_pipe
 
 # PR #242: every required prompt input is checked before assembly. A missing one
-# is reported through the alert path and stops the run, even for a preview.
+# stops the run, even for a preview. A preview prints the refusal and records
+# nothing (#209): no failure marker and no toast.
 case_missing_task_file() {
     rz_setup
     rm "$RZ_PROFILE_DIR/prompts/review.md"
@@ -168,10 +169,10 @@ case_missing_task_file() {
     cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
-    rz_expect_notify_count 1
+    rz_expect_helper
+    rz_expect_notify_count 0
 }
-cz_case "missing file: a missing task file exits 1 before any prompt is printed, with a marker and a toast" case_missing_task_file
+cz_case "missing file: a missing task file exits 1 before any prompt is printed, with no marker or toast (#209)" case_missing_task_file
 
 case_missing_preamble_file() {
     rz_setup
@@ -181,10 +182,10 @@ case_missing_preamble_file() {
     cz_expect_rc 1
     cz_expect_stdout_empty
     cz_expect_stderr "$msg"
-    rz_expect_helper "$(cz_argv failed review "$msg" /dev/null)"
-    rz_expect_notify_count 1
+    rz_expect_helper
+    rz_expect_notify_count 0
 }
-cz_case "missing file: a missing profile preamble exits 1 before any prompt is printed, with a marker and a toast" case_missing_preamble_file
+cz_case "missing file: a missing profile preamble exits 1 before any prompt is printed, with no marker or toast (#209)" case_missing_preamble_file
 
 # A preview still refuses a missing doctrine and says why, but records nothing:
 # no failure marker, no toast, and no prompt temp file left behind (#209).
