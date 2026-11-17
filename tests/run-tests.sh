@@ -1099,6 +1099,20 @@ if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
 else
     bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
 fi
+# flock is required to distinguish an active run from a broken lock tool. Keep
+# only dirname on PATH so the installer reaches the prerequisite check without
+# finding the host's flock or modifying the scratch HOME.
+ins3_home="$ins_dir/home3"; ins3_path="$ins_dir/no-flock-bin"
+mkdir -p "$ins3_home" "$ins3_path"
+ln -s "$(command -v dirname)" "$ins3_path/dirname"
+ins_bash="$(command -v bash)"
+ins3_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins3_home" PATH="$ins3_path" "$ins_bash" "$ins_src/install.sh" 2>&1)"; ins3_rc=$?
+if [ "$ins3_rc" = 1 ] && grep -q 'flock is required to install and protect active runs' <<<"$ins3_out" \
+   && [ ! -e "$ins3_home/.local/share/maintainer" ]; then
+    ok "install.sh explains that flock is required and refuses before writing"
+else
+    bad "install.sh without flock did not refuse before writing (rc=$ins3_rc): $(tail -n 2 <<<"$ins3_out" | tr '\n' ' ')"
+fi
 rm -rf "$ins_dir"
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
@@ -2805,6 +2819,11 @@ sc_end; fi
 # slower than a single-case gate allows). It reads the tree under test from MX_TREE.
 if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
 grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
+if MX_TREE="$root" bash "$suite_root/tests/install-cron-crontab-errors.sh" >/dev/null 2>&1; then
+    ok "cron install keeps the crontab when crontab -l fails, and installs when there is none"
+else
+    bad "cron install overwrites the crontab when crontab -l fails (run tests/install-cron-crontab-errors.sh)"
+fi
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
@@ -3185,6 +3204,50 @@ grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an une
     || ok "--timers never passes a literal glob"
 [ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
     || bad "no stamp written; enabling fires every missed slot at once"
+
+# A checkout may carry timer units for profiles it does not deploy. Only the
+# deployed profile's units may be enabled; the others are reported and skipped.
+timer_src="$stub_dir/timer-src"; timer_home="$stub_dir/timer-home"
+mkdir -p "$timer_src" "$timer_home"
+cp -r "$root/." "$timer_src/"
+rm -rf "$timer_src/.git" "$timer_src/profiles/sysknife"
+SYSTEMCTL_LOG="$stub_dir/systemctl-filter.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$timer_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$timer_src/install.sh" --timers > "$stub_dir/timer-filter.out" 2>&1
+if ! grep -q 'enable --now maintainer@sysknife-' "$SYSTEMCTL_LOG" \
+    && [ "$(grep -c 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG")" = 2 ] \
+    && grep -q 'skipped maintainer@sysknife-' "$stub_dir/timer-filter.out"; then
+    ok "--timers enables only deployed profiles and reports skipped profile units"
+else
+    bad "--timers enabled an undeployed profile or failed to report skipped units: $(cat "$SYSTEMCTL_LOG")"
+fi
+
+# A profile named after a hyphenated repository: the task is the text after the
+# LAST hyphen, as in platform/linux/run-instance.sh.
+hy_src="$stub_dir/hy-src"; hy_home="$stub_dir/hy-home"
+mkdir -p "$hy_src" "$hy_home"
+cp -r "$root/." "$hy_src/"
+rm -rf "$hy_src/.git" "$hy_src/profiles/sysknife"
+mv "$hy_src/profiles/magent" "$hy_src/profiles/my-repo"
+cp "$hy_src/platform/linux/maintainer@magent-review.timer" "$hy_src/platform/linux/maintainer@my-repo-review.timer"
+SYSTEMCTL_LOG="$stub_dir/systemctl-hy.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$hy_home" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    "$hy_src/install.sh" --timers > "$stub_dir/timer-hy.out" 2>&1
+if grep -q 'enable --now maintainer@my-repo-review.timer' "$SYSTEMCTL_LOG" \
+    && ! grep -q 'enable --now maintainer@magent-' "$SYSTEMCTL_LOG"; then
+    ok "--timers splits a hyphenated profile name at the last hyphen"
+else
+    bad "--timers mis-split a hyphenated profile name: $(cat "$SYSTEMCTL_LOG") $(cat "$stub_dir/timer-hy.out")"
+fi
+# A dry run has copied nothing to the share directory yet, so it must still
+# report every unit as one it would enable.
+dr_home="$stub_dir/dry-home"; mkdir -p "$dr_home"
+dr_out="$(PATH="$stub_dir:$PATH" HOME="$dr_home" "$root/install.sh" --dry-run --timers 2>&1)"; dr_rc=$?
+if [ "$dr_rc" = 0 ] && ! grep -q 'skipped maintainer@' <<<"$dr_out" && grep -q 'enable --now maintainer@magent-' <<<"$dr_out"; then
+    ok "--dry-run --timers lists the units it would enable and skips none"
+else
+    bad "--dry-run --timers skipped units or failed (rc=$dr_rc): $(printf '%s' "$dr_out" | head -5 | tr '\n' ' ')"
+fi
 
 echo "== every command the prompt names is declared, and resolves =="
 # A prompt told an unattended run to call `sysknife-maint screen <pr>` after that
@@ -8412,6 +8475,63 @@ printf '$ gh pr list --state open\n' > "$au/logs/2026-01-02T00-00-review.command
 aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
     && ok "a command the report recommends is not counted as one it ran" \
     || bad "the audit treats a recommendation as a claim, which fires on every report"
+# A claim over 40 characters is matched whole, not on its first 40: a changed
+# flag in the tail is exactly what the audit exists to catch. An abridged claim
+# with `...` must still have each fragment in the record, so a changed tail
+# after the ellipsis is caught too.
+printf '# r\n\n```\n$ gh pr merge 5 --repo owner/name --squash --admin\n$ gh run list --repo owner/name ... --json databaseId,status\n```\n' \
+    > "$au/runs/2026-01-09T00-00-review.md"
+printf '$ gh pr merge 5 --repo owner/name --squash --rebase\n$ gh run list --repo owner/name --json databaseId,conclusion\n' \
+    > "$au/logs/2026-01-09T00-00-review.commands"
+out="$(aurun 2026-01-09T00-00-review)"
+grep -q 'gh pr merge 5 --repo owner/name --squash --admin' <<<"$out" \
+    && grep -q 'gh run list --repo owner/name ... --json databaseId,status' <<<"$out" \
+    && ok "a long claim with a changed tail, and an abridged claim with a changed tail, are both reported as missing" \
+    || bad "a claim whose tail differs from the record passes the audit: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# A shell continuation at the end of an abridged command is report formatting,
+# not a required fragment in the transcript.
+printf '# r\n\n```\n$ gh run list --repo owner/name ... --json databaseId,status,... \\\n```\n' \
+    > "$au/runs/2026-01-10T00-00-review.md"
+printf '$ gh run list --repo owner/name --json databaseId,status,conclusion\n' \
+    > "$au/logs/2026-01-10T00-00-review.commands"
+out="$(aurun 2026-01-10T00-00-review)"
+grep -q 'all 1 quoted command(s) appear' <<<"$out" \
+    && ok "an abridged claim ending in a shell continuation matches the complete command" \
+    || bad "the shell continuation is treated as a required command fragment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# Require both fragments and their original order.
+printf '# r\n\n```\n$ gh run list --limit 5 ... --repo owner/name\n```\n' \
+    > "$au/runs/2026-01-11T00-00-review.md"
+printf '$ --repo owner/name gh run list --limit 5\n' \
+    > "$au/logs/2026-01-11T00-00-review.commands"
+out="$(aurun 2026-01-11T00-00-review)"
+grep -q 'gh run list --limit 5 ... --repo owner/name' <<<"$out" \
+    && ok "abridged command fragments must appear in order" \
+    || bad "a claim with out-of-order fragments passed the audit"
+# A short head would let any record holding the tail pass: the 12-character floor stays.
+printf '# r\n\n```\n$ gh ... --force-with-lease\n```\n' > "$au/runs/2026-01-14T00-00-review.md"
+printf '$ gh pr list\n$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
+out="$(aurun 2026-01-14T00-00-review)"
+grep -q 'gh ... --force-with-lease' <<<"$out" \
+    && ok "an abridged claim with a head shorter than 12 characters is not matched" \
+    || bad "a claim with a short head passed the audit"
+# An ellipsis-only claim has no evidence and must not pass as an empty sequence.
+printf '# r\n\n```\n$ ...\n```\n' > "$au/runs/2026-01-12T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-12T00-00-review.commands"
+out="$(aurun 2026-01-12T00-00-review)"
+grep -q '1 of 1 quoted command(s) are not in the record' <<<"$out" \
+    && ok "an ellipsis-only claim is rejected" \
+    || bad "an empty fragment list passed the audit"
+# The first fragment is evidence too; matching only a later fragment is not a
+# match for the command the report claims it ran.
+printf '# r\n\n```\n$ gha ... --json databaseId\n```\n' \
+    > "$au/runs/2026-01-13T00-00-review.md"
+printf '$ gh run list --json databaseId\n' \
+    > "$au/logs/2026-01-13T00-00-review.commands"
+out="$(aurun 2026-01-13T00-00-review)"
+grep -q 'gha ... --json databaseId' <<<"$out" \
+    && ok "the first abridged fragment must also appear" \
+    || bad "a claim with a missing first fragment passed the audit"
+
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
@@ -11704,6 +11824,21 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
+
+echo "== refresh() notes a PR head it could not fetch =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_refresh_pr_fetch.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/null 2>&1 \
+    && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
+    || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
+
+echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
+# tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
+# revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
+out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'PASS  an unreadable comment thread' <<<"$out" \
+    && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
+    || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
 
 echo "== the characterization suite is a gate suite that only a named verify runs =="
 # tests/run-tests.sh does not run the cases that pin the orchestrator, the

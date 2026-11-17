@@ -117,6 +117,8 @@ if [ -d "$share/profiles/_template" ]; then
 fi
 
 head_ "Backend"
+if command -v flock >/dev/null 2>&1; then green "flock on PATH"
+else red "flock is required to serialize runs and is NOT on PATH" "install flock for this platform"; fi
 b="${BACKEND:-claude}"
 if [ -f "$share/backends/$b.sh" ]; then green "backend '$b' installed"; else
     red "backend '$b' not installed" "./install.sh"; fi

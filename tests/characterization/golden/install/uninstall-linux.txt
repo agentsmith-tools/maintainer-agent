@@ -2,7 +2,7 @@
   maintainer entries removed
   maintainer entries removed
   
-  removed: @HOME@/.local/share/maintainer, the four commands in @HOME@/.local/bin, and every scheduler entry.
+  removed: @HOME@/.local/share/maintainer, the five commands in @HOME@/.local/bin, and every scheduler entry.
   kept:    the audit trail. Delete it yourself if you want it gone:
            ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/__PROFILE__-maint}
            ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/magent-maint}

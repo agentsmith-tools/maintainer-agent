@@ -267,6 +267,11 @@ __h_rc=$?
 builtin compgen -e | /usr/bin/grep '^MAINTAINER_' | /usr/bin/sort > "$2"
 exit 0
 EOF
+# The tools that call the loader are script files, and bash ends a script file with
+# status 1 on an unbound variable (127 only under `bash -c`), so the bash side runs
+# the scripts as files. Correction to decision P1F-9, which assumed 127.
+printf '%s\n' "$BASH_LOAD_VALUES" > "$scratch/load-values.sh"
+printf '%s\n' "$BASH_LOAD_EXPORTS" > "$scratch/load-exports.sh"
 bash -n <<<"$BASH_LOAD_VALUES" || { echo "differential: the values script does not parse" >&2; exit 2; }
 bash -n <<<"$BASH_LOAD_EXPORTS" || { echo "differential: the exports script does not parse" >&2; exit 2; }
 
@@ -279,9 +284,9 @@ run_load_pair() {  # id lib flags -> leaves $w/{b,o}.{out,err,dump,exports} and 
     [ "${#kv[@]}" = 0 ] || envs+=("${kv[@]}")
     w="$scratch/w-load"; rm -rf "$w"; mkdir -p "$w"
     # The braces catch the notice this shell prints when a profile kills its own shell.
-    { ( cd "$base" && env -i "${envs[@]}" timeout 120 bash -c "$BASH_LOAD_VALUES" bash "$scratch/libs/$lib" "$w/b.dump" ) >"$w/b.out" 2>"$w/b.err" </dev/null; } 2>/dev/null
+    { ( cd "$base" && env -i "${envs[@]}" timeout 120 bash "$scratch/load-values.sh" "$scratch/libs/$lib" "$w/b.dump" ) >"$w/b.out" 2>"$w/b.err" </dev/null; } 2>/dev/null
     b_rc=$?
-    { ( cd "$base" && env -i "${envs[@]}" timeout 120 bash -c "$BASH_LOAD_EXPORTS" bash "$scratch/libs/$lib" "$w/b.exports" ) >/dev/null 2>&1 </dev/null; } 2>/dev/null
+    { ( cd "$base" && env -i "${envs[@]}" timeout 120 bash "$scratch/load-exports.sh" "$scratch/libs/$lib" "$w/b.exports" ) >/dev/null 2>&1 </dev/null; } 2>/dev/null
     { ( cd "$base" && env -i "${envs[@]}" timeout 120 "$ORACLE" load --lib-dir "$scratch/libs/$lib" --dump "$w/o.dump" --exports "$w/o.exports" ) >"$w/o.out" 2>"$w/o.err" </dev/null; } 2>/dev/null
     o_rc=$?
     # The bash names its script and line before `NAME: unbound variable`; a port cannot.
@@ -386,7 +391,7 @@ fi
 mkdir -p "$pn/home7/.local/share/maintainer/profiles/fx"
 printf 'REPO_SLUG=o/r\nREPO_PATH=/p\nSTATE_DIR=/s\nGH_ACCOUNT=a\nPOST=on\nSEEN_USER="${USER-unset}"\nSEEN_TOKEN="${GH_TOKEN-unset}"\n' > "$pn/home7/.local/share/maintainer/profiles/fx/profile.env"
 env7=(LC_ALL=C PATH="$SAFE_PATH" HOME="$pn/home7" USER=someone GH_TOKEN=ghp_caller_token)
-env -i "${env7[@]}" bash -c "$BASH_LOAD_VALUES" bash "$scratch/libs/std" "$pn/b7.dump" >/dev/null 2>&1 </dev/null
+env -i "${env7[@]}" bash "$scratch/load-values.sh" "$scratch/libs/std" "$pn/b7.dump" >/dev/null 2>&1 </dev/null
 env -i "${env7[@]}" "$ORACLE" load --lib-dir "$scratch/libs/std" --dump "$pn/o7.dump" >/dev/null 2>&1 </dev/null
 bu="$(tr '\0' '\n' < "$pn/b7.dump" | /usr/bin/grep -A1 -x 'SEEN_USER' | tail -1)"
 ou="$(tr '\0' '\n' < "$pn/o7.dump" | /usr/bin/grep -A1 -x 'SEEN_USER' | tail -1)"

@@ -22,6 +22,10 @@ hmac = "=0.12.1"
 sha2 = "=0.10.9"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["preserve_order", "arbitrary_precision"] }
+# signal-hook installs a signal handler through a safe API, so mx-repo can remove its scratch
+# clone on SIGINT, SIGTERM and SIGHUP the way bash's EXIT trap does while this workspace
+# keeps `unsafe_code = "forbid"`. Its handlers reset to the default action in every child.
+signal-hook = "=0.3.18"
 mx-core = { path = "crates/mx-core" }
 mx-ports = { path = "crates/mx-ports" }
 mx-profile = { path = "crates/mx-profile" }
