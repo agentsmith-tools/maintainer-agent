@@ -10,6 +10,17 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **CI runs the characterization cases, and the merge gate has a suite for
+  them.** The `characterization` job runs `tests/run-characterization.sh`. The
+  new `characterization` suite in `profiles/magent/verify.d/` takes one case file
+  name as the filter (validated as a case file name), so
+  `maintainer-merge verify <pr> <sha> <case-file> <sed> characterization` can
+  prove a change to the orchestrator, backends, classifier, installers, doctor or
+  repo tool. A suite that defines `suite_named_only` is never inferred by
+  `pick_suite`, so shell and docs pull requests keep their suites.
+
 ## [0.11.0] — 2026-11-09
 
 ### Security

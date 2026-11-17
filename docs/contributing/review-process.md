@@ -416,7 +416,7 @@ never run contributor code on the host (see the [Never do](#never-do) list).
 | What we already said | `maintainer reviewed <pr>` | Lists our reviews and comments at the current head. Do not post what is already there. |
 | Trust boundary | `git diff origin/main...<pr-head> -- bin/maintainer-merge lib/profile.sh scripts/render-settings.py 'profiles/*/deny.json' lib/preamble-core.md .github/` | A non-empty diff gets the deeper read in `docs/contributing/trust-boundary.md`. |
 | Offline suite | `bash ./tests/run-tests.sh` | Any failure is the finding. Confirm the summary counts a nonzero number of cases. |
-| Characterization cases | `bash ./tests/run-characterization.sh` | Prints `N cases, P passed, F failed` and exits non-zero on a failure or when no case ran. |
+| Characterization cases | `bash ./tests/run-characterization.sh` | Prints `N cases, P passed, F failed` and exits non-zero on a failure or when no case ran. CI runs it as its own job; the pre-commit hook does not (155 s). To prove a change to the orchestrator, backends, classifier, installers, doctor or repo tool, run `maintainer-merge verify <pr> <sha> <case-file> <sed> characterization`. |
 | Evals | `./evals/run-evals.sh` | A governing rule disappeared from a prompt or a profile. |
 | Doc paths, verbs, variables | `python3 scripts/check_drift.py` | A doc names a path, verb or variable the tree does not have. |
 | Published figures | `python3 scripts/render_figures.py --check --no-tests` | A figure is typed by hand or stale. The fix is `--write`, committed. |

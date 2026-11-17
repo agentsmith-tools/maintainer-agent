@@ -2453,6 +2453,18 @@ want=$(python3 -c "import json;print(len(json.load(open('$s'))['permissions']['d
 got=$(python3 -c "import json;print(len(json.load(open('$ih/.local/share/maintainer/profiles/sysknife/settings.json'))['permissions']['deny']))" 2>/dev/null)
 if [ "$got" = "$want" ]; then ok "reinstall refreshes the deny wall ($got rules)"; else bad "deployed deny wall has $got rules, the repo has $want"; fi
 if [ -d "$ih/.local/share/maintainer/profiles/_template" ]; then bad "the scaffolding template was deployed as a runnable profile"; else ok "_template is not deployed"; fi
+# Every verify.d suite of the magent profile reaches the deployment, byte for
+# byte: the merge gate reads suites from there, and a suite that stayed behind
+# would make `verify ... characterization` fail with "no suite" on the machine
+# that runs the timers.
+inst_missing=""
+for _vf in "$root"/profiles/magent/verify.d/*.sh; do
+    cmp -s "$_vf" "$ih/.local/share/maintainer/profiles/magent/verify.d/$(basename "$_vf")" \
+        || inst_missing="$inst_missing $(basename "$_vf")"
+done
+[ -f "$root/profiles/magent/verify.d/characterization.sh" ] && [ -z "$inst_missing" ] \
+    && ok "install deploys every magent verify.d suite, the characterization suite included" \
+    || bad "install did not deploy these magent suites intact:${inst_missing:- characterization.sh is not in the tree}"
 # Every deployed entry point must be executable. A clean install once left
 # run-instance.sh unexecutable because chmod ran before the platform dispatch
 # that copies it, and systemd would have failed with a permission error.
@@ -11550,6 +11562,244 @@ out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2
     && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
+
+echo "== the characterization suite is a gate suite that only a named verify runs =="
+# tests/run-tests.sh does not run the cases that pin the orchestrator, the
+# backends, the classifier, the installers, the doctor and the repo tool. Under
+# the shell suite a change to lib/backends/*, lib/failure-shapes.json or
+# lib/run.sh stayed green when mutated, so verify refused it with THE GUARD DOES
+# NOT BITE and no receipt was reachable. profiles/magent/verify.d/
+# characterization.sh runs tests/run-characterization.sh for one case file.
+mgv="$root/profiles/magent/verify.d"
+cs="$mgv/characterization.sh"
+cdir="$suite_root/tests/characterization"
+[ -f "$cs" ] && ok "the magent profile ships a characterization suite" \
+    || bad "profiles/magent/verify.d/characterization.sh is missing"
+for fn in suite_covers suite_image suite_needs suite_mutate_glob suite_command suite_ran; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; declare -F "$fn" >/dev/null ) \
+        && ok "the characterization suite defines $fn" \
+        || bad "the characterization suite does not define $fn"
+done
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_image )" = "docker.io/library/python:3.12" ] \
+    && ok "the characterization suite runs in the same python:3.12 image as the shell suite" \
+    || bad "the characterization suite image is not docker.io/library/python:3.12"
+
+# The filter is one case file name. Each refusal is checked twice: the validator
+# says no, and suite_command turns the value into a command that prints the rule
+# and exits 64 instead of running anything.
+chf_n=0
+for chf in '../x.sh' '-c' 'a b.sh' '' 'run-x;id.sh' $'run-backends.sh\nid' 'run-backends.sh;id' \
+           'run-nothere.sh' 'RUN-BACKENDS.sh' 'run-backends.sh ' '/etc/passwd' 'lib.sh'; do
+    chf_n=$((chf_n + 1))
+    chf_show="$(printf '%s' "$chf" | tr '\n' '~')"
+    # Two passes. With the case directory, a name that is no file is refused by
+    # the existence check as well, which could hide a rule that had gone soft.
+    # Without it, only the name rule stands between the value and the command.
+    # run-nothere.sh follows the rule on purpose: only the directory pass can
+    # refuse it.
+    chf_bad=""
+    for chf_dir in "$cdir" ""; do
+        [ "$chf_dir" = "" ] && [ "$chf" = run-nothere.sh ] && continue
+        # shellcheck disable=SC1090
+        if ( . "$cs" >/dev/null 2>&1; suite_filter_ok "$chf" "$chf_dir" ); then
+            chf_bad="$chf_bad validator-accepts(dir='${chf_dir:+set}')"
+        fi
+        # shellcheck disable=SC1090
+        chf_cmd="$( . "$cs" >/dev/null 2>&1; unset work; CHARACTERIZATION_DIR="$chf_dir" suite_command "$chf" )"
+        if ! { grep -q 'exit 64' <<<"$chf_cmd" && grep -qF '^[a-z]+-[a-z0-9-]+' <<<"$chf_cmd" \
+               && ! grep -q 'run-characterization' <<<"$chf_cmd"; }; then
+            chf_bad="$chf_bad runnable-command(dir='${chf_dir:+set}')"
+        fi
+    done
+    [ -z "$chf_bad" ] \
+        && ok "the filter '$chf_show' is refused with a command that names the rule and runs nothing" \
+        || bad "the filter '$chf_show' got through:$chf_bad"
+done
+[ "$chf_n" = 12 ] && ok "the refusal loop ran all 12 filters" || bad "the refusal loop ran $chf_n filters, not 12"
+# shellcheck disable=SC1090
+( . "$cs" >/dev/null 2>&1; suite_filter_ok run-backends.sh "$cdir" ) \
+    && ok "the filter validator accepts a case file that exists" \
+    || bad "the filter validator refuses run-backends.sh"
+# shellcheck disable=SC1090
+chf_cmd="$( . "$cs" >/dev/null 2>&1; CHARACTERIZATION_DIR="$cdir" suite_command run-backends.sh )"
+[ "$chf_cmd" = "cp -r /repo /tmp/w && cd /tmp/w && bash tests/run-characterization.sh 'run-backends.sh'" ] \
+    && ok "the command for a valid filter passes the quoted name to the runner and nothing else" \
+    || bad "the command for run-backends.sh is: $chf_cmd"
+# A value that carries a command must not run it, whatever the validator did.
+chf_dir="$stub_dir/chfpwn"; rm -rf "$chf_dir"; mkdir -p "$chf_dir"
+# shellcheck disable=SC1090
+chf_cmd="$( . "$cs" >/dev/null 2>&1; CHARACTERIZATION_DIR="$cdir" suite_command "run-backends.sh'; touch $chf_dir/PWNED; '" )"
+( cd "$chf_dir" && sh -c "$chf_cmd" >/dev/null 2>&1 )
+[ ! -e "$chf_dir/PWNED" ] \
+    && ok "a filter that carries a shell command does not run it" \
+    || bad "a filter ran a command in the verify container's shell"
+
+# suite_covers: the paths the cases exercise, and not the documentation.
+for cp in bin/maintainer-merge lib/run.sh lib/backends/opencode.sh lib/failure-shapes.json \
+          install.sh new-profile.sh platform/linux/maintainer.service evals/run-evals.sh; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$cp" ) \
+        && ok "the characterization suite covers $cp" \
+        || bad "the characterization suite does not cover $cp"
+done
+for cp in docs/verifying.md README.md CHANGELOG.md; do
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$cp" ) \
+        && bad "the characterization suite claims $cp, which no case runs" \
+        || ok "the characterization suite does not cover $cp"
+done
+
+# suite_ran counts PASSED cases, and 0 whenever the summary line is missing.
+chl="$stub_dir/chlog"; rm -rf "$chl"; mkdir -p "$chl"
+printf '== run-backends.sh: 52 cases\nPASS  one\n52 cases, 50 passed, 2 failed\nfiles run: 1\n' > "$chl/with"
+printf '== run-backends.sh: 52 cases\nPASS  one\nfiles run: 1\n' > "$chl/without"
+: > "$chl/empty"
+printf '0 cases, 0 passed, 0 failed\n' > "$chl/zero"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/with" )" = 50 ] \
+    && ok "suite_ran reports the passed count, not the case total" \
+    || bad "suite_ran on a log with the summary printed '$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/with" )', not 50"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/without" )" = 0 ] \
+    && ok "suite_ran reports 0 for a log without the summary line" \
+    || bad "suite_ran counted a log that has no summary line"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/empty" )" = 0 ] \
+    && ok "suite_ran reports 0 for an empty log" \
+    || bad "suite_ran counted an empty log"
+# shellcheck disable=SC1090
+[ "$( . "$cs" >/dev/null 2>&1; suite_ran "$chl/zero" )" = 0 ] \
+    && ok "suite_ran reports 0 for a run of zero cases" \
+    || bad "suite_ran counted a run of zero cases"
+
+# The gate must never infer this suite. Alphabetical order puts it before docs
+# and shell, and it covers the same bin/ and lib/ paths as shell.
+pk() {  # $1 = suite name or "", then paths
+    PROFILE_DIR="$root/profiles/magent" MAINTAINER_PROFILE='' \
+        bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "$@"' _ "$@" 2>/dev/null
+}
+[ "$(pk "" lib/backends/opencode.sh)" = shell ] \
+    && ok "a pull request on lib/backends/opencode.sh is still given the shell suite when none is named" \
+    || bad "an inferred suite for lib/backends/opencode.sh is '$(pk "" lib/backends/opencode.sh)', not shell"
+[ "$(pk "" bin/maintainer-merge tests/run-tests.sh)" = shell ] \
+    && ok "a pull request on bin/maintainer-merge and a test is still given the shell suite" \
+    || bad "an inferred suite for bin/ plus tests/ is '$(pk "" bin/maintainer-merge tests/run-tests.sh)', not shell"
+[ "$(pk "" docs/verifying.md README.md)" = docs ] \
+    && ok "a documentation-only pull request is still given the docs suite" \
+    || bad "an inferred suite for two documents is '$(pk "" docs/verifying.md README.md)', not docs"
+[ "$(pk characterization lib/backends/opencode.sh)" = characterization ] \
+    && ok "naming the characterization suite selects it for a path it covers" \
+    || bad "naming characterization for lib/backends/opencode.sh returned '$(pk characterization lib/backends/opencode.sh)'"
+pk characterization docs/verifying.md >/dev/null; [ "$?" != 0 ] \
+    && ok "naming the characterization suite for a document is refused" \
+    || bad "the characterization suite was accepted for docs/verifying.md"
+# The map a refusal prints names a suite that can be inferred.
+cm="$(PROFILE_DIR="$root/profiles/magent" MAINTAINER_PROFILE='' bash -c '. "'"$root"'/bin/maintainer-merge"; coverage_map "'"$mgv"'" lib/run.sh' 2>/dev/null)"
+grep -q 'shell' <<<"$cm" && ! grep -q 'characterization' <<<"$cm" \
+    && ok "the coverage map names the shell suite for lib/run.sh, never the named-only suite" \
+    || bad "the coverage map for lib/run.sh says: $cm"
+
+# Every production file the suite covers is reachable by a mutation, the same
+# check the shell suite has above.
+# shellcheck disable=SC1090
+mapfile -t chg < <( . "$cs" >/dev/null 2>&1; suite_mutate_glob )
+chg_prod_raw="$( . "$root/profiles/magent/profile.env" >/dev/null 2>&1; printf '%s' "${PROD_GLOBS:-}" )"
+read -r -a chg_prod <<< "$chg_prod_raw"
+chg_checked=0; chg_unreachable=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    chg_isprod=0
+    # shellcheck disable=SC2254  # PROD_GLOBS entries are globs
+    for pat in "${chg_prod[@]}"; do case "$f" in $pat) chg_isprod=1; break ;; esac; done
+    [ "$chg_isprod" = 1 ] || continue
+    # shellcheck disable=SC1090
+    ( . "$cs" >/dev/null 2>&1; suite_covers "$f" ) || continue
+    chg_checked=$((chg_checked + 1)); base="${f##*/}"; hit=0
+    # shellcheck disable=SC2254  # a mutate glob is a glob
+    for g in "${chg[@]}"; do [ -n "$g" ] || continue; case "$base" in $g) hit=1; break ;; esac; done
+    [ "$hit" = 1 ] || chg_unreachable="$chg_unreachable $f"
+done < <(git -C "$root" ls-files 2>/dev/null)
+[ "$chg_checked" -gt 0 ] \
+    && ok "the characterization suite covers $chg_checked tracked file(s)" \
+    || bad "no tracked file is covered by the characterization suite; the reachability check is vacuous"
+[ -z "$chg_unreachable" ] \
+    && ok "and a mutation can land on every one of them" \
+    || bad "no mutation can land on:$(printf '%s' "$chg_unreachable" | cut -c1-200)"
+
+# CI runs the cases as a job of their own.
+ci="$root/.github/workflows/ci.yml"
+cjob="$(awk '/^  characterization:$/ {f=1; next} f && /^  [a-z]/ {exit} f' "$ci")"
+[ -n "$cjob" ] && ok "CI has a characterization job" || bad "ci.yml has no characterization job"
+grep -qE '^ +bash tests/run-characterization\.sh( |$)' <<<"$cjob" \
+    && ok "the CI job runs bash tests/run-characterization.sh" \
+    || bad "the CI characterization job does not run the runner"
+grep -qE 'exit "\$rc"' <<<"$cjob" \
+    && ok "the CI job exits with the runner's status" \
+    || bad "the CI characterization job does not exit with the runner's status"
+ci_pin="$(grep -m1 -oE 'actions/checkout@[0-9a-f]{40}' "$ci")"
+[ -n "$ci_pin" ] && grep -q "$ci_pin" <<<"$cjob" \
+    && ok "the CI job uses the same pinned checkout as the other jobs" \
+    || bad "the CI characterization job does not use the pinned checkout"
+[ "$(grep -c 'uses:' <<<"$cjob")" = 1 ] \
+    && ok "the CI job adds no action beyond checkout" \
+    || bad "the CI characterization job uses another action"
+for doc in docs/contributing/trust-boundary.md docs/contributing/testing.md docs/contributing/review-process.md docs/verifying.md; do
+    grep -q 'run-characterization' "$root/$doc" && grep -q 'characterization' "$root/$doc" \
+        && grep -qiE 'CI runs (it|the characterization|them)' "$root/$doc" \
+        && ok "$doc says CI runs the characterization cases" \
+        || bad "$doc does not say that CI runs the characterization cases"
+done
+grep -rqE 'and neither does CI|the hook and CI do not run' "$root/docs" \
+    && bad "a document still says CI does not run the characterization cases" \
+    || ok "no document says CI skips the characterization cases"
+
+# End to end through the real gate, with gh stubbed. A scratch repository holds a
+# copy of this tree; the pull request "changes" one production file and the
+# named case file pins it.
+chrt=""
+command -v podman >/dev/null 2>&1 && chrt=podman
+[ -z "$chrt" ] && command -v docker >/dev/null 2>&1 && chrt=docker
+if [ -n "$chrt" ] && ( "$chrt" image inspect docker.io/library/python:3.12 >/dev/null 2>&1 \
+                       || "$chrt" pull -q docker.io/library/python:3.12 >/dev/null 2>&1 ); then
+    cr="$stub_dir/charrepo"; rm -rf "$cr"; mkdir -p "$cr"
+    tar --exclude=.git -C "$root" -cf - . | tar -C "$cr" -xf -
+    git -C "$cr" init -q -b main; git -C "$cr" config user.email t@t; git -C "$cr" config user.name t
+    git -C "$cr" add -A; git -C "$cr" commit -qm base
+    git -C "$cr" remote add origin "$cr"
+    chead="$(git -C "$cr" rev-parse HEAD)"
+    git -C "$cr" update-ref refs/pull/61/head "$chead"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo lib/backends/opencode.sh;;
+    esac"
+    chverify() {  # $1 = state tag, $2 = filter, $3 = sed
+        PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/chstate-$1" MAINTAINER_ACCOUNT=testuser \
+            MAINTAINER_SLUG=o/r MAINTAINER_REPO="$cr" PROFILE_DIR="$root/profiles/magent" \
+            PROD_GLOBS="bin/* lib/* lib/backends/* scripts/* profiles/*/*.json profiles/*/*.env .github/* install.sh new-profile.sh" \
+            timeout 900 bash "$mg" verify 61 "$chead" "$2" "$3" characterization 2>&1
+    }
+    out="$(chverify pinned run-backends.sh "s/backend_name() { printf 'opencode'; }/backend_name() { printf 'opencodeX'; }/")"; rc=$?
+    [ "$rc" = 0 ] && grep -q 'receipt recorded' <<<"$out" && grep -qE 'evidence of [1-9][0-9]* executed' <<<"$out" \
+        && ok "verify through the characterization suite records a receipt for a change a case file pins" \
+        || bad "no receipt for a pinned mutation (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    out="$(chverify unpinned run-backends.sh 's/^# opencode backend, provider-agnostic, wired here to Groq\./# opencode backend, provider agnostic, wired here to Groq./')"; rc=$?
+    [ "$rc" != 0 ] && grep -q 'THE GUARD DOES NOT BITE' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
+        && ok "verify refuses a comment-only change no case pins as a guard that does not bite" \
+        || bad "an unpinned mutation was not refused as not biting (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    out="$(chverify badfilter '../x.sh' 's/a/b/')"; rc=$?
+    [ "$rc" != 0 ] && grep -qF '^[a-z]+-[a-z0-9-]+' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
+        && ok "verify refuses a path as the filter and the log names the filter rule" \
+        || bad "a path filter was not refused with the rule (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    rm -rf "$cr"
+else
+    noenv "verify through the characterization suite records a receipt for a change a case file pins (needs podman or docker)"
+    noenv "verify refuses a comment-only change no case pins as a guard that does not bite (needs podman or docker)"
+    noenv "verify refuses a path as the filter and the log names the filter rule (needs podman or docker)"
+fi
+rm -f "$stub_dir/gh"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"

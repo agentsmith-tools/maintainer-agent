@@ -132,6 +132,33 @@ jobs:
       - name: Run it over every shell script
         run: scripts/shellcheck-sweep.sh
 
+  characterization:
+    name: characterization
+    runs-on: ubuntu-latest
+    # No permissions block of its own: the workflow-level `contents: read`
+    # covers it. The cases run every program under stubs and `env -i`, so no
+    # secret and no network is involved.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The cases that pin what the orchestrator, the backends, the classifier,
+      # the installers, the doctor and the repo tool do. The pre-commit hook does
+      # not run them (155 s would double the commit), so this job is where a
+      # change to lib/backends/*, lib/failure-shapes.json or lib/run.sh meets
+      # them. The exit status comes from the runner directly, never through a
+      # pipe, and the summary line is printed either way.
+      - name: Characterization cases
+        run: |
+          rc=0
+          bash tests/run-characterization.sh >"$RUNNER_TEMP/characterization.log" 2>&1 || rc=$?
+          if [ "$rc" != 0 ]; then
+            cat "$RUNNER_TEMP/characterization.log"
+            echo "::error::the characterization cases failed (exit $rc)" >&2
+          fi
+          grep -E '^[0-9]+ cases, [0-9]+ passed, [0-9]+ failed' "$RUNNER_TEMP/characterization.log" || true
+          exit "$rc"
+
   rust:
     name: rust
     runs-on: ubuntu-latest
