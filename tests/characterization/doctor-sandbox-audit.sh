@@ -653,7 +653,7 @@ case_tk_hyphen_name() {
     dr_lacks "read-only"
     dr_lacks "every task has completed"
     cz_expect_stderr_has "MIN_HOURS_read-only: invalid variable name"
-    dr_summary 31 0 0
+    dr_summary 32 0 0
 }
 dr_case "tasks: a failed task with a hyphen in its name and a success on record is dropped silently, with an error on stderr (pins current behaviour)" case_tk_hyphen_name
 
@@ -692,7 +692,7 @@ case_dc_dirty() {
     cz_expect_rc 0
     dr_has_finding warn "deployed matches HEAD, but $CZ_REPO has 1 uncommitted change(s)" "commit them, then ./install.sh, or the next run uses neither version"
     dr_has_finding warn "1 uncommitted change(s); a run will refuse to start" "commit or stash"
-    dr_summary 30 2 0
+    dr_summary 31 2 0
 }
 dr_case "deployed: the right commit with an uncommitted file is a warning that says neither version runs" case_dc_dirty
 
@@ -706,7 +706,7 @@ case_dc_behind() {
     cz_expect_rc 1
     dr_has_finding fail "deployed $DR_SHORT is 1 commit(s) behind $CZ_REPO ($head); every timer is running old code" "cd $CZ_REPO && ./install.sh"
     dr_has_finding warn "1 commit(s) ahead of origin/main" "push or reset"
-    dr_summary 30 1 1
+    dr_summary 31 1 1
 }
 dr_case "deployed: a stamp one commit behind HEAD is a FAIL with the commit count and the reinstall fix" case_dc_behind
 

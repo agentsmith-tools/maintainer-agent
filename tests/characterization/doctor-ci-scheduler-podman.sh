@@ -134,7 +134,7 @@ case_ci_two_workflows() {
     cz_expect_rc 1
     dr_has_finding fail "main's latest 'Build and Test' run failed 9h ago and main has been red since" "read the failing job: https://example.invalid/run/9"
     dr_has_finding fail "main's latest 'Docs' run failed 10h ago and main has been red since" "read the failing job: https://example.invalid/run/10"
-    dr_summary 31 0 2
+    dr_summary 32 0 2
     # sorted by workflow name
     local a b
     a="$(grep -n "Build and Test" "$CZ_CASE/stdout" | cut -d: -f1)"; b="$(grep -n "'Docs'" "$CZ_CASE/stdout" | cut -d: -f1)"
@@ -527,7 +527,7 @@ case_suite_local_drift() {
     cz_expect_rc 1
     dr_has_finding fail "verify suite 'shell': localhost/mx-test:1 was built from a different shell.Containerfile" "$BUILD"
     dr_has_finding fail "verify suite 'shell' runs in localhost/mx-test:1, which has no: jq" "no receipt is earnable for that suite; change suite_image or suite_needs in $V/shell.sh"
-    dr_summary 32 0 2
+    dr_summary 33 0 2
 }
 dr_case "suite image: a stamp that differs from the Containerfile hash is a FAIL and the needs probe still runs" case_suite_local_drift
 
