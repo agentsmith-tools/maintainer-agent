@@ -168,31 +168,41 @@ case_removed_files() {
     ci_install --uninstall
     cz_expect_no_file "$CZ_SHARE"
     local f
-    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo; do cz_expect_no_file "$CZ_HOME/.local/bin/$f"; done
+    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo maintainer-mcp; do cz_expect_no_file "$CZ_HOME/.local/bin/$f"; done
     ls "$CZ_HOME/.config/systemd/user" > "$CZ_CASE/units.left"
     cz_check "unit files left" "$(cat "$CZ_CASE/units.left")" ""
 }
-ci_case "uninstall: the share directory, four commands and every unit file are removed" case_removed_files
+ci_case "uninstall: the share directory, five commands and every unit file are removed" case_removed_files
 
-# Pins current behaviour. The removal loop names four commands and install.sh
-# deploys five, so maintainer-mcp stays, while the closing message says "the
-# four commands".
-case_removed_mcp_stays() {
+# PR #240: the removal loop names all five commands install.sh deploys, so
+# maintainer-mcp goes with the other four, and the closing message says "the
+# five commands".
+case_removed_mcp_goes() {
     deployed
-    ci_install --uninstall
     cz_expect_file "$CZ_HOME/.local/bin/maintainer-mcp"
-}
-ci_case "uninstall: maintainer-mcp is left behind in ~/.local/bin (pins current behaviour)" case_removed_mcp_stays
-
-# Pins current behaviour. The stamp files --timers wrote live outside the share
-# directory and nothing removes them.
-case_removed_stamps_stay() {
-    deployed
     ci_install --uninstall
-    local n; n="$(find "$CZ_HOME/.local/share/systemd/timers" -type f | wc -l | tr -d ' ')"
-    cz_check "stamp files left" "$n" "6"
+    cz_expect_no_file "$CZ_HOME/.local/bin/maintainer-mcp"
+    cz_expect_stdout_has "the five commands in $CZ_HOME/.local/bin"
 }
-ci_case "uninstall: the six timer stamp files are left behind (pins current behaviour)" case_removed_stamps_stay
+ci_case "uninstall: maintainer-mcp is removed from ~/.local/bin with the other four commands" case_removed_mcp_goes
+
+# PR #240 and #249: the stamp files --timers wrote live outside the share
+# directory. The uninstall removes the stamp-maintainer@*.timer ones and keeps
+# any other file in that directory, which can belong to other software.
+case_removed_stamps_go() {
+    deployed
+    local d="$CZ_HOME/.local/share/systemd/timers"
+    local before; before="$(find "$d" -type f -name 'stamp-maintainer@*.timer' | wc -l | tr -d ' ')"
+    cz_check "stamp files before" "$before" "6"
+    : > "$d/stamp-other.timer"; : > "$d/stamp-maintainer-extra.timer"; : > "$d/foreign.timer"
+    ci_install --uninstall
+    local n; n="$(find "$d" -type f -name 'stamp-maintainer@*.timer' | wc -l | tr -d ' ')"
+    cz_check "maintainer stamp files left" "$n" "0"
+    cz_expect_file "$d/stamp-other.timer"
+    cz_expect_file "$d/stamp-maintainer-extra.timer"
+    cz_expect_file "$d/foreign.timer"
+}
+ci_case "uninstall: the six maintainer timer stamp files are removed and foreign stamp files stay" case_removed_stamps_go
 
 # Pins current behaviour. The receipt key sits in the share directory, which goes.
 case_removed_key_goes() {
@@ -277,28 +287,28 @@ ci_case "uninstall: --timers and --force next to --uninstall change nothing" cas
 
 # --- no systemd user session ---------------------------------------------------------------
 
-# Pins current behaviour. The unit files are removed inside the systemd branch, so
-# with no session (or no systemctl) they stay while the rest is removed.
+# PR #240: removing installed files does not need a live systemd user session
+# (SSH sessions often lack XDG_RUNTIME_DIR), so the unit files go with the rest.
 case_no_session_units_stay() {
     deployed; : > "$CZ_CASE/systemctl.noenv"
     ci_install --uninstall
     cz_expect_rc 0
     cz_expect_no_file "$CZ_SHARE"
-    cz_expect_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
-    cz_expect_file "$CZ_HOME/.config/systemd/user/maintainer@sysknife-ci.timer"
+    cz_expect_no_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
+    cz_expect_no_file "$CZ_HOME/.config/systemd/user/maintainer@sysknife-ci.timer"
     ci_expect_calls systemctl.calls "--user show-environment" "--user show-environment"
 }
-ci_case "uninstall: with no user session the unit files stay and the rest goes (pins current behaviour)" case_no_session_units_stay
+ci_case "uninstall: with no user session the unit files are removed with the rest" case_no_session_units_stay
 
 case_no_systemctl_units_stay() {
     deployed; ci_drop_tool systemctl
     ci_install --uninstall
     cz_expect_rc 0
     cz_expect_no_file "$CZ_SHARE"
-    cz_expect_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
+    cz_expect_no_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
     cz_expect_stderr_empty
 }
-ci_case "uninstall: without systemctl the unit files stay and the rest goes (pins current behaviour)" case_no_systemctl_units_stay
+ci_case "uninstall: without systemctl the unit files are removed with the rest" case_no_systemctl_units_stay
 
 # --- failed steps -----------------------------------------------------------------------------
 
@@ -341,7 +351,7 @@ STUB
     cz_expect_no_file "$CZ_HOME/.local/bin/maintainer"
     cz_expect_no_file "$CZ_HOME/.config/systemd/user/maintainer@.service"
     cz_expect_stdout_has "  SOME STEPS FAILED. This deployment is part-removed, and that is the"
-    cz_expect_stdout_has "  removed: $CZ_SHARE, the four commands in $CZ_HOME/.local/bin, and every scheduler entry."
+    cz_expect_stdout_has "  removed: $CZ_SHARE, the five commands in $CZ_HOME/.local/bin, and every scheduler entry."
     cz_expect_stderr "stub rm: cannot remove $CZ_SHARE" "" "  run rm -rf $CZ_SHARE"
 }
 ci_case "uninstall: a share directory that cannot be removed is listed as a failed step, the rest is removed, exit 0 (pins current behaviour)" case_failed_share_removal
