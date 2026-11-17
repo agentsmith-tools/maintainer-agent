@@ -8424,14 +8424,21 @@ grep -q 'all 1 quoted command(s) appear' <<<"$out" \
     && ok "an abridged claim ending in a shell continuation matches the complete command" \
     || bad "the shell continuation is treated as a required command fragment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
 # Require both fragments and their original order.
-printf '# r\n\n```\n$ gh run list ... --repo owner/name\n```\n' \
+printf '# r\n\n```\n$ gh run list --limit 5 ... --repo owner/name\n```\n' \
     > "$au/runs/2026-01-11T00-00-review.md"
-printf '$ --repo owner/name gh run list\n' \
+printf '$ --repo owner/name gh run list --limit 5\n' \
     > "$au/logs/2026-01-11T00-00-review.commands"
 out="$(aurun 2026-01-11T00-00-review)"
-grep -q 'gh run list ... --repo owner/name' <<<"$out" \
+grep -q 'gh run list --limit 5 ... --repo owner/name' <<<"$out" \
     && ok "abridged command fragments must appear in order" \
     || bad "a claim with out-of-order fragments passed the audit"
+# A short head would let any record holding the tail pass: the 12-character floor stays.
+printf '# r\n\n```\n$ gh ... --force-with-lease\n```\n' > "$au/runs/2026-01-14T00-00-review.md"
+printf '$ git push --force-with-lease\n' > "$au/logs/2026-01-14T00-00-review.commands"
+out="$(aurun 2026-01-14T00-00-review)"
+grep -q 'gh ... --force-with-lease' <<<"$out" \
+    && ok "an abridged claim with a head shorter than 12 characters is not matched" \
+    || bad "a claim with a short head passed the audit"
 # An ellipsis-only claim has no evidence and must not pass as an empty sequence.
 printf '# r\n\n```\n$ ...\n```\n' > "$au/runs/2026-01-12T00-00-review.md"
 printf '$ gh pr list --state open\n' > "$au/logs/2026-01-12T00-00-review.commands"

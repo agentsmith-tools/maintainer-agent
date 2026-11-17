@@ -621,6 +621,11 @@ def _claim_in(claim: str, record: str) -> bool:
         return True
     if "..." not in claim:
         return False
+    # The text before the first ellipsis has to say something: with a short head
+    # (`$ gh ... --force-with-lease`, `$ ... $`) any record that contains the
+    # tail would pass, which is the loosening the 12-character floor prevented.
+    if len(claim.split("...", 1)[0].strip()) < 12:
+        return False
     frags = []
     for part in claim.split("..."):
         frag = part.strip()
