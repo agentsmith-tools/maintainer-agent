@@ -2793,6 +2793,11 @@ sc_end; fi
 # slower than a single-case gate allows). It reads the tree under test from MX_TREE.
 if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
 grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
+if MX_TREE="$root" bash "$suite_root/tests/install-cron-crontab-errors.sh" >/dev/null 2>&1; then
+    ok "cron install keeps the crontab when crontab -l fails, and installs when there is none"
+else
+    bad "cron install overwrites the crontab when crontab -l fails (run tests/install-cron-crontab-errors.sh)"
+fi
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
