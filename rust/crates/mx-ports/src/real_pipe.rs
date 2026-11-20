@@ -1,0 +1,808 @@
+use crate::real_proc::{
+    KILL_TOOLS, absolute_entries, exit_code, kill_group, new_command, plain_locale, resolve,
+    wait_until,
+};
+use crate::{Pipe, PipelineOutcome, PipelineSpec, ProcError, ProcExit, Sink, Source, StageSpec};
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{PipeReader, PipeWriter};
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Child, ExitStatus, Stdio};
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Leaders of the process groups of every pipeline that is running now, so a
+/// fatal signal can stop them ([`kill_live_pipelines`]).
+static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn live() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    LIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Sends `SIGKILL` to every process group that a [`RealPipe`] started and has not
+/// yet reaped, and returns how many groups it signalled.
+///
+/// A terminal's Ctrl-C reaches a shell's whole pipeline because the shell leaves
+/// its children in its own process group. Every stage here leads a group of its
+/// own, so the signal handler of a program that runs a pipeline calls this
+/// before it leaves, or the agent would outlive its orchestrator.
+pub fn kill_live_pipelines() -> usize {
+    let leaders: Vec<u32> = live().clone();
+    let tools: Vec<PathBuf> = KILL_TOOLS.iter().map(PathBuf::from).collect();
+    leaders.iter().filter(|pid| kill_group(&tools, **pid).is_ok()).count()
+}
+
+/// How many stages are registered as running. For tests.
+#[cfg(test)]
+fn live_count() -> usize {
+    live().len()
+}
+
+/// Runs a [`PipelineSpec`] for real.
+///
+/// - Each stage is an argument vector, resolved against the adapter's own
+///   search path. No shell reads it.
+/// - A stage starts with an empty environment: the variables its spec lists,
+///   then `PATH` (the search path) and `LC_ALL`, which a stage cannot override.
+///   `LC_ALL` is the locale the adapter was built with when that is a plain
+///   name, else `C`.
+/// - Every stage leads its own process group, so one deadline kills them all.
+/// - A stage's streams go to files and to the next stage's input through
+///   operating-system pipes that this process never reads, so a stage that writes
+///   more than a pipe buffer cannot deadlock the caller.
+/// - [`Sink::AppendFile`] opens with `O_APPEND` and creates a missing file, as
+///   the shell's `>>` does. [`Sink::SameAsStdout`] is a duplicate of the standard
+///   output descriptor, as `2>&1` is, so both streams interleave in write order.
+/// - A stage that dies of signal `n` reports exit code `128 + n`. At the
+///   deadline every still-running stage is killed and reports
+///   [`ProcExit::TimedOut`].
+///
+/// A stage that cannot be started stops the pipeline: the stages already running
+/// are killed and the call returns the error. A shell would report 127 for that
+/// stage and run the others, which then read an empty input.
+///
+/// The group kill runs the `kill` utility, because the standard library has no
+/// safe call for it and this workspace forbids `unsafe`.
+#[derive(Debug, Clone)]
+pub struct RealPipe {
+    search_dirs: Vec<PathBuf>,
+    locale: Option<String>,
+    kill_tools: Vec<PathBuf>,
+}
+
+impl RealPipe {
+    /// An adapter that resolves programs against `search_path` and runs every
+    /// stage under `locale` (`None` is `C`).
+    pub fn new(search_path: impl Into<OsString>, locale: Option<String>) -> Self {
+        Self {
+            search_dirs: absolute_entries(&search_path.into()),
+            locale,
+            kill_tools: KILL_TOOLS.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    /// Uses `tool` instead of the system `kill` for the process-group kill.
+    #[must_use]
+    pub fn with_group_kill_tool(mut self, tool: impl Into<PathBuf>) -> Self {
+        self.kill_tools = vec![tool.into()];
+        self
+    }
+}
+
+/// One stage that has started.
+struct Running {
+    name: String,
+    child: Child,
+    status: Option<ExitStatus>,
+}
+
+/// Where a stream of a stage ends up.
+enum Dest {
+    Null,
+    File(File),
+    Pipe(PipeWriter),
+}
+
+impl Dest {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(match self {
+            Self::Null => Self::Null,
+            Self::File(file) => Self::File(file.try_clone()?),
+            Self::Pipe(pipe) => Self::Pipe(pipe.try_clone()?),
+        })
+    }
+
+    fn into_stdio(self) -> Stdio {
+        match self {
+            Self::Null => Stdio::null(),
+            Self::File(file) => Stdio::from(file),
+            Self::Pipe(pipe) => Stdio::from(pipe),
+        }
+    }
+}
+
+fn invalid(stage: &StageSpec, reason: &str) -> ProcError {
+    ProcError::Spawn {
+        program: stage.argv.first().clone(),
+        reason: format!("invalid pipeline: {reason}"),
+    }
+}
+
+/// Refuses a pipeline whose wiring cannot be made.
+fn validate(stages: &[StageSpec]) -> Result<(), ProcError> {
+    let last = stages.len() - 1;
+    for (index, stage) in stages.iter().enumerate() {
+        if stage.stdin == Source::PreviousStage && index == 0 {
+            return Err(invalid(stage, "the first stage reads the previous stage"));
+        }
+        if stage.stdout == Sink::NextStage && index == last {
+            return Err(invalid(stage, "the last stage writes to the next stage"));
+        }
+        if stage.stdout == Sink::SameAsStdout {
+            return Err(invalid(stage, "standard output cannot be the same as itself"));
+        }
+        if stage.stderr == Sink::NextStage {
+            return Err(invalid(stage, "only standard output can feed the next stage"));
+        }
+        let fed = index > 0 && stages[index - 1].stdout == Sink::NextStage;
+        if fed != (stage.stdin == Source::PreviousStage) {
+            return Err(invalid(
+                stage,
+                "a stage reads the previous stage exactly when that stage writes to it",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_file(path: &std::path::Path, program: &str) -> Result<File, ProcError> {
+    OpenOptions::new().create(true).append(true).open(path).map_err(|error| ProcError::Io {
+        program: program.to_string(),
+        reason: format!("{}: {error}", path.display()),
+    })
+}
+
+impl RealPipe {
+    /// Starts one stage. `upstream` is the read end of the previous stage's pipe.
+    fn start(
+        &self,
+        stage: &StageSpec,
+        upstream: Option<PipeReader>,
+    ) -> Result<(Child, Option<PipeReader>), ProcError> {
+        let name = stage.argv.first();
+        let program = resolve(&self.search_dirs, name)?;
+        let io_error = |reason: String| ProcError::Io { program: name.clone(), reason };
+
+        let stdin = match (&stage.stdin, upstream) {
+            (Source::Empty, _) => Stdio::null(),
+            (Source::File(path), _) => Stdio::from(
+                File::open(path)
+                    .map_err(|error| io_error(format!("{}: {error}", path.display())))?,
+            ),
+            (Source::PreviousStage, Some(reader)) => Stdio::from(reader),
+            (Source::PreviousStage, None) => {
+                return Err(invalid(stage, "no previous stage to read"));
+            }
+        };
+
+        let mut next_reader = None;
+        let stdout = match &stage.stdout {
+            Sink::Null | Sink::SameAsStdout => Dest::Null,
+            Sink::AppendFile(path) => Dest::File(append_file(path, name)?),
+            Sink::NextStage => {
+                let (reader, writer) = std::io::pipe()
+                    .map_err(|error| io_error(format!("could not make a pipe: {error}")))?;
+                next_reader = Some(reader);
+                Dest::Pipe(writer)
+            }
+        };
+        let stderr = match &stage.stderr {
+            Sink::Null | Sink::NextStage => Dest::Null,
+            Sink::AppendFile(path) => Dest::File(append_file(path, name)?),
+            Sink::SameAsStdout => stdout
+                .try_clone()
+                .map_err(|error| io_error(format!("could not duplicate stdout: {error}")))?,
+        };
+
+        let mut command = new_command(&program);
+        command.arg0(name).args(&stage.argv.as_slice()[1..]).env_clear();
+        for (key, value) in &stage.env {
+            command.env(key, value);
+        }
+        command
+            .env("PATH", std::env::join_paths(&self.search_dirs).unwrap_or_default())
+            .env("LC_ALL", plain_locale(self.locale.as_deref()));
+        if let Some(dir) = &stage.cwd {
+            command.current_dir(dir);
+        }
+        command
+            .process_group(0)
+            .stdin(stdin)
+            .stdout(stdout.into_stdio())
+            .stderr(stderr.into_stdio());
+        let child = command.spawn().map_err(|error| ProcError::Spawn {
+            program: name.clone(),
+            reason: error.to_string(),
+        })?;
+        // The command still holds this process's copies of the write ends; drop
+        // it so the next stage sees end of file when the writer exits.
+        drop(command);
+        live().push(child.id());
+        Ok((child, next_reader))
+    }
+
+    /// Kills every group, then every program, then reaps them. Returns the first
+    /// reason a group kill could not run, and whether any group kill failed
+    /// while its stage was still running.
+    fn kill_all(&self, running: &mut [Running]) -> Result<(), ProcError> {
+        let mut failure = None;
+        for stage in running.iter_mut() {
+            if stage.status.is_some() {
+                continue;
+            }
+            match kill_group(&self.kill_tools, stage.child.id()) {
+                Err(reason) => {
+                    failure.get_or_insert(ProcError::KillFailed {
+                        program: stage.name.clone(),
+                        reason,
+                    });
+                }
+                Ok(false) => {
+                    failure.get_or_insert(ProcError::KillFailed {
+                        program: stage.name.clone(),
+                        reason:
+                            "the kill utility reported failure while the program was still running"
+                                .to_string(),
+                    });
+                }
+                Ok(true) => {}
+            }
+            drop(stage.child.kill());
+            stage.status = stage.child.wait().ok();
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+impl Pipe for RealPipe {
+    fn run_pipeline(&self, spec: &PipelineSpec) -> Result<PipelineOutcome, ProcError> {
+        let stages = spec.stages.as_slice();
+        validate(stages)?;
+        let deadline = Instant::now() + spec.timeout;
+
+        let mut running: Vec<Running> = Vec::with_capacity(stages.len());
+        let mut upstream: Option<PipeReader> = None;
+        for stage in stages {
+            match self.start(stage, upstream.take()) {
+                Ok((child, reader)) => {
+                    upstream = reader;
+                    running.push(Running { name: stage.argv.first().clone(), child, status: None });
+                }
+                Err(error) => {
+                    drop(self.kill_all(&mut running));
+                    forget(&running);
+                    return Err(error);
+                }
+            }
+        }
+
+        let mut wait_failure: Option<(String, std::io::Error)> = None;
+        let finished = wait_until(deadline, || {
+            for stage in &mut running {
+                if stage.status.is_none() {
+                    match stage.child.try_wait() {
+                        Ok(Some(done)) => stage.status = Some(done),
+                        Ok(None) => {}
+                        Err(error) => {
+                            wait_failure = Some((stage.name.clone(), error));
+                            return true;
+                        }
+                    }
+                }
+            }
+            running.iter().all(|stage| stage.status.is_some())
+        });
+        if let Some((program, error)) = wait_failure {
+            drop(self.kill_all(&mut running));
+            forget(&running);
+            return Err(ProcError::Io { program, reason: format!("waiting failed: {error}") });
+        }
+
+        let timed_out: Vec<bool> = running.iter().map(|stage| stage.status.is_none()).collect();
+        let kill = if finished { Ok(()) } else { self.kill_all(&mut running) };
+        forget(&running);
+        kill?;
+        let exits = running
+            .iter()
+            .zip(&timed_out)
+            .map(|(stage, timed_out)| match (stage.status, timed_out) {
+                (_, true) => ProcExit::TimedOut,
+                (Some(status), false) => ProcExit::Code(exit_code(status)),
+                (None, false) => ProcExit::Code(255),
+            })
+            .collect();
+        Ok(PipelineOutcome { exits })
+    }
+}
+
+/// Takes the leaders of `running` off the live list.
+fn forget(running: &[Running]) {
+    let ids: Vec<u32> = running.iter().map(|stage| stage.child.id()).collect();
+    live().retain(|pid| !ids.contains(pid));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mx_core::NonEmpty;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    const SEARCH_PATH: &str = "/usr/bin:/bin";
+    const LONG: Duration = Duration::from_secs(30);
+    /// No test may wait longer than this for one pipeline.
+    const BOUND: Duration = Duration::from_secs(15);
+
+    /// A directory under the system temp dir that is removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("mx-pipe-{tag}-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir.canonicalize().unwrap())
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    fn pipe() -> RealPipe {
+        RealPipe::new(SEARCH_PATH, None)
+    }
+
+    /// A stage that runs `sh -c script`, with both streams discarded.
+    fn sh(script: &str) -> StageSpec {
+        StageSpec::new(NonEmpty::new("sh".to_string(), ["-c".to_string(), script.to_string()]))
+    }
+
+    fn program(name: &str, args: &[&str]) -> StageSpec {
+        StageSpec::new(NonEmpty::new(name.to_string(), args.iter().map(|arg| (*arg).to_string())))
+    }
+
+    fn spec(stages: Vec<StageSpec>, timeout: Duration) -> PipelineSpec {
+        let mut stages = stages.into_iter();
+        let first = stages.next().expect("a pipeline has a stage");
+        PipelineSpec { stages: NonEmpty::new(first, stages), timeout }
+    }
+
+    /// Runs the pipeline on its own thread and fails the test when it does not
+    /// return within `BOUND`: a deadlock or a kill that does not work would
+    /// otherwise hang the suite.
+    fn run_bounded(pipe: RealPipe, spec: PipelineSpec) -> Result<PipelineOutcome, ProcError> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(std::thread::spawn(move || drop(sender.send(pipe.run_pipeline(&spec)))));
+        receiver.recv_timeout(BOUND).unwrap_or_else(|_| {
+            panic!("RealPipe did not return within {BOUND:?}: deadlock, or the kill does not work")
+        })
+    }
+
+    fn read(path: &Path) -> String {
+        String::from_utf8(std::fs::read(path).unwrap()).unwrap()
+    }
+
+    fn exits(outcome: &PipelineOutcome) -> Vec<ProcExit> {
+        outcome.exits.clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_alive(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => false,
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| state != 'Z' && state != 'X'),
+        }
+    }
+
+    #[test]
+    fn one_stage_appends_both_streams_to_the_file_in_write_order() {
+        let dir = TempDir::new("both");
+        let log = dir.path("log");
+        let mut stage = sh("echo out1; echo err1 >&2; echo out2; echo err2 >&2");
+        stage.stdout = Sink::AppendFile(log.clone());
+        stage.stderr = Sink::SameAsStdout;
+        let outcome = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0)]);
+        assert_eq!(read(&log), "out1\nerr1\nout2\nerr2\n");
+    }
+
+    #[test]
+    fn appending_keeps_what_the_file_already_holds_and_creates_a_missing_file() {
+        let dir = TempDir::new("append");
+        let existing = dir.path("existing");
+        std::fs::write(&existing, "before\n").unwrap();
+        let missing = dir.path("missing");
+        let mut stage = sh("echo after");
+        stage.stdout = Sink::AppendFile(existing.clone());
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        let mut stage = sh("echo created");
+        stage.stdout = Sink::AppendFile(missing.clone());
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(read(&existing), "before\nafter\n");
+        assert_eq!(read(&missing), "created\n");
+    }
+
+    #[test]
+    fn the_two_streams_of_a_stage_can_go_to_two_files() {
+        let dir = TempDir::new("split");
+        let mut stage = sh("echo to-out; echo to-err >&2");
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        stage.stderr = Sink::AppendFile(dir.path("err"));
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(read(&dir.path("out")), "to-out\n");
+        assert_eq!(read(&dir.path("err")), "to-err\n");
+    }
+
+    #[test]
+    fn a_file_source_feeds_the_stage_its_bytes() {
+        let dir = TempDir::new("source");
+        let input = dir.path("prompt");
+        std::fs::write(&input, "line one\nline two\n").unwrap();
+        let mut stage = program("cat", &[]);
+        stage.stdin = Source::File(input);
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(read(&dir.path("out")), "line one\nline two\n");
+    }
+
+    #[test]
+    fn an_empty_source_gives_end_of_file_at_once() {
+        let dir = TempDir::new("empty");
+        let mut stage = program("cat", &[]);
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        let outcome = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0)]);
+        assert_eq!(read(&dir.path("out")), "");
+    }
+
+    #[test]
+    fn the_next_stage_reads_what_the_previous_stage_wrote() {
+        let dir = TempDir::new("chain");
+        let mut first = sh("echo hello pipe");
+        first.stdout = Sink::NextStage;
+        let mut second = program("tr", &["a-z", "A-Z"]);
+        second.stdin = Source::PreviousStage;
+        second.stdout = Sink::AppendFile(dir.path("out"));
+        let outcome = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0), ProcExit::Code(0)]);
+        assert_eq!(read(&dir.path("out")), "HELLO PIPE\n");
+    }
+
+    #[test]
+    fn standard_error_can_follow_standard_output_into_the_next_stage() {
+        let dir = TempDir::new("errpipe");
+        let mut first = sh("echo out; echo err >&2");
+        first.stdout = Sink::NextStage;
+        first.stderr = Sink::SameAsStdout;
+        let mut second = program("cat", &[]);
+        second.stdin = Source::PreviousStage;
+        second.stdout = Sink::AppendFile(dir.path("out"));
+        run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(read(&dir.path("out")), "out\nerr\n");
+    }
+
+    #[test]
+    fn a_stage_that_writes_a_megabyte_does_not_deadlock_the_pipeline() {
+        let dir = TempDir::new("megabyte");
+        let mut first = program("head", &["-c", "1048576", "/dev/zero"]);
+        first.stdout = Sink::NextStage;
+        let mut second = program("wc", &["-c"]);
+        second.stdin = Source::PreviousStage;
+        second.stdout = Sink::AppendFile(dir.path("count"));
+        let outcome = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0), ProcExit::Code(0)]);
+        assert_eq!(read(&dir.path("count")).trim(), "1048576");
+    }
+
+    #[test]
+    fn a_megabyte_on_standard_error_alone_reaches_the_file() {
+        let dir = TempDir::new("megaerr");
+        let mut stage = sh("head -c 1048576 /dev/zero >&2");
+        stage.stderr = Sink::AppendFile(dir.path("err"));
+        let outcome = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0)]);
+        assert_eq!(std::fs::metadata(dir.path("err")).unwrap().len(), 1_048_576);
+    }
+
+    #[test]
+    fn a_megabyte_source_through_cat_reaches_the_file_whole() {
+        let dir = TempDir::new("bigsource");
+        let input = dir.path("in");
+        std::fs::write(&input, vec![b'x'; 1_048_576]).unwrap();
+        let mut stage = program("cat", &[]);
+        stage.stdin = Source::File(input);
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(std::fs::metadata(dir.path("out")).unwrap().len(), 1_048_576);
+    }
+
+    #[test]
+    fn yes_into_head_ends_and_the_writer_reports_sigpipe_as_141() {
+        let dir = TempDir::new("yes");
+        let mut first = program("yes", &[]);
+        first.stdout = Sink::NextStage;
+        let mut second = program("head", &["-n", "3"]);
+        second.stdin = Source::PreviousStage;
+        second.stdout = Sink::AppendFile(dir.path("out"));
+        let outcome = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(read(&dir.path("out")), "y\ny\ny\n");
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(141), ProcExit::Code(0)]);
+        assert_eq!(outcome.pipefail(), ProcExit::Code(141));
+    }
+
+    #[test]
+    fn a_stage_that_exits_3_before_its_reader_does_keeps_its_own_code() {
+        let mut first = sh("echo some; exit 3");
+        first.stdout = Sink::NextStage;
+        let mut second = sh("sleep 1; cat >/dev/null");
+        second.stdin = Source::PreviousStage;
+        let outcome = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(3), ProcExit::Code(0)]);
+        assert_eq!(outcome.pipefail(), ProcExit::Code(3));
+    }
+
+    #[test]
+    fn the_rightmost_failing_stage_decides_pipefail() {
+        let mut first = sh("exit 3");
+        first.stdout = Sink::NextStage;
+        let mut second = sh("cat >/dev/null; exit 4");
+        second.stdin = Source::PreviousStage;
+        let outcome = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(3), ProcExit::Code(4)]);
+        assert_eq!(outcome.pipefail(), ProcExit::Code(4));
+    }
+
+    #[test]
+    fn a_stage_killed_by_a_signal_reports_128_plus_the_signal() {
+        let outcome = run_bounded(pipe(), spec(vec![sh("kill -9 $$")], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(137)]);
+        let outcome = run_bounded(pipe(), spec(vec![sh("kill -TERM $$")], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(143)]);
+    }
+
+    #[test]
+    fn a_stage_that_ignores_sigterm_is_killed_at_the_deadline() {
+        let dir = TempDir::new("sigterm");
+        let pidfile = dir.path("pid");
+        let script =
+            format!("trap '' TERM; echo $$ > {}; while :; do sleep 1; done", pidfile.display());
+        let started = Instant::now();
+        let outcome =
+            run_bounded(pipe(), spec(vec![sh(&script)], Duration::from_millis(1500))).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(exits(&outcome), vec![ProcExit::TimedOut]);
+        assert_eq!(outcome.pipefail(), ProcExit::TimedOut);
+        assert!(elapsed >= Duration::from_millis(1500), "returned after {elapsed:?}, too early");
+        assert!(elapsed < BOUND, "returned after {elapsed:?}");
+        let pid: u32 = read(&pidfile).trim().parse().expect("the stage wrote its pid");
+        let gone = wait_until(Instant::now() + Duration::from_secs(3), || !is_alive(pid));
+        assert!(gone, "the stage {pid} survived the deadline");
+    }
+
+    #[test]
+    fn the_deadline_kills_every_stage_and_the_grandchildren_of_each() {
+        let dir = TempDir::new("deadline");
+        let mut first = sh(&format!("sleep 60 & echo $! > {}; wait", dir.path("g1").display()));
+        first.stdout = Sink::NextStage;
+        let mut second = sh(&format!("sleep 60 & echo $! > {}; wait", dir.path("g2").display()));
+        second.stdin = Source::PreviousStage;
+        let outcome =
+            run_bounded(pipe(), spec(vec![first, second], Duration::from_millis(1500))).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::TimedOut, ProcExit::TimedOut]);
+        for name in ["g1", "g2"] {
+            let pid: u32 = read(&dir.path(name)).trim().parse().unwrap();
+            let gone = wait_until(Instant::now() + Duration::from_secs(3), || !is_alive(pid));
+            assert!(gone, "the grandchild {name} ({pid}) survived the deadline");
+        }
+    }
+
+    #[test]
+    fn a_stage_that_finished_before_the_deadline_keeps_its_code() {
+        let mut first = sh("exit 5");
+        first.stdout = Sink::NextStage;
+        let mut second = sh("cat >/dev/null; sleep 60");
+        second.stdin = Source::PreviousStage;
+        let outcome =
+            run_bounded(pipe(), spec(vec![first, second], Duration::from_millis(1500))).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(5), ProcExit::TimedOut]);
+    }
+
+    #[test]
+    fn every_stage_leads_its_own_process_group() {
+        let dir = TempDir::new("groups");
+        let script = |name: &str| {
+            format!(
+                "read pid rest < /proc/self/stat; echo \"$pid $(cut -d' ' -f5 /proc/self/stat)\" > {}",
+                dir.path(name).display()
+            )
+        };
+        let mut first = sh(&script("one"));
+        first.stdout = Sink::NextStage;
+        let mut second = sh(&format!("cat > /dev/null; {}", script("two")));
+        second.stdin = Source::PreviousStage;
+        run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap();
+        let mut groups = Vec::new();
+        for name in ["one", "two"] {
+            let text = read(&dir.path(name));
+            let (leader, group) = text.trim().split_once(' ').unwrap();
+            assert_eq!(leader, group, "stage {name} leads no group of its own");
+            groups.push(group.to_string());
+        }
+        assert_ne!(groups[0], groups[1]);
+    }
+
+    #[test]
+    fn a_stage_sees_only_its_own_variables_plus_path_and_lc_all() {
+        let dir = TempDir::new("env");
+        let mut stage = program("printenv", &[]);
+        stage.env = vec![("ONLY_THIS".to_string(), "yes".to_string())];
+        stage.stdout = Sink::AppendFile(dir.path("env"));
+        let ambient = std::env::vars_os().filter(|(name, _)| name != "PATH").count();
+        assert!(ambient > 0, "the test process has no variable, so this proves nothing");
+        run_bounded(
+            RealPipe::new(SEARCH_PATH, Some("en_US.UTF-8".to_string())),
+            spec(vec![stage], LONG),
+        )
+        .unwrap();
+        let mut seen: Vec<String> = read(&dir.path("env")).lines().map(str::to_string).collect();
+        seen.sort();
+        assert_eq!(seen, vec!["LC_ALL=en_US.UTF-8", "ONLY_THIS=yes", "PATH=/usr/bin:/bin"]);
+    }
+
+    #[test]
+    fn a_stage_cannot_override_path_or_lc_all() {
+        let dir = TempDir::new("override");
+        let mut stage = program("printenv", &[]);
+        stage.env = vec![
+            ("PATH".to_string(), "/evil".to_string()),
+            ("LC_ALL".to_string(), "evil".to_string()),
+        ];
+        stage.stdout = Sink::AppendFile(dir.path("env"));
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        let text = read(&dir.path("env"));
+        assert!(text.lines().any(|line| line == "PATH=/usr/bin:/bin"), "{text}");
+        assert!(text.lines().any(|line| line == "LC_ALL=C"), "{text}");
+        assert!(!text.contains("evil"), "{text}");
+    }
+
+    #[test]
+    fn a_locale_that_is_not_a_plain_name_falls_back_to_c() {
+        let dir = TempDir::new("locale");
+        let mut stage = program("printenv", &["LC_ALL"]);
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        run_bounded(
+            RealPipe::new(SEARCH_PATH, Some("x; rm -rf /".to_string())),
+            spec(vec![stage], LONG),
+        )
+        .unwrap();
+        assert_eq!(read(&dir.path("out")), "C\n");
+    }
+
+    #[test]
+    fn a_stage_runs_in_its_working_directory() {
+        let dir = TempDir::new("cwd");
+        let mut stage = program("pwd", &[]);
+        stage.cwd = Some(dir.path(""));
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(
+            read(&dir.path("out")).trim(),
+            dir.path("").to_str().unwrap().trim_end_matches('/')
+        );
+    }
+
+    #[test]
+    fn a_program_that_is_not_on_the_search_path_is_an_error() {
+        let stage = program("no-such-program-xyz", &[]);
+        let error = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap_err();
+        assert!(matches!(error, ProcError::NotFound { .. }), "got {error:?}");
+    }
+
+    #[test]
+    fn a_stage_that_cannot_start_stops_the_stages_already_running() {
+        let dir = TempDir::new("abort");
+        let pidfile = dir.path("pid");
+        let mut first = sh(&format!("echo $$ > {}; sleep 60", pidfile.display()));
+        first.stdout = Sink::NextStage;
+        let mut second = program("no-such-program-xyz", &[]);
+        second.stdin = Source::PreviousStage;
+        let error = run_bounded(pipe(), spec(vec![first, second], LONG)).unwrap_err();
+        assert!(matches!(error, ProcError::NotFound { .. }), "got {error:?}");
+        let wrote = wait_until(Instant::now() + Duration::from_secs(2), || pidfile.exists());
+        if wrote {
+            let pid: u32 = read(&pidfile).trim().parse().unwrap_or(0);
+            let gone = wait_until(Instant::now() + Duration::from_secs(3), || !is_alive(pid));
+            assert!(gone, "the first stage {pid} survived the failed start");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_source_file_is_an_error_and_starts_nothing() {
+        let dir = TempDir::new("nosource");
+        let mut stage = program("cat", &[]);
+        stage.stdin = Source::File(dir.path("missing"));
+        stage.stdout = Sink::AppendFile(dir.path("out"));
+        let error = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap_err();
+        assert!(matches!(error, ProcError::Io { .. }), "got {error:?}");
+        assert!(!dir.path("out").exists() || read(&dir.path("out")).is_empty());
+    }
+
+    #[test]
+    fn wiring_that_cannot_be_made_is_refused_before_anything_starts() {
+        let dir = TempDir::new("wiring");
+        let marker = dir.path("ran");
+        let touch = |name: &str| sh(&format!("touch {}; {name}", marker.display()));
+        let mut first_reads_previous = touch("true");
+        first_reads_previous.stdin = Source::PreviousStage;
+        let mut last_feeds_next = touch("true");
+        last_feeds_next.stdout = Sink::NextStage;
+        let mut stdout_same = touch("true");
+        stdout_same.stdout = Sink::SameAsStdout;
+        let mut stderr_next = touch("true");
+        stderr_next.stderr = Sink::NextStage;
+        for stage in [first_reads_previous, last_feeds_next, stdout_same, stderr_next] {
+            let error = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap_err();
+            assert!(matches!(error, ProcError::Spawn { .. }), "got {error:?}");
+        }
+        let mut writer = touch("true");
+        writer.stdout = Sink::NextStage;
+        let reader_that_ignores = touch("true");
+        let error = run_bounded(pipe(), spec(vec![writer, reader_that_ignores], LONG)).unwrap_err();
+        assert!(matches!(error, ProcError::Spawn { .. }), "got {error:?}");
+        assert!(!marker.exists(), "a refused pipeline started a stage");
+    }
+
+    #[test]
+    fn a_missing_kill_utility_is_reported_after_the_stage_is_killed() {
+        let broken = pipe().with_group_kill_tool("/nonexistent/kill");
+        let error =
+            run_bounded(broken, spec(vec![program("sleep", &["30"])], Duration::from_millis(800)))
+                .unwrap_err();
+        assert!(matches!(error, ProcError::KillFailed { .. }), "got {error:?}");
+    }
+
+    #[test]
+    fn a_running_stage_is_on_the_live_list_until_the_pipeline_ends() {
+        let dir = TempDir::new("live");
+        let pidfile = dir.path("pid");
+        let script = format!("echo $$ > {}; sleep 60", pidfile.display());
+        let handle = std::thread::spawn(move || {
+            run_bounded(pipe(), spec(vec![sh(&script)], Duration::from_millis(2500)))
+        });
+        assert!(
+            wait_until(Instant::now() + Duration::from_secs(5), || pidfile.exists()
+                && !read(&pidfile).trim().is_empty()),
+            "the stage never started"
+        );
+        let pid: u32 = read(&pidfile).trim().parse().unwrap();
+        assert!(live().contains(&pid), "the running stage is not on the live list");
+        assert!(live_count() >= 1);
+        let outcome = handle.join().unwrap().unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::TimedOut]);
+        assert!(!live().contains(&pid), "a finished stage stays on the live list");
+    }
+}

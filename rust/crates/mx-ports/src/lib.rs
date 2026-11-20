@@ -6,7 +6,7 @@
 //! code depends on the traits only, so a test replaces the world with a fake
 //! that records every call as a typed [`Effect`] in an [`EffectLog`].
 //!
-//! # The one real adapter
+//! # The real adapters
 //!
 //! [`RealProc`] runs a program given as an argument vector, with no shell. It
 //! resolves the program against an explicit search path, clears the
@@ -36,6 +36,7 @@ mod gh;
 mod git;
 mod pipeline;
 mod proc;
+mod real_pipe;
 mod real_proc;
 mod script;
 mod secret;
@@ -52,6 +53,7 @@ pub use pipeline::{
     FakePipe, Pipe, PipeEffect, PipelineOutcome, PipelineSpec, Sink, Source, StageSpec,
 };
 pub use proc::{FakeProc, Proc, ProcEffect, ProcError, ProcExit, ProcOutput, ProcSpec};
+pub use real_pipe::{RealPipe, kill_live_pipelines};
 pub use real_proc::RealProc;
 pub use script::Script;
 pub use secret::Secret;
