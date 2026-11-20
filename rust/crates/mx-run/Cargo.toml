@@ -1,0 +1,27 @@
+[package]
+name = "mx-run"
+version = "0.1.0"
+description = "lib/run.sh in Rust: the orchestrator of one unattended pass, with the oracle that proves it equal to the bash"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mx_run"
+path = "src/lib.rs"
+
+[[bin]]
+name = "run"
+path = "src/main.rs"
+
+[dependencies]
+mx-backends.workspace = true
+mx-core.workspace = true
+mx-ports.workspace = true
+mx-profile.workspace = true
+rustix.workspace = true
+signal-hook.workspace = true
+
+[lints]
+workspace = true

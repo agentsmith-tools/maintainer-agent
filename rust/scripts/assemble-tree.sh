@@ -12,14 +12,15 @@
 #
 # DEST must not exist, or must be an empty directory. A PROGRAM is the name of a
 # file under bin/ whose Rust build is a [[bin]] of the workspace under rust/
-# (maintainer-repo, maintainer-doctor, ...). With no PROGRAM every such program
-# is built and swapped in; a named program that has no Rust build is an error.
+# (maintainer-repo, maintainer-doctor, ...), or `run`, whose Rust build replaces
+# lib/run.sh. With no PROGRAM every such program is built and swapped in; a named
+# program that has no Rust build is an error.
 #
 # For each program the script
 #   1. builds it with `cargo build --release --locked --offline`, in the cargo
 #      target directory the caller chose (CARGO_TARGET_DIR, CARGO_BUILD_JOBS),
 #   2. copies the binary to DEST/.rust-bin/NAME, and
-#   3. replaces DEST/bin/NAME with a short wrapper that execs that binary
+#   3. replaces DEST/bin/NAME (DEST/lib/run.sh for `run`) with a short wrapper that execs that binary
 #      and hands it the wrapper's own path as argv[0], after naming the two
 #      variables the suites' stubs read (CZ_CASE_DIR, BASH_ENV) in
 #      MAINTAINER_CHILD_ENV so the program passes them to its children. The Rust program finds
@@ -68,7 +69,8 @@ esac
 if [ -n "$(ls -A -- "$dest")" ]; then die "$dest is not empty"; fi
 
 # Which programs have a Rust build: the [[bin]] targets of the workspace whose
-# name is also a file under bin/. One line each: `package name`.
+# name is also a file under bin/, and `run`, which stands for lib/run.sh. One line
+# each: `package name path`, where path is the file the wrapper replaces.
 meta="$(cd "$ws" && cargo metadata --no-deps --format-version 1 --locked --offline 2>&1)"; rc=$?
 [ "$rc" = 0 ] || die "cargo metadata exited $rc: $(tr '\n' ' ' <<<"$meta" | cut -c1-300)"
 listing="$(python3 -I -c '
@@ -78,23 +80,29 @@ meta = json.loads(sys.stdin.read())
 rows = []
 for pkg in meta["packages"]:
     for target in pkg["targets"]:
-        if "bin" in target["kind"] and os.path.isfile(os.path.join(root, "bin", target["name"])):
-            rows.append((pkg["name"], target["name"]))
-for pkg, name in sorted(rows):
-    print(pkg, name)
+        if "bin" not in target["kind"]:
+            continue
+        name = target["name"]
+        if os.path.isfile(os.path.join(root, "bin", name)):
+            rows.append((pkg["name"], name, "bin/" + name))
+        elif name == "run" and os.path.isfile(os.path.join(root, "lib", "run.sh")):
+            rows.append((pkg["name"], name, "lib/run.sh"))
+for pkg, name, rel in sorted(rows):
+    print(pkg, name, rel)
 ' "$root" <<<"$meta")"; rc=$?
 [ "$rc" = 0 ] || die "could not read the workspace's binaries (exit $rc)"
 [ -n "$listing" ] || die "the workspace has no binary that replaces a bin/ program"
 
 # The selection, kept as parallel lists.
-pkgs=(); names=()
+pkgs=(); names=(); rels=()
 if [ "$#" -eq 0 ]; then
-    while read -r pkg name; do pkgs+=("$pkg"); names+=("$name"); done <<<"$listing"
+    while read -r pkg name rel; do pkgs+=("$pkg"); names+=("$name"); rels+=("$rel"); done <<<"$listing"
 else
     for want in "$@"; do
         pkg="$(awk -v n="$want" '$2 == n { print $1 }' <<<"$listing")"
+        rel="$(awk -v n="$want" '$2 == n { print $3 }' <<<"$listing")"
         [ -n "$pkg" ] || die "$want has no Rust build in the workspace (ported: $(awk '{print $2}' <<<"$listing" | paste -sd' ' -))"
-        pkgs+=("$pkg"); names+=("$want")
+        pkgs+=("$pkg"); names+=("$want"); rels+=("$rel")
     done
 fi
 [ "${#names[@]}" -gt 0 ] || die "no program selected"
@@ -134,7 +142,7 @@ for rel in sys.stdin.buffer.read().split(b"\0"):
 ' "$root" < "$list" | sort -u | head -n 5)"; rc=$?
 [ "$rc" = 0 ] || die "could not scan the file list for symlinks"
 [ -z "$bad" ] || die "a tracked symlink stands where a directory is expected, so the copy would write through it: $(tr '\n' ' ' <<<"$bad")"
-for top in bin .rust-bin; do
+for top in bin lib .rust-bin; do
     if [ -L "$root/$top" ]; then die "$top is a symlink in the source tree; refusing to copy it"; fi
 done
 tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$dest" -xf -
@@ -147,14 +155,15 @@ if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree fail
 # never followed) before the new one is created with noclobber.
 mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
 real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
-for sub in bin .rust-bin; do
+for sub in bin lib .rust-bin; do
     if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
     real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
     case "$real_sub/" in "$real_dest"/*) ;; *) die "$dest/$sub resolves outside $dest" ;; esac
 done
-for name in "${names[@]}"; do
-    [ -f "$dest/bin/$name" ] || die "the copy has no bin/$name to replace"
-    rm -f -- "$dest/.rust-bin/$name" "$dest/bin/$name" || die "cannot remove the old $name"
+for i in "${!names[@]}"; do
+    name="${names[$i]}"; rel="${rels[$i]}"
+    [ -f "$dest/$rel" ] || die "the copy has no $rel to replace"
+    rm -f -- "$dest/.rust-bin/$name" "$dest/$rel" || die "cannot remove the old $name"
     ( set -C; cat -- "$target_dir/release/$name" > "$dest/.rust-bin/$name" ) || die "cannot copy the $name binary"
     chmod 755 "$dest/.rust-bin/$name"
     (
@@ -170,10 +179,10 @@ for name in "${names[@]}"; do
         printf 'export MAINTAINER_CHILD_ENV="${MAINTAINER_CHILD_ENV:+$MAINTAINER_CHILD_ENV }CZ_CASE_DIR BASH_ENV"\n'
         # shellcheck disable=SC2016  # the wrapper expands these when it runs
         printf 'exec -a "${BASH_SOURCE[0]}" %q "$@"\n' "$dest/.rust-bin/$name"
-        } > "$dest/bin/$name"
+        } > "$dest/$rel"
     ) || die "cannot write the $name wrapper"
-    chmod 755 "$dest/bin/$name"
-    bash -n "$dest/bin/$name" || die "the $name wrapper does not parse"
+    chmod 755 "$dest/$rel"
+    bash -n "$dest/$rel" || die "the $name wrapper does not parse"
 done
 
 head="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || printf unknown)"
