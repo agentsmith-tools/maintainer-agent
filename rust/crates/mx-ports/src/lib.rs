@@ -38,6 +38,7 @@ mod pipeline;
 mod proc;
 mod real_pipe;
 mod real_proc;
+mod reexec;
 mod script;
 mod secret;
 
@@ -53,8 +54,9 @@ pub use pipeline::{
     FakePipe, Pipe, PipeEffect, PipelineOutcome, PipelineSpec, Sink, Source, StageSpec,
 };
 pub use proc::{FakeProc, Proc, ProcEffect, ProcError, ProcExit, ProcOutput, ProcSpec};
-pub use real_pipe::{RealPipe, kill_live_pipelines};
+pub use real_pipe::{LiveSet, RealPipe, kill_live_pipelines};
 pub use real_proc::RealProc;
+pub use reexec::exec_with_descriptor_closed;
 pub use script::Script;
 pub use secret::Secret;
 

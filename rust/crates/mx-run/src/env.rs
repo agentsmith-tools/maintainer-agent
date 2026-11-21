@@ -16,9 +16,16 @@
 use std::collections::BTreeMap;
 
 /// The exported environment.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Env {
     vars: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Env {
+    /// Prints the names and never the values: `GH_TOKEN` is in here.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env").field("names", &self.vars.keys().collect::<Vec<_>>()).finish()
+    }
 }
 
 impl Env {
@@ -84,6 +91,15 @@ mod tests {
             ("PATH".to_string(), "/bin".to_string()),
             ("LC_ALL".to_string(), "C".to_string()),
         ])
+    }
+
+    #[test]
+    fn debug_prints_variable_names_and_never_their_values() {
+        let mut env = env();
+        env.set("GH_TOKEN", "ghp_value_that_must_not_leak");
+        let shown = format!("{env:?}");
+        assert!(shown.contains("GH_TOKEN"), "{shown}");
+        assert!(!shown.contains("must_not_leak"), "{shown}");
     }
 
     #[test]

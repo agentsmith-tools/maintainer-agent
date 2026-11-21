@@ -199,6 +199,7 @@ mod tests {
         assert_eq!(toast_body(&["a", "b"]), "a\nb");
         assert_eq!(toast_body(&["only"]), "only");
         assert_eq!(toast_body(&["a", ""]), "a");
+        assert_eq!(toast_body(&["a ", "b "]), "a \nb ");
         assert_eq!(toast_body(&["a", "", "b"]), "a\n\nb");
     }
 }

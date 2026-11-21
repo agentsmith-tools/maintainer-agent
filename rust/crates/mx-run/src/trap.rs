@@ -223,7 +223,7 @@ pub fn install() {
     };
     drop(std::thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
-            mx_ports::kill_live_pipelines();
+            let _ = mx_ports::kill_live_pipelines();
             // Returns after the work has finished, also when the main thread started it.
             run_now();
             // The default action of the signal: the process ends by it, as the

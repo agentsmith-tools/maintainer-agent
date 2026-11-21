@@ -27,6 +27,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -88,7 +89,7 @@ MUTANTS = [
     ("M47", R + "pass/setup.rs", "if !self.show && self.post == \"off\" && !self.backend().declares_rehearsal() {", "if self.post == \"off\" && !self.backend().declares_rehearsal() {", "a preview refuses POST=off on a backend that cannot rehearse"),
     ("M48", R + "pass/setup.rs", "            return Err(Stop(78));\n        }\n        Ok(())\n    }\n}\n", "            return Err(Stop(1));\n        }\n        Ok(())\n    }\n}\n", "a task the backend may not run exits 1, not 78"),
     ("M49", R + "lock.rs", "dup2(&file, &mut target)", "rustix::io::dup3(&file, &mut target, rustix::io::DupFlags::CLOEXEC)", "descriptor 9 is close-on-exec, so the agent loses the lock"),
-    ("M50", R + "trap.rs", "            mx_ports::kill_live_pipelines();\n", "", "the signal thread leaves the agent running"),
+    ("M50", R + "trap.rs", "            let _ = mx_ports::kill_live_pipelines();\n", "", "the signal thread leaves the agent running"),
     ("M51", R + "trap.rs", "            run_now();\n            // The default action", "            // The default action", "the signal thread does not run the exit trap"),
     ("M52", R + "trap.rs", "    if !has_signalled() {\n        return;\n    }", "    if true {\n        return;\n    }", "the checkpoint never waits, so the pass goes on after a signal"),
     ("M53", R + "trap.rs", "    fn drop(&mut self) {\n        run_now();\n        // A signal", "    fn drop(&mut self) {\n        // A signal", "a panic does not run the exit trap"),
@@ -101,6 +102,27 @@ MUTANTS = [
     ("M67", R + "pass/close.rs", "        for export in &plan.exports {\n            self.export(&export.name, &export.value);\n        }", "        for export in &plan.exports {\n            self.export(&export.name, &export.value);\n        }\n        for (name, value) in plan.pipeline.stages.first().env.clone() {\n            self.export(&name, &value);\n        }", "a key in the stage environment is exported to finish and the digest"),
     ("M68", R + "exec.rs", "            if stage.cwd.is_none() {", "            if true {", "the executor overrides the working directory the plan names"),
     ("M69", R + "exec.rs", "            stage.env = self.child_env(&plan_env);", "            stage.env = plan_env.iter().map(|(a, b)| ((*a).to_string(), (*b).to_string())).collect();", "the agent gets only what the plan names, not the run environment"),
+    ("M70", P + "real_pipe.rs", "        #[cfg(test)]\n        run_hook();\n        live.leaders.push(child.id());\n        drop(live);", "        drop(live);\n        #[cfg(test)]\n        run_hook();\n        self.live.lock().leaders.push(child.id());", "P2A-live: the stage is registered after an unlocked spawn"),
+    ("M71", P + "real_pipe.rs", "        if live.closing {", "        if false {", "P2A-live: a stage starts after the stop began"),
+    ("M72", P + "real_pipe.rs", "        live.closing = true;\n", "", "P2A-live: the stop does not refuse later spawns"),
+    ("M73", R + "exec.rs", "    fn before_call(&self) {\n        if self.checkpoint {\n            crate::trap::checkpoint();\n        }\n    }", "    fn before_call(&self) {}", "P2A-live: the executor starts a program after the signal flag is up"),
+    ("M74", R + "lib.rs", "            let _guard = trap::ExitGuard;\n            let flow = pass.go();", "            let _guard = trap::ExitGuard;\n            let mut pass = pass;\n            let flow = pass.go();", "the run lock closes before the scrub when the pass panics"),
+    ("M75", R + "pass.rs", '        self.unset("GITHUB_TOKEN");\n', "", "D22 undone: an inherited GITHUB_TOKEN reaches the first calls"),
+    ("M76", R + "pass.rs", "            Ok(meta) if !meta.is_file() => Stamp::Missing,\n", "", "a directory named like the stamp skips the run"),
+    ("M77", R + "env.rs", '.field("names", &self.vars.keys().collect::<Vec<_>>())', '.field("vars", &self.vars)', "Env prints its values, GH_TOKEN among them"),
+    ("M78", R + "reexec.rs", " || take_argv0().is_some()", "", "the second image starts again when descriptor 9 is still open"),
+    ("M79", R + "reexec.rs", 'std::fs::read_link("/proc/self/fd/9").is_ok()', "false", "an open descriptor 9 is not noticed, so the run lock refuses"),
+    ("M80", R + "pass.rs", "            self.retry_settings()?;\n", "", "a GH_TRIES that is not a number refuses only after the lock and the lease"),
+    ("M81", R + "trap.rs", "[SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM]", "[SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2]", "SIGALRM is not handled"),
+    ("M82", R + "trap.rs", "            drop(emulate_default_handler(signal));\n", "", "the process exits with 128 + n instead of dying of the signal"),
+    ("M83", R + "exec.rs", "pub const CALL_TIMEOUT: Duration = Duration::from_hours(3);", "pub const CALL_TIMEOUT: Duration = Duration::from_hours(30);", "one call may run for 30 hours"),
+    ("M84", P + "real_pipe.rs", "        let deadline = Instant::now() + spec.timeout;", "        let deadline = Instant::now() + spec.timeout * 2;", "the deadline is doubled"),
+    ("M85", R + "pass/setup.rs", 'format!("{home}/.local/bin:{home}/.cargo/bin:{old}")', 'format!("{home}/.cargo/bin:{home}/.local/bin:{old}")', "the cargo bin comes before the local bin on PATH"),
+    ("M86", R + "pass/close.rs", 'self.var_or("PROSE_STYLE", "stop-slop") != "raw"', 'self.var_or("PROSE_STYLE", "stop-slop").to_lowercase() != "raw"', "RAW counts as raw"),
+    ("M87", R + "exec.rs", "    text.trim_end_matches('\\n').to_string()", "    text.trim_end().to_string()", "command substitution strips trailing blanks too"),
+    ("M88", R + "humanise.rs", "lines.join(\"\\n\").trim_end_matches('\\n').to_string()", "lines.join(\"\\n\").trim_end().to_string()", "the toast body is stripped of blanks too"),
+    ("M89", R + "host.rs", "meta.permissions().mode() & 0o111 != 0", "meta.permissions().mode() & 0o100 != 0", "only the owner's execute bit makes a command"),
+    ("M90", R + "exec.rs", "        if !self.checkpoint {\n            let done = self.capture(words, extra);", "        if false {\n            let done = self.capture(words, extra);", "the exit trap calls the helper through a pipe port that is closed after a stop"),
     ("M54", R + "exec.rs", "            if stage.cwd.is_none() {", "            if false {", "the agent does not run in the checkout"),
     ("M55", R + "exec.rs", "            vars.insert((*name).to_string(), (*value).to_string());\n", "", "the extra variables of a call are dropped"),
     ("M56", R + "env.rs", '.filter(|(name, _)| name.as_str() != "PATH" && name.as_str() != "LC_ALL")', '.filter(|(name, _)| name.as_str() != "PATH")', "a child gets LC_ALL from the environment"),
@@ -147,12 +169,16 @@ def cargo_test(copy, target, timeout):
     env = dict(os.environ)
     env.update({"CARGO_TARGET_DIR": str(target), "CARGO_TERM_COLOR": "never", "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2"),
                 "PYTHONDONTWRITEBYTECODE": "1"})
+    # Popen in a session of its own, so a timeout kills the whole group: killing only cargo
+    # leaves a hung test binary alive (the reviewer of the first version found it).
+    proc = subprocess.Popen(["cargo", "test", "-p", "mx-run", "-p", "mx-ports", "--locked", "--offline", "--no-fail-fast"], cwd=copy / "rust",
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, preexec_fn=cap, start_new_session=True)
     try:
-        cp = subprocess.run(["cargo", "test", "-p", "mx-run", "-p", "mx-ports", "--locked", "--offline", "--no-fail-fast"], cwd=copy / "rust",
-                            env=env, capture_output=True, text=True, timeout=timeout, preexec_fn=cap, start_new_session=True)
-    except subprocess.TimeoutExpired as error:
-        return "TIMEOUT", [], 0, 0, str(error.stdout or "")
-    out = cp.stdout + cp.stderr
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        return "TIMEOUT", [], 0, 0, out or ""
     if "memory allocation" in out and "failed" in out:
         return "CAPPED", [], 0, 0, out
     if "could not compile" in out or re.search(r"^error(\[E\d+\])?: (?!test failed|\d+ targets? failed)", out, re.M):

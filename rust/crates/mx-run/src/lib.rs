@@ -42,6 +42,7 @@ pub mod identity;
 pub mod lock;
 pub mod pass;
 pub mod prompt;
+pub mod reexec;
 pub mod trap;
 pub mod tree;
 
@@ -50,10 +51,13 @@ pub use pass::{Invocation, Pass, Services, Stop};
 /// Runs one pass and returns the exit code. The exit trap has run when this
 /// returns, and it also runs if a step panics.
 pub fn run(invocation: &Invocation, services: &mut Services<'_>) -> i32 {
-    let _guard = trap::ExitGuard;
     match Pass::begin(invocation, services) {
         Err(Stop(code)) => code,
         Ok(mut pass) => {
+            // Declared after `pass`, so it drops first: when a step panics the unwinding runs
+            // the exit trap and only then closes descriptor 9. The run lock stays held until the
+            // scrub has finished, as on a normal return.
+            let _guard = trap::ExitGuard;
             let flow = pass.go();
             // The trap runs before descriptor 9 closes, as the bash's does.
             trap::run_now();

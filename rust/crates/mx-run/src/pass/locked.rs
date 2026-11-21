@@ -188,7 +188,7 @@ impl Pass<'_, '_> {
     /// Decision `P2A-x1`, not on the plan: the bash tests them with `[`, which fails
     /// on a word and leaves the retry loop with no way to end. A word is refused
     /// here.
-    fn retry_settings(&mut self) -> Flow<(i64, i64)> {
+    pub(super) fn retry_settings(&mut self) -> Flow<(i64, i64)> {
         let read = |name: &str, default: &str| -> Result<i64, String> {
             let text = self.var_or(name, default).to_string();
             cadence::parse_hours(&text).ok_or(text)

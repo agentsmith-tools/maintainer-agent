@@ -9,34 +9,93 @@ use std::io::{PipeReader, PipeWriter};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
-/// Leaders of the process groups of every pipeline that is running now, so a
-/// fatal signal can stop them ([`kill_live_pipelines`]).
-static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-fn live() -> std::sync::MutexGuard<'static, Vec<u32>> {
-    LIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// The leaders of the process groups of the pipelines that run now, and whether
+/// the owner has begun to stop them.
+///
+/// A stage is put on the list under the same lock that spawns it, so a stop
+/// either finds the stage or comes first and refuses the spawn. Registering after
+/// the spawn left a window in which a signal found no stage to kill and the agent
+/// then ran on with the token in its environment (decision `P2A-live`).
+#[derive(Debug, Default)]
+pub struct LiveSet {
+    inner: Mutex<Live>,
 }
 
-/// Sends `SIGKILL` to every process group that a [`RealPipe`] started and has not
-/// yet reaped, and returns how many groups it signalled.
+#[derive(Debug, Default)]
+struct Live {
+    leaders: Vec<u32>,
+    closing: bool,
+}
+
+impl LiveSet {
+    fn lock(&self) -> MutexGuard<'_, Live> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An empty set. [`kill_live_pipelines`] uses the one every [`RealPipe`] shares by default.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The leaders registered now.
+    #[must_use]
+    pub fn leaders(&self) -> Vec<u32> {
+        self.lock().leaders.clone()
+    }
+
+    /// Refuses every later spawn, then sends `SIGKILL` to every registered group.
+    /// Returns how many groups the kill utility reached. The lock is held while
+    /// it kills, so a spawn that is under way registers before this looks.
+    pub fn kill_all(&self) -> usize {
+        let mut live = self.lock();
+        live.closing = true;
+        let tools: Vec<PathBuf> = KILL_TOOLS.iter().map(PathBuf::from).collect();
+        live.leaders.iter().filter(|pid| kill_group(&tools, **pid).is_ok()).count()
+    }
+}
+
+static GLOBAL: OnceLock<Arc<LiveSet>> = OnceLock::new();
+
+fn global() -> &'static Arc<LiveSet> {
+    GLOBAL.get_or_init(LiveSet::new)
+}
+
+/// Stops every pipeline a [`RealPipe`] started and has not yet reaped, and
+/// refuses every pipeline that would start after this call. Returns how many
+/// process groups it signalled.
 ///
 /// A terminal's Ctrl-C reaches a shell's whole pipeline because the shell leaves
 /// its children in its own process group. Every stage here leads a group of its
 /// own, so the signal handler of a program that runs a pipeline calls this
 /// before it leaves, or the agent would outlive its orchestrator.
+#[must_use]
 pub fn kill_live_pipelines() -> usize {
-    let leaders: Vec<u32> = live().clone();
-    let tools: Vec<PathBuf> = KILL_TOOLS.iter().map(PathBuf::from).collect();
-    leaders.iter().filter(|pid| kill_group(&tools, **pid).is_ok()).count()
+    global().kill_all()
 }
 
-/// How many stages are registered as running. For tests.
+/// A function that runs on the spawning thread between the spawn and the
+/// registration, so a test can put a kill exactly there.
 #[cfg(test)]
-fn live_count() -> usize {
-    live().len()
+type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static HOOK: Mutex<Option<(std::thread::ThreadId, Hook)>> = Mutex::new(None);
+
+#[cfg(test)]
+fn run_hook() {
+    let hook = HOOK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|(thread, _)| *thread == std::thread::current().id())
+        .map(|(_, hook)| Arc::clone(hook));
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 /// Runs a [`PipelineSpec`] for real.
@@ -69,6 +128,7 @@ pub struct RealPipe {
     search_dirs: Vec<PathBuf>,
     locale: Option<String>,
     kill_tools: Vec<PathBuf>,
+    live: Arc<LiveSet>,
 }
 
 impl RealPipe {
@@ -79,7 +139,15 @@ impl RealPipe {
             search_dirs: absolute_entries(&search_path.into()),
             locale,
             kill_tools: KILL_TOOLS.iter().map(PathBuf::from).collect(),
+            live: Arc::clone(global()),
         }
+    }
+
+    /// Registers stages in `live` instead of the set [`kill_live_pipelines`] stops.
+    #[must_use]
+    pub fn with_live_set(mut self, live: Arc<LiveSet>) -> Self {
+        self.live = live;
+        self
     }
 
     /// Uses `tool` instead of the system `kill` for the process-group kill.
@@ -221,6 +289,16 @@ impl RealPipe {
             .stdin(stdin)
             .stdout(stdout.into_stdio())
             .stderr(stderr.into_stdio());
+        // The lock covers the spawn and the registration: a stop that runs now
+        // waits for the stage to be on the list, and a stop that ran first
+        // refuses the spawn.
+        let mut live = self.live.lock();
+        if live.closing {
+            return Err(ProcError::Spawn {
+                program: name.clone(),
+                reason: "the orchestrator is stopping, so no stage starts".to_string(),
+            });
+        }
         let child = command.spawn().map_err(|error| ProcError::Spawn {
             program: name.clone(),
             reason: error.to_string(),
@@ -228,7 +306,10 @@ impl RealPipe {
         // The command still holds this process's copies of the write ends; drop
         // it so the next stage sees end of file when the writer exits.
         drop(command);
-        live().push(child.id());
+        #[cfg(test)]
+        run_hook();
+        live.leaders.push(child.id());
+        drop(live);
         Ok((child, next_reader))
     }
 
@@ -281,7 +362,7 @@ impl Pipe for RealPipe {
                 }
                 Err(error) => {
                     drop(self.kill_all(&mut running));
-                    forget(&running);
+                    self.forget(&running);
                     return Err(error);
                 }
             }
@@ -305,13 +386,13 @@ impl Pipe for RealPipe {
         });
         if let Some((program, error)) = wait_failure {
             drop(self.kill_all(&mut running));
-            forget(&running);
+            self.forget(&running);
             return Err(ProcError::Io { program, reason: format!("waiting failed: {error}") });
         }
 
         let timed_out: Vec<bool> = running.iter().map(|stage| stage.status.is_none()).collect();
         let kill = if finished { Ok(()) } else { self.kill_all(&mut running) };
-        forget(&running);
+        self.forget(&running);
         kill?;
         let exits = running
             .iter()
@@ -326,10 +407,12 @@ impl Pipe for RealPipe {
     }
 }
 
-/// Takes the leaders of `running` off the live list.
-fn forget(running: &[Running]) {
-    let ids: Vec<u32> = running.iter().map(|stage| stage.child.id()).collect();
-    live().retain(|pid| !ids.contains(pid));
+impl RealPipe {
+    /// Takes the leaders of `running` off the live list.
+    fn forget(&self, running: &[Running]) {
+        let ids: Vec<u32> = running.iter().map(|stage| stage.child.id()).collect();
+        self.live.lock().leaders.retain(|pid| !ids.contains(pid));
+    }
 }
 
 #[cfg(test)]
@@ -591,13 +674,13 @@ mod tests {
         let script =
             format!("trap '' TERM; echo $$ > {}; while :; do sleep 1; done", pidfile.display());
         let started = Instant::now();
-        let outcome =
-            run_bounded(pipe(), spec(vec![sh(&script)], Duration::from_millis(1500))).unwrap();
+        let outcome = run_bounded(pipe(), spec(vec![sh(&script)], Duration::from_secs(1))).unwrap();
         let elapsed = started.elapsed();
         assert_eq!(exits(&outcome), vec![ProcExit::TimedOut]);
         assert_eq!(outcome.pipefail(), ProcExit::TimedOut);
-        assert!(elapsed >= Duration::from_millis(1500), "returned after {elapsed:?}, too early");
-        assert!(elapsed < BOUND, "returned after {elapsed:?}");
+        assert!(elapsed >= Duration::from_secs(1), "returned after {elapsed:?}, too early");
+        // The deadline is the stage's lifetime: twice the deadline would be 2 s.
+        assert!(elapsed < Duration::from_millis(1900), "returned after {elapsed:?}");
         let pid: u32 = read(&pidfile).trim().parse().expect("the stage wrote its pid");
         let gone = wait_until(Instant::now() + Duration::from_secs(3), || !is_alive(pid));
         assert!(gone, "the stage {pid} survived the deadline");
@@ -786,12 +869,19 @@ mod tests {
     }
 
     #[test]
-    fn a_running_stage_is_on_the_live_list_until_the_pipeline_ends() {
+    fn a_running_stage_is_on_the_live_list_and_a_finished_one_is_not() {
         let dir = TempDir::new("live");
+        let set = LiveSet::new();
+        let pipe = || pipe().with_live_set(Arc::clone(&set));
+        // Two pipelines one after the other: the second must not leave the first's pid
+        // behind, and the first's end must not take the second's pid away.
+        run_bounded(pipe(), spec(vec![sh("exit 0")], LONG)).unwrap();
+        assert!(set.leaders().is_empty(), "a finished stage stays on the live list");
         let pidfile = dir.path("pid");
         let script = format!("echo $$ > {}; sleep 60", pidfile.display());
+        let second = pipe();
         let handle = std::thread::spawn(move || {
-            run_bounded(pipe(), spec(vec![sh(&script)], Duration::from_millis(2500)))
+            run_bounded(second, spec(vec![sh(&script)], Duration::from_millis(2500)))
         });
         assert!(
             wait_until(Instant::now() + Duration::from_secs(5), || pidfile.exists()
@@ -799,10 +889,71 @@ mod tests {
             "the stage never started"
         );
         let pid: u32 = read(&pidfile).trim().parse().unwrap();
-        assert!(live().contains(&pid), "the running stage is not on the live list");
-        assert!(live_count() >= 1);
+        // The registration happens under the lock that spawned the stage, so this
+        // read waits for it. No timing is involved.
+        assert_eq!(set.leaders(), vec![pid], "the running stage is not on the live list");
         let outcome = handle.join().unwrap().unwrap();
         assert_eq!(exits(&outcome), vec![ProcExit::TimedOut]);
-        assert!(!live().contains(&pid), "a finished stage stays on the live list");
+        assert!(set.leaders().is_empty(), "a finished stage stays on the live list");
+    }
+
+    /// Puts a kill between the spawn and the registration, on the spawning thread,
+    /// and waits (bounded) for it to finish. With the registration under the spawn's
+    /// lock the kill blocks until the stage is listed and then kills it. With the
+    /// registration after an unlocked spawn the kill finds nothing, finishes, and the
+    /// stage runs to its deadline.
+    #[test]
+    fn a_kill_between_the_spawn_and_the_registration_still_reaches_the_stage() {
+        for round in 0..10 {
+            let dir = TempDir::new("race");
+            let set = LiveSet::new();
+            let pipe = pipe().with_live_set(Arc::clone(&set));
+            let reaper: Arc<Mutex<Option<std::thread::JoinHandle<usize>>>> =
+                Arc::new(Mutex::new(None));
+            let (hook_set, slot) = (Arc::clone(&set), Arc::clone(&reaper));
+            let hook: Hook = Arc::new(move || {
+                let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = Arc::clone(&entered);
+                let target = Arc::clone(&hook_set);
+                let handle = std::thread::spawn(move || {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    target.kill_all()
+                });
+                while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                let give_up = Instant::now() + Duration::from_millis(200);
+                while !handle.is_finished() && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                *slot.lock().unwrap() = Some(handle);
+            });
+            *HOOK.lock().unwrap() = Some((std::thread::current().id(), hook));
+            let script = format!("echo $$ > {}; sleep 60", dir.path("pid").display());
+            let ended = pipe.run_pipeline(&spec(vec![sh(&script)], Duration::from_secs(4)));
+            *HOOK.lock().unwrap() = None;
+            let killed = reaper.lock().unwrap().take().unwrap().join().unwrap();
+            let outcome = ended.unwrap();
+            assert_eq!(
+                exits(&outcome),
+                vec![ProcExit::Code(137)],
+                "round {round}: the stage was not killed (kill reached {killed} groups)"
+            );
+            assert_eq!(killed, 1, "round {round}");
+        }
+    }
+
+    #[test]
+    fn no_stage_starts_once_the_set_is_closing() {
+        let dir = TempDir::new("closing");
+        let set = LiveSet::new();
+        assert_eq!(set.kill_all(), 0);
+        let pipe = pipe().with_live_set(Arc::clone(&set));
+        let error = pipe
+            .run_pipeline(&spec(vec![sh(&format!("touch {}", dir.path("ran").display()))], LONG))
+            .unwrap_err();
+        assert!(matches!(error, ProcError::Spawn { .. }), "got {error:?}");
+        assert!(!dir.path("ran").exists(), "a stage started after the stop");
+        assert!(set.leaders().is_empty());
     }
 }

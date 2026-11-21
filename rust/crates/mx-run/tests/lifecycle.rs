@@ -57,6 +57,8 @@ struct Call {
     env: BTreeMap<String, String>,
     cwd: Option<PathBuf>,
     stdin: Option<PathBuf>,
+    /// Which port the call came through: `proc` or `pipe`.
+    via: &'static str,
 }
 
 type Agent = Box<dyn FnMut(&PipelineSpec) -> Result<PipelineOutcome, ProcError> + Send>;
@@ -75,6 +77,8 @@ struct World {
     inner: Mutex<Inner>,
     agent: Mutex<Agent>,
     hooks: Mutex<HashMap<String, Hook>>,
+    /// Once set, the pipe port refuses every call, as the live set does after a stop.
+    pipe_closed: std::sync::atomic::AtomicBool,
 }
 
 const REAL_TOOLS: [&str; 5] = ["bash", "sed", "grep", "tail", "mktemp"];
@@ -107,6 +111,7 @@ impl World {
             inner: Mutex::new(Inner::default()),
             agent: Mutex::new(agent),
             hooks: Mutex::new(HashMap::new()),
+            pipe_closed: std::sync::atomic::AtomicBool::new(false),
         };
         world.defaults();
         Arc::new(world)
@@ -189,6 +194,7 @@ impl World {
         env: &[(String, String)],
         cwd: Option<PathBuf>,
         stdin: Option<PathBuf>,
+        via: &'static str,
     ) {
         self.inner().calls.push(Call {
             key: key.to_string(),
@@ -196,6 +202,7 @@ impl World {
             env: env.iter().cloned().collect(),
             cwd,
             stdin,
+            via,
         });
     }
 }
@@ -213,7 +220,7 @@ impl Proc for World {
             return self.real.run(spec);
         }
         let key = key_of(&argv);
-        self.record(&key, &argv, &spec.env, spec.cwd.clone(), None);
+        self.record(&key, &argv, &spec.env, spec.cwd.clone(), None, "proc");
         let r = self.take(&key);
         Ok(ProcOutput {
             exit: ProcExit::Code(r.rc),
@@ -232,7 +239,13 @@ impl Pipe for World {
             Source::File(path) => Some(path.clone()),
             _ => None,
         };
-        self.record(&key, &argv, &stage.env, stage.cwd.clone(), stdin);
+        if self.pipe_closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ProcError::Spawn {
+                program: argv[0].clone(),
+                reason: "the orchestrator is stopping, so no stage starts".to_string(),
+            });
+        }
+        self.record(&key, &argv, &stage.env, stage.cwd.clone(), stdin, "pipe");
         if tool_of(&argv[0]) == "claude" {
             let mut agent = self.agent.lock().unwrap_or_else(PoisonError::into_inner);
             return (*agent)(spec);
@@ -336,6 +349,10 @@ struct Fx {
     env: BTreeMap<String, String>,
     backend: FakeBackend,
     lock_fails: bool,
+    /// The search paths the process adapters were built with, in order.
+    paths: Arc<Mutex<Vec<String>>>,
+    /// The descriptor and the canonical path of the lock file the run opened.
+    lock_fd: Arc<Mutex<Option<(i32, PathBuf)>>>,
 }
 
 struct Out {
@@ -417,6 +434,8 @@ impl Fx {
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             lock_fails: false,
+            paths: Arc::new(Mutex::new(Vec::new())),
+            lock_fd: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -473,14 +492,16 @@ impl Fx {
         let mut err: Vec<u8> = Vec::new();
         let world = Arc::clone(&self.world);
         let backend = self.backend.clone();
-        let adapters = move |_path: &std::ffi::OsStr, _locale: Option<String>| Adapters {
-            proc: world.clone(),
-            pipe: world.clone(),
+        let paths = Arc::clone(&self.paths);
+        let adapters = move |path: &std::ffi::OsStr, _locale: Option<String>| {
+            paths.lock().unwrap().push(path.to_string_lossy().into_owned());
+            Adapters { proc: world.clone(), pipe: world.clone() }
         };
         let pick = move |name: &str| -> Option<Box<dyn Backend>> {
             (name == "claude").then(|| Box::new(backend.clone()) as Box<dyn Backend>)
         };
         let fails = self.lock_fails;
+        let lock_fd = Arc::clone(&self.lock_fd);
         let open_lock = move |path: &Path| -> Result<RunLock, LockOpenError> {
             if fails {
                 return Err(LockOpenError::Open("Is a directory".to_string()));
@@ -491,6 +512,8 @@ impl Fx {
                 .truncate(true)
                 .open(path)
                 .map_err(|error| LockOpenError::Open(error.to_string()))?;
+            *lock_fd.lock().unwrap() =
+                Some((std::os::fd::AsRawFd::as_raw_fd(&file), path.canonicalize().unwrap()));
             Ok(RunLock::from_file(file))
         };
         let rc = {
@@ -876,6 +899,12 @@ fn a_tries_setting_that_is_not_a_number_is_refused_plan_decision_p2a_x1() {
     let out = fx.run(&["fx", "review"]);
     assert_eq!(out.rc, 64);
     assert!(out.stderr.contains("GH_TRIES='many' is not a whole number"), "{}", out.stderr);
+    // It refuses next to the cadence minimum, before the lock, the lease and gh.
+    let keys = fx.keys();
+    assert!(
+        !keys.iter().any(|k| k == "flock" || k.starts_with("maintainer") || k.starts_with("gh")),
+        "{keys:?}"
+    );
 }
 
 #[test]
@@ -942,8 +971,16 @@ fn gh_token_is_pinned_for_the_helper_and_the_agent_and_github_token_is_gone() {
     let mut fx = Fx::new("pin-env");
     fx.set("GITHUB_TOKEN", "other-token");
     assert_eq!(fx.run(&["fx", "review"]).rc, 0);
-    let first = fx.world.calls().into_iter().find(|c| c.key == "gh auth switch").unwrap();
-    assert_eq!(first.env.get("GITHUB_TOKEN").map(String::as_str), Some("other-token"));
+    // Decision D22: an inherited GITHUB_TOKEN reaches no call before the pin either.
+    let calls = fx.world.calls();
+    let pin_at = calls.iter().position(|c| c.key == "gh auth token").unwrap();
+    for call in &calls[..=pin_at] {
+        assert!(
+            !call.env.contains_key("GITHUB_TOKEN"),
+            "{} saw an inherited GITHUB_TOKEN",
+            call.key
+        );
+    }
     for key in ["maintainer start", "claude", "maintainer finish"] {
         let call = fx.calls_of(key).remove(0);
         assert_eq!(call.env.get("GH_TOKEN").map(String::as_str), Some(TOKEN), "{key}");
@@ -1840,6 +1877,10 @@ fn prose_style_raw_leaves_the_prose_out_and_any_other_value_keeps_it() {
     let fx = Fx::new("prose2");
     fx.profile_add("PROSE_STYLE=other");
     assert!(fx.run(&["--show-prompt", "fx", "review"]).stdout.contains("PROSE-STYLE rules"));
+    // Only the exact word raw switches the prose off.
+    let fx = Fx::new("prose-upper");
+    fx.profile_add("PROSE_STYLE=RAW");
+    assert!(fx.run(&["--show-prompt", "fx", "review"]).stdout.contains("PROSE-STYLE rules"));
     let fx = Fx::new("prose3");
     std::fs::remove_file(fx.tree.join("lib/prose-style.md")).unwrap();
     let out = fx.run(&["--show-prompt", "fx", "review"]);
@@ -2151,4 +2192,98 @@ fn a_key_a_plan_puts_in_its_stage_environment_does_not_reach_finish_the_digest_o
         !out.stderr.contains("gsk_stage_only_secret")
             && !fx.read_log().contains("gsk_stage_only_secret")
     );
+}
+
+#[test]
+fn the_search_path_gets_the_local_bin_then_the_cargo_bin_then_the_callers_path() {
+    let _turn = serial();
+    let fx = Fx::new("path-prefix");
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    let home = fx.home.display();
+    let paths = fx.paths.lock().unwrap().clone();
+    assert_eq!(paths.first().map(String::as_str), Some("/usr/bin:/bin"), "{paths:?}");
+    assert_eq!(
+        paths.last().map(String::as_str),
+        Some(format!("{home}/.local/bin:{home}/.cargo/bin:/usr/bin:/bin").as_str()),
+        "{paths:?}"
+    );
+}
+
+#[test]
+fn a_stamp_that_is_a_directory_is_not_a_stamp_and_the_run_goes_ahead() {
+    let _turn = serial();
+    let fx = Fx::new("stamp-dir");
+    std::fs::create_dir_all(fx.state.join("state/last-review.json")).unwrap();
+    let out = fx.run(&["fx", "review"]);
+    assert_eq!(out.rc, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert_eq!(fx.helper_args("start").len(), 1);
+}
+
+/// Records, at every call of the helper's `run-lease`, whether descriptor `fd` still
+/// names the lock file. The last call is the one that clears the lease.
+fn watch_the_lock(fx: &Fx) -> Arc<Mutex<Vec<bool>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (record, lock) = (Arc::clone(&seen), Arc::clone(&fx.lock_fd));
+    fx.world.on_call(
+        "maintainer run-lease",
+        Box::new(move || {
+            if let Some((fd, path)) = lock.lock().unwrap().clone() {
+                let open = std::fs::read_link(format!("/proc/self/fd/{fd}")).ok() == Some(path);
+                record.lock().unwrap().push(open);
+            }
+        }),
+    );
+    seen
+}
+
+#[test]
+fn the_run_lock_is_held_until_the_lease_is_cleared_on_a_normal_return() {
+    let _turn = serial();
+    let fx = Fx::new("lock-held-normal");
+    let seen = watch_the_lock(&fx);
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert!(seen.iter().all(|open| *open), "the lock was closed before a lease call: {seen:?}");
+}
+
+#[test]
+fn the_run_lock_is_held_until_the_scrub_has_finished_when_the_pass_panics() {
+    let _turn = serial();
+    let fx = Fx::new("lock-held-panic");
+    let seen = watch_the_lock(&fx);
+    fx.world.set_agent(Box::new(|_| panic!("the agent blew up")));
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx.run(&["fx", "review"])));
+    assert!(outcome.is_err());
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert!(
+        seen.iter().all(|open| *open),
+        "the lock was released before the lease was cleared: {seen:?}"
+    );
+}
+
+#[test]
+fn the_exit_trap_still_clears_the_lease_after_the_pipe_port_has_closed_to_new_stages() {
+    let _turn = serial();
+    let fx = Fx::new("trap-after-stop");
+    let world = Arc::clone(&fx.world);
+    fx.world.set_agent(Box::new(move |_| {
+        // What the signal thread does first: no stage starts from here on. Then the pass dies.
+        world.pipe_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        panic!("the pass ends here");
+    }));
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx.run(&["fx", "review"])));
+    assert!(outcome.is_err());
+    let leases = fx.calls_of("maintainer run-lease");
+    let clear = leases.last().unwrap();
+    assert_eq!(
+        clear.argv[1..],
+        strings(&["run-lease", "--clear"])[..],
+        "the lease was not cleared"
+    );
+    assert_eq!(clear.via, "proc", "the exit trap called the helper through the pipe port");
 }

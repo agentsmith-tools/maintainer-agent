@@ -121,6 +121,15 @@ impl Exec {
         }
     }
 
+    /// A signal that has arrived stops the pass before the next program starts, not
+    /// after it: a program started now would outlive the signal thread's snapshot of
+    /// what is running (decision `P2A-live`).
+    fn before_call(&self) {
+        if self.checkpoint {
+            crate::trap::checkpoint();
+        }
+    }
+
     /// The variables of one child: the environment, then `extra`, which wins.
     fn child_env(&self, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         let mut vars: BTreeMap<String, String> = self.env.for_child().into_iter().collect();
@@ -138,6 +147,7 @@ impl Exec {
     /// Runs `words`, reads its output, and waits.
     #[must_use]
     pub fn capture(&self, words: &[&str], extra: &[(&str, &str)]) -> Done {
+        self.before_call();
         let Some(argv) = Self::argv(words) else {
             return Done { rc: 127, stdout: Vec::new(), stderr: Vec::new(), started: false };
         };
@@ -161,8 +171,21 @@ impl Exec {
     /// Runs `words` with both streams appended to `log`, as `>>"$log" 2>&1`.
     /// Returns the exit code. A program that cannot start leaves its message in
     /// the log, where the shell's own message would have gone.
+    ///
+    /// The exit trap runs its calls with `checkpoint` off, after the signal thread has
+    /// stopped every pipeline and closed the live set to new ones (decision `P2A-live`).
+    /// A call through the pipe port would be refused then, so the trap's calls go through
+    /// the process port, which captures the two streams and appends them (standard output
+    /// first, as in `P2A-merge`).
     #[must_use]
     pub fn to_log(&self, words: &[&str], extra: &[(&str, &str)], log: &Path) -> i32 {
+        if !self.checkpoint {
+            let done = self.capture(words, extra);
+            append(log, &done.stdout);
+            append(log, &done.stderr);
+            return done.rc;
+        }
+        self.before_call();
         let Some(argv) = Self::argv(words) else {
             return 127;
         };
@@ -188,6 +211,7 @@ impl Exec {
     /// the variables the plan names, and the working directory of the run when
     /// the plan names none.
     pub fn pipeline(&self, spec: &PipelineSpec) -> Result<PipelineOutcome, ProcError> {
+        self.before_call();
         let mut spec = spec.clone();
         let mut stages: Vec<StageSpec> = spec.stages.as_slice().to_vec();
         for stage in &mut stages {
@@ -234,7 +258,7 @@ mod tests {
                 env,
                 cwd: Some(PathBuf::from("/repo")),
                 locale: None,
-                checkpoint: false,
+                checkpoint: true,
             },
             proc,
             pipe,
@@ -301,6 +325,18 @@ mod tests {
     }
 
     #[test]
+    fn command_substitution_keeps_trailing_blanks_and_drops_only_newlines() {
+        assert_eq!(trimmed_text(b"a \t\n\n"), "a \t");
+        assert_eq!(trimmed_text(b"  \n"), "  ");
+    }
+
+    #[test]
+    fn one_call_may_run_for_three_hours_and_no_longer() {
+        // systemd stops the unit at 3 h (`TimeoutStartSec`), so no call outlives it.
+        assert_eq!(CALL_TIMEOUT, Duration::from_hours(3));
+    }
+
+    #[test]
     fn command_substitution_drops_nul_bytes() {
         assert_eq!(trimmed_text(b"a\0b\n"), "ab");
     }
@@ -321,6 +357,34 @@ mod tests {
         assert_eq!(stage.stdout, Sink::AppendFile(PathBuf::from("/the/log")));
         assert_eq!(stage.stderr, Sink::SameAsStdout);
         assert_eq!(stage.env, vec![("A".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn an_exit_trap_call_goes_through_the_process_port_and_appends_both_streams() {
+        let log = EffectLog::new();
+        let (mut exec, proc, pipe) = exec_with(&log, &[]);
+        exec.checkpoint = false;
+        proc.script(
+            &["helper", "run-lease", "--clear"],
+            Script::always(Ok(mx_ports::ProcOutput {
+                exit: ProcExit::Code(2),
+                stdout: b"out\n".to_vec(),
+                stderr: b"err\n".to_vec(),
+            })),
+        );
+        let file = std::env::temp_dir().join(format!("mx-run-trapcall-{}.log", std::process::id()));
+        drop(std::fs::remove_file(&file));
+        let rc = exec.to_log(&["helper", "run-lease", "--clear"], &[], &file);
+        assert_eq!(rc, 2);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "out\nerr\n");
+        drop(std::fs::remove_file(&file));
+        // The pipe port was never asked: it refuses everything once the live set is closing.
+        assert!(
+            log.entries().iter().all(|entry| matches!(entry, mx_ports::Effect::Proc(_))),
+            "{:?}",
+            log.entries()
+        );
+        drop(pipe);
     }
 
     #[test]

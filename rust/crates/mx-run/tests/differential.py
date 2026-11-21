@@ -531,17 +531,16 @@ def named_scenarios():
     add("id-pinned-wrong", lambda sb: (sb.ans("gh-api-user.1", "fxacct", 0), sb.ans("gh-api-user.2", "someone-else", 0), sb.leak(sb.state / "leak.txt")))
     add("id-pinned-rc3", lambda sb: (sb.ans("gh-api-user.1", "fxacct", 0), sb.ans("gh-api-user.2", "", 3, err="dial tcp: lookup api.github.com\n")))
     add("id-pinned-empty", lambda sb: (sb.ans("gh-api-user.1", "fxacct", 0), sb.ans("gh-api-user.2", "", 0)))
-    add("id-github-token", lambda sb: sb.env.update({"GITHUB_TOKEN": "other-token"}))
     add("id-preview-no-gh", args=("--show-prompt", "fx", "review"))
 
     def d13(b, r):
         bad = []
         bg = [c for c in calls_of(b, "gh")]
         rg = [c for c in calls_of(r, "gh")]
-        if not bg or "GH_TOKEN=other" not in bg[0]:
-            bad.append("bash: the first gh call should see the inherited GH_TOKEN: %r" % (bg[:1],))
-        if not rg or "GH_TOKEN=unset" not in rg[0]:
-            bad.append("rust: the first gh call must not see the inherited GH_TOKEN: %r" % (rg[:1],))
+        if not bg or ("GH_TOKEN=other" not in bg[0] and "GITHUB_TOKEN=set" not in bg[0]):
+            bad.append("bash: the first gh call should see an inherited token: %r" % (bg[:1],))
+        if not rg or "GH_TOKEN=unset" not in rg[0] or "GITHUB_TOKEN=unset" not in rg[0]:
+            bad.append("rust: the first gh call must see no inherited token: %r" % (rg[:1],))
         # Every call made before the pin saw the inherited token in the bash and none in the Rust
         # build, so its token field and its environment-names digest differ. Every other field of
         # the call log is the same.
@@ -551,11 +550,11 @@ def named_scenarios():
         else:
             for number, (x, y) in enumerate(zip(bl, rl), 1):
                 fx, fy = x.split("|"), y.split("|")
-                if "GH_TOKEN=other" in fx:
-                    fx = [f for f in fx if not f.startswith(("GH_TOKEN=", "names="))]
-                    fy = [f for f in fy if not f.startswith(("GH_TOKEN=", "names="))]
-                    if "GH_TOKEN=unset" not in y.split("|"):
-                        bad.append("call %d: the Rust build passed the inherited token" % number)
+                if "GH_TOKEN=other" in fx or "GITHUB_TOKEN=set" in fx:
+                    fx = [f for f in fx if not f.startswith(("GH_TOKEN=", "GITHUB_TOKEN=", "names="))]
+                    fy = [f for f in fy if not f.startswith(("GH_TOKEN=", "GITHUB_TOKEN=", "names="))]
+                    if "GH_TOKEN=unset" not in y.split("|") or "GITHUB_TOKEN=unset" not in y.split("|"):
+                        bad.append("call %d: the Rust build passed an inherited token" % number)
                 if fx != fy:
                     bad.append("call %d differs beyond the token: %s" % (number, short_diff(x, y)))
                     break
@@ -563,6 +562,7 @@ def named_scenarios():
             bad.append("exit code or output differs")
         return bad
 
+    add("d13-inherited-github-token", lambda sb: sb.env.update({"GITHUB_TOKEN": "other-token"}), explain=d13)
     add("d13-inherited-gh-token", lambda sb: sb.env.update({"GH_TOKEN": "caller-token-value"}), explain=d13)
     add("d13-inherited-gh-token-and-github-token", lambda sb: sb.env.update({"GH_TOKEN": "caller", "GITHUB_TOKEN": "caller2"}), explain=d13)
 

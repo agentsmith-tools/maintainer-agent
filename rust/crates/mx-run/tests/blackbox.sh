@@ -15,8 +15,8 @@
 # and the three runs must agree. A pinned case that starts passing is as much a
 # failure as a new red one, because the difference it records has gone.
 #
-# The six pinned cases are the plan decisions that fix a behaviour which fails open
-# in the bash (decisions D10, D11, D12, D13, D15 and D18 of the plan). Each case
+# The seven pinned cases are the decisions that fix a behaviour which fails open
+# in the bash (decisions D10, D11, D12, D13, D15 and D18 of the plan, and D22 of the review). Each case
 # pins the bash behaviour, so it turns red on purpose. Each has a Rust test of the
 # fixed behaviour in crates/mx-run/tests/lifecycle.rs, named for its decision.
 #
@@ -43,6 +43,7 @@ PINNED=(
 "cadence: a stamp in the future reads as a negative age and skips|D12: a stamp from the future does not skip the run, where the bash skips it with a negative age"
 "lock: a run.lock that cannot be opened is reported as a lock error, exit 1|D10: a failed open of run.lock is its own refusal, where the bash reports a lock error through a failing flock"
 "token: a GH_TOKEN inherited from the caller reaches the first gh calls and is replaced by the pin|D13: an inherited GH_TOKEN reaches no call before the pin"
+"token: GITHUB_TOKEN from the caller reaches gh until the pin and is unset after it|D22: an inherited GITHUB_TOKEN reaches no call before the pin, as GH_TOKEN does (D13)"
 "scrub: a pinned token under 16 characters is never scrubbed and the run does not notice|D15: a pinned token under 16 characters refuses the run, because the exit scrub cannot remove it"
 )
 

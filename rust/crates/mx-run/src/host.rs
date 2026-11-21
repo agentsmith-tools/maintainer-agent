@@ -81,6 +81,21 @@ mod tests {
     }
 
     #[test]
+    fn any_execute_bit_makes_a_command_not_only_the_owners() {
+        let dir = scratch("xbit");
+        for (name, mode) in [("group", 0o010), ("other", 0o001), ("owner", 0o100), ("none", 0o600)]
+        {
+            std::fs::write(dir.join(name), "").unwrap();
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        }
+        let host = RealHost::new(dir.as_os_str());
+        assert!(host.on_path("group") && host.on_path("other") && host.on_path("owner"));
+        assert!(!host.on_path("none"));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
     fn a_relative_search_path_entry_is_not_searched() {
         let host = RealHost::new(OsStr::new(".:relative/dir"));
         assert!(!host.on_path("sh"));

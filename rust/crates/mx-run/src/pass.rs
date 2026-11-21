@@ -312,8 +312,10 @@ impl<'a, 'b> Pass<'a, 'b> {
         self.profile = profile;
         self.task = task;
         // Decision D13: a GH_TOKEN inherited from the caller must not reach any
-        // call before the pin, so the identity check cannot run under it.
+        // call before the pin, so the identity check cannot run under it. Decision D22
+        // (the review of this port) says the same of GITHUB_TOKEN, which `gh` also reads.
         self.unset("GH_TOKEN");
+        self.unset("GITHUB_TOKEN");
         Ok(())
     }
 
@@ -449,8 +451,10 @@ impl<'a, 'b> Pass<'a, 'b> {
     fn gate(&mut self, suffix: Option<&str>) -> Flow {
         let min_text = self.var_or(&format!("MIN_HOURS_{}", self.task), "0").to_string();
         let stamp_file = self.state_dir.join("state").join(format!("last-{}.json", self.task));
+        // `[ -f "$f" ]`: a directory or a FIFO under that name is not a stamp.
         let stamp = match std::fs::metadata(&stamp_file) {
             Err(_) => Stamp::Missing,
+            Ok(meta) if !meta.is_file() => Stamp::Missing,
             Ok(meta) => Stamp::ModifiedAt(
                 meta.modified()
                     .ok()
@@ -510,6 +514,11 @@ impl Pass<'_, '_> {
     /// The whole pass after `begin`, in the bash's order.
     pub fn go(&mut self) -> Flow {
         self.first_gate()?;
+        if !self.show {
+            // Next to the minimum of the cadence gate: a setting that cannot be read refuses
+            // before anything is locked, leased or asked of GitHub.
+            self.retry_settings()?;
+        }
         self.prepare()?;
         self.choose_backend()?;
         if self.show {

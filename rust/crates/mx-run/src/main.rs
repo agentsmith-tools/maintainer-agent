@@ -48,15 +48,29 @@ impl<W: Write> Write for PipeEnd<W> {
 }
 
 fn main() -> ExitCode {
-    mx_run::trap::install();
     let args: Vec<OsString> = std::env::args_os().collect();
-    let argv0 = args.first().cloned().unwrap_or_else(|| OsString::from("run.sh"));
+    let exe = std::env::current_exe().unwrap_or_default();
+    // A caller that holds descriptor 9 (the machine's hook lock does) is the bash's case
+    // of `exec 9>`, which replaces it: start again with it closed. The second image takes
+    // its `argv[0]` from the variable the first one set.
+    let called_as = args.first().cloned().unwrap_or_else(|| OsString::from("run.sh"));
+    if let Some(error) =
+        mx_run::reexec::free_descriptor_9(&exe, &called_as, args.get(1..).unwrap_or(&[]))
+    {
+        eprintln!("run.sh: could not start again with descriptor 9 closed: {error}");
+    }
+    mx_run::trap::install();
+    let argv0 = mx_run::reexec::take_argv0().unwrap_or(called_as);
     let invocation = Invocation {
         argv0,
-        exe: std::env::current_exe().unwrap_or_default(),
+        exe,
         args: args.iter().skip(1).map(|arg| arg.to_string_lossy().into_owned()).collect(),
         cwd: std::env::current_dir().unwrap_or_else(|_| "/".into()),
-        env: Env::from_process(),
+        env: {
+            let mut env = Env::from_process();
+            env.unset(mx_run::reexec::ARGV0_VAR);
+            env
+        },
     };
     let mut out = PipeEnd(std::io::stdout());
     let mut err = PipeEnd(std::io::stderr());
