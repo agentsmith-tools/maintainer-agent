@@ -173,7 +173,13 @@ fn victim_still_open() {
     let Ok(dir) = std::env::var("MX_FD9_OPEN") else { return };
     let dir = PathBuf::from(dir);
     let exe = std::env::current_exe().unwrap();
-    assert!(reexec::free_descriptor_9(&exe, OsStr::new("run.sh"), &[]).is_none());
+    // The arguments select this victim, so a start that should not happen cannot run the whole
+    // test binary again (a mutant that starts again here once did, and fork-bombed /tmp).
+    let args: Vec<OsString> = ["--exact", "victim_still_open", "--nocapture", "--test-threads=1"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    assert!(reexec::free_descriptor_9(&exe, OsStr::new("run.sh"), &args).is_none());
     assert!(reexec::descriptor_9_is_open(), "the setup did not open descriptor 9");
     assert_eq!(open_run_lock(&dir.join("run.lock")).unwrap_err(), LockOpenError::Fd9Taken);
     std::fs::write(dir.join("ok"), "1").unwrap();
