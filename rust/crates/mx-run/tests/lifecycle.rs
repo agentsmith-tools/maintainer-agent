@@ -255,6 +255,23 @@ struct FakeBackend {
     allowed: Option<&'static [&'static str]>,
     check: Result<(), String>,
     refuse_plan: Option<String>,
+    /// Lines the plan asks the executor to append to the log before the pipeline.
+    notes: Vec<String>,
+    /// What the plan adds to its stage's environment, as `p2b`'s opencode adds its key.
+    stage_env: Vec<(String, String)>,
+    /// The working directory the plan names for its stage.
+    stage_cwd: Option<PathBuf>,
+    /// What `check` and `plan` saw in the variable set, as `check: NAME=value`.
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeBackend {
+    fn look(&self, step: &str, ctx: &BackendCtx) {
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        for name in ["MAINTAINER_SETTINGS", "MAINTAINER_CURSOR_DIR"] {
+            seen.push(format!("{step}: {name}={}", ctx.var(name).unwrap_or("<unset>")));
+        }
+    }
 }
 
 impl Backend for FakeBackend {
@@ -274,7 +291,8 @@ impl Backend for FakeBackend {
         self.allowed
     }
 
-    fn check(&self, _ctx: &BackendCtx, _host: &dyn Host) -> Result<(), String> {
+    fn check(&self, ctx: &BackendCtx, _host: &dyn Host) -> Result<(), String> {
+        self.look("check", ctx);
         self.check.clone()
     }
 
@@ -284,17 +302,20 @@ impl Backend for FakeBackend {
         _host: &dyn Host,
         request: &RunRequest,
     ) -> Result<RunPlan, PlanRefusal> {
+        self.look("plan", ctx);
         if let Some(note) = &self.refuse_plan {
             return Err(PlanRefusal { log_note: note.clone() });
         }
         let mut stage = StageSpec::new(NonEmpty::new("claude".to_string(), ["-p".to_string()]));
         stage.env =
             vec![("PLAN_VAR".to_string(), ctx.var("MAINTAINER_POST").unwrap_or("?").to_string())];
+        stage.env.extend(self.stage_env.clone());
+        stage.cwd.clone_from(&self.stage_cwd);
         stage.stdin = Source::File(request.prompt_file.clone());
         stage.stdout = Sink::AppendFile(request.log.clone());
         stage.stderr = Sink::SameAsStdout;
         Ok(RunPlan {
-            log_notes: Vec::new(),
+            log_notes: self.notes.clone(),
             exports: vec![Export { name: "BACKEND_EXPORT".to_string(), value: "1".to_string() }],
             pipeline: PipelineSpec {
                 stages: NonEmpty::new(stage, []),
@@ -390,6 +411,10 @@ impl Fx {
                 allowed: None,
                 check: Ok(()),
                 refuse_plan: None,
+                notes: Vec::new(),
+                stage_env: Vec::new(),
+                stage_cwd: None,
+                seen: Arc::new(Mutex::new(Vec::new())),
             },
             lock_fails: false,
         }
@@ -1969,5 +1994,161 @@ fn a_minimum_with_a_trailing_blank_makes_printf_complain_as_it_does_in_the_bash(
             "{}: line 142: printf:  6 : invalid number\n",
             fx.tree.join("lib/run.sh").display()
         )
+    );
+}
+
+// ----- what the review of the backends asked of the executor -------------------------------------------
+
+#[test]
+fn the_agent_inherits_the_whole_run_environment_name_by_name() {
+    let _turn = serial();
+    let mut fx = Fx::new("agent-inherits");
+    let inherited = [
+        ("XDG_DATA_HOME", "/xdg/data"),
+        ("XDG_CONFIG_HOME", "/xdg/config"),
+        ("HTTPS_PROXY", "http://proxy.invalid:3128"),
+        ("NO_PROXY", "localhost"),
+        ("ANTHROPIC_API_KEY", "sk-ant-fixture"),
+        ("CODEX_HOME", "/codex"),
+        ("CURSOR_API_KEY", "cursor-fixture"),
+        ("SSH_AUTH_SOCK", "/run/user/1000/agent"),
+        ("LANG", "en_US.UTF-8"),
+        ("DISPLAY", ":3"),
+    ];
+    for (name, value) in inherited {
+        fx.set(name, value);
+    }
+    fx.set("GH_TOKEN", "caller-token-value");
+    fx.set("GITHUB_TOKEN", "caller-github-token");
+    fx.set("MAINTAINER_FORCE", "1");
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    let agent = fx.calls_of("claude").remove(0);
+    for (name, value) in inherited {
+        assert_eq!(
+            agent.env.get(name).map(String::as_str),
+            Some(value),
+            "{name} did not reach the agent"
+        );
+    }
+    for name in ["HOME", "USER", "TZ", "TMPDIR", "MAINTAINER_GH_BACKOFF"] {
+        assert_eq!(agent.env.get(name), fx.env.get(name), "{name}");
+    }
+    assert_eq!(
+        agent.env.get("GH_TOKEN").map(String::as_str),
+        Some(TOKEN),
+        "GH_TOKEN is the pinned token"
+    );
+    assert!(!agent.env.contains_key("GITHUB_TOKEN"), "GITHUB_TOKEN is unset after the pin");
+    assert!(!agent.env.contains_key("MAINTAINER_FORCE"), "the override is consumed");
+    for name in [
+        "PROFILE_DIR",
+        "REPO_PATH",
+        "MAINTAINER_REPO",
+        "MAINTAINER_SLUG",
+        "MAINTAINER_STATE",
+        "MAINTAINER_ACCOUNT",
+        "PROD_GLOBS",
+        "CLAIM_LABEL",
+        "MAINTAINER_PROFILE",
+        "MAINTAINER_TASK",
+        "MAINTAINER_TASKS",
+        "MAINTAINER_SKILL",
+        "MAINTAINER_IN_RUN",
+        "MAINTAINER_POST",
+        "MAINTAINER_VERSION",
+        "MAINTAINER_COMMIT",
+        "MAINTAINER_SCRIPTS",
+    ] {
+        assert!(agent.env.contains_key(name), "{name} did not reach the agent");
+    }
+    // PATH and LC_ALL belong to the process adapter, which gives the child the search path and the locale.
+    assert!(!agent.env.contains_key("PATH") && !agent.env.contains_key("LC_ALL"));
+}
+
+#[test]
+fn the_wall_a_backend_returns_is_in_the_variable_set_before_check_and_plan_and_reaches_every_stage()
+{
+    let _turn = serial();
+    for name in ["MAINTAINER_SETTINGS", "MAINTAINER_CURSOR_DIR"] {
+        let mut fx = Fx::new("wall-before-check");
+        fx.backend.wall = Some(Export { name: name.to_string(), value: "/the/wall".to_string() });
+        fx.set("MAINTAINER_POST", "off");
+        assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+        let seen = fx.backend.seen.lock().unwrap().clone();
+        let check_at = seen.iter().position(|line| *line == format!("check: {name}=/the/wall"));
+        let plan_at = seen.iter().position(|line| *line == format!("plan: {name}=/the/wall"));
+        assert!(check_at.is_some() && check_at < plan_at, "{seen:?}");
+        assert!(seen.contains(&format!("plan: {name}=/the/wall")), "{seen:?}");
+        assert_eq!(
+            fx.calls_of("claude").remove(0).env.get(name).map(String::as_str),
+            Some("/the/wall")
+        );
+        assert_eq!(
+            fx.calls_of("maintainer finish").remove(0).env.get(name).map(String::as_str),
+            Some("/the/wall")
+        );
+    }
+}
+
+#[test]
+fn a_real_run_with_posting_on_exports_no_wall_variable() {
+    let _turn = serial();
+    let mut fx = Fx::new("no-wall-on");
+    fx.backend.wall =
+        Some(Export { name: "MAINTAINER_SETTINGS".to_string(), value: "/the/wall".to_string() });
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    assert_eq!(fx.backend.seen.lock().unwrap()[0], "check: MAINTAINER_SETTINGS=<unset>");
+    assert!(!fx.calls_of("claude").remove(0).env.contains_key("MAINTAINER_SETTINGS"));
+}
+
+#[test]
+fn the_log_notes_of_a_plan_are_appended_one_per_line_before_the_pipeline_starts() {
+    let _turn = serial();
+    let mut fx = Fx::new("log-notes");
+    fx.backend.notes = vec!["first note".to_string(), "second note".to_string()];
+    let before = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&before);
+    fx.world.set_agent(Box::new(move |spec| {
+        if let Sink::AppendFile(log) = &spec.stages.first().stdout {
+            *sink.lock().unwrap() = std::fs::read_to_string(log).unwrap();
+        }
+        Ok(PipelineOutcome { exits: vec![ProcExit::Code(0)] })
+    }));
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    assert!(
+        before.lock().unwrap().ends_with("first note\nsecond note\n"),
+        "{}",
+        before.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_stage_starts_in_the_working_directory_the_plan_names() {
+    let _turn = serial();
+    let mut fx = Fx::new("stage-cwd");
+    fx.backend.stage_cwd = Some(fx.root.join("tmp"));
+    assert_eq!(fx.run(&["fx", "review"]).rc, 0);
+    assert_eq!(fx.calls_of("claude").remove(0).cwd, Some(fx.root.join("tmp")));
+}
+
+#[test]
+fn a_key_a_plan_puts_in_its_stage_environment_does_not_reach_finish_the_digest_or_the_lease() {
+    let _turn = serial();
+    let mut fx = Fx::new("stage-key");
+    fx.backend.stage_env = vec![("GROQ_API_KEY".to_string(), "gsk_stage_only_secret".to_string())];
+    let out = fx.run(&["fx", "review"]);
+    assert_eq!(out.rc, 0);
+    assert_eq!(
+        fx.calls_of("claude").remove(0).env.get("GROQ_API_KEY").map(String::as_str),
+        Some("gsk_stage_only_secret")
+    );
+    for call in fx.world.calls() {
+        if call.key != "claude" {
+            assert!(!call.env.contains_key("GROQ_API_KEY"), "{} saw the key", call.key);
+        }
+    }
+    assert!(
+        !out.stderr.contains("gsk_stage_only_secret")
+            && !fx.read_log().contains("gsk_stage_only_secret")
     );
 }

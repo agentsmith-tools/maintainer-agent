@@ -261,7 +261,9 @@ mod tests {
         let flag = Arc::clone(&finished);
         arm(move || {
             started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            release_rx
+                .recv_timeout(Duration::from_mins(1))
+                .expect("the test never released the work");
             flag.store(true, Ordering::SeqCst);
         });
         Blocking { started, release, finished }
@@ -289,7 +291,7 @@ mod tests {
     fn finished_when_second_returns(second: fn()) -> bool {
         let blocking = arm_blocking();
         let first = std::thread::spawn(run_now);
-        blocking.started.recv().unwrap();
+        blocking.started.recv_timeout(Duration::from_mins(1)).expect("the work never started");
         let saw_finished = Arc::new(AtomicBool::new(false));
         let returned = Arc::new(AtomicBool::new(false));
         let (saw, done, flag) =
@@ -332,7 +334,7 @@ mod tests {
         let _turn = turn();
         let blocking = arm_blocking();
         let first = std::thread::spawn(run_now);
-        blocking.started.recv().unwrap();
+        blocking.started.recv_timeout(Duration::from_mins(1)).expect("the work never started");
         let _signalled = Signalled::raise();
         let left = Arc::new(AtomicBool::new(false));
         let finished_at_exit = Arc::new(AtomicBool::new(false));
@@ -380,7 +382,7 @@ mod tests {
         let _turn = turn();
         let blocking = arm_blocking();
         let first = std::thread::spawn(run_now);
-        blocking.started.recv().unwrap();
+        blocking.started.recv_timeout(Duration::from_mins(1)).expect("the work never started");
         let (seen, count) = counter();
         arm(move || {
             seen.fetch_add(1, Ordering::SeqCst);

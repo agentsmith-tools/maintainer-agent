@@ -20,6 +20,14 @@
 # pins the bash behaviour, so it turns red on purpose. Each has a Rust test of the
 # fixed behaviour in crates/mx-run/tests/lifecycle.rs, named for its decision.
 #
+# --with-suite also runs the whole bash suite (tests/run-tests.sh) on a plain copy of
+# the bash tree and on the Rust tree and lists what fails only on the Rust tree. That
+# list is information, not a gate, because four kinds of case cannot pass against a
+# wrapper: source-coupled cases that grep the text of lib/run.sh (the wrapper is two
+# lines), cases whose stub token is under 16 characters (decision D15 refuses it), a
+# case that writes its own shell backend file (a backend is one of four names, decision
+# D18), and cases that read the path of the tree (the wrapper names the binary).
+#
 # Exit 0 when every check holds.
 set -uo pipefail
 
@@ -113,7 +121,7 @@ if [ "$with_suite" = 1 ]; then
     sr="$(MX_TREE="$tree" TMPDIR="$scratch" bash "$root/tests/run-tests.sh" 2>&1)"
     printf 'suite, bash tree (no .git): %s\n' "$(grep -E '[0-9]+ passed, [0-9]+ failed' <<<"$sb" | tail -1 | sed 's/^ *//')"
     printf 'suite, Rust tree          : %s\n' "$(grep -E '[0-9]+ passed, [0-9]+ failed' <<<"$sr" | tail -1 | sed 's/^ *//')"
-    only_rust="$(comm -13 <(grep -E '^ *FAIL' <<<"$sb" | sed 's/^ *//' | sort -u) <(grep -E '^ *FAIL' <<<"$sr" | sed 's/^ *//' | sort -u))"
+    only_rust="$(LC_ALL=C comm -13 <(grep -E '^ *FAIL' <<<"$sb" | sed 's/^ *//' | LC_ALL=C sort -u) <(grep -E '^ *FAIL' <<<"$sr" | sed 's/^ *//' | LC_ALL=C sort -u))"
     echo "cases that fail only on the Rust tree:"
     printf '%s\n' "$only_rust" | sed 's/^/  /'
 fi
