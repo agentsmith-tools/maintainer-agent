@@ -1146,6 +1146,29 @@ case " $nneeds " in
     *" nc "*) ok "the node suite's image is checked for the netcat its contract test drives" ;;
     *) bad "the node suite no longer requires nc, so the image can lose it unnoticed" ;;
 esac
+# wizard-harness.mjs runs `git init` in a scratch directory, so a test that
+# drives the wizard fails in an image without git for the reason the netcat test
+# did. Sourced and asked, like nc above.
+case " $nneeds " in
+    *" git "*) ok "and for the git its wizard harness runs" ;;
+    *) bad "the node suite no longer requires git, so the image can lose it unnoticed" ;;
+esac
+# The suite claims every file under packages/setup, the README included. A
+# pull request that changes only the README (sysknife#821) has nothing else for
+# the gate to break, so a mutate glob with no Markdown in it leaves that change
+# unreceiptable. The answer comes from the plugin, matched the way the gate
+# matches a file name against a glob.
+# shellcheck disable=SC1090
+nglobs="$( . "$nsuite" >/dev/null 2>&1; suite_mutate_glob )"
+nmd=0
+nreadme="README.md"
+while IFS= read -r nglob; do
+    # shellcheck disable=SC2254
+    case "$nreadme" in $nglob) nmd=1 ;; esac
+done <<<"$nglobs"
+[ "$nmd" = 1 ] \
+    && ok "the node suite can mutate the README it claims" \
+    || bad "the node suite claims packages/setup/README.md and cannot mutate it, so a README-only change gets no receipt"
 # A count that cannot be read is a vacuous pass. node --test prints "# pass N".
 npass="$stub_dir/npass"; rm -rf "$npass"; mkdir -p "$npass"
 # node --test prints `ℹ pass N` under its default reporter and `# pass N` under

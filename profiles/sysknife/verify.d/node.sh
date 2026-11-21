@@ -27,12 +27,19 @@ suite_image() { printf 'localhost/sk-node:1'; }
 # each of these resolves, because nothing else ties the image to what the suite
 # runs inside it. sysknife's shell suite sat in an image with no cargo for three
 # review runs and the gate reported it as the pull request failing its own test.
-suite_needs() { printf 'node npm nc'; }
+suite_needs() { printf 'node npm nc git'; }
 
 # JSON is in the list because the support floor lives in package.json's
 # `engines.node` as well as in the preflight, and a mutation that moves one and
 # not the other is exactly the drift these tests are written to catch.
-suite_mutate_glob() { printf '%s\n' '*.js' '*.mjs' '*.json'; }
+#
+# Markdown is in the list because this suite claims `packages/setup/*`, which
+# includes the package README, and a README-only pull request has no other file
+# to break. sysknife#821 changes packages/setup/README.md and the test that
+# compares it with `--help`; with no `*.md` here the gate could not mutate
+# anything the pull request changed, and refused to record a receipt for a
+# change whose guard it had in fact watched go red by hand.
+suite_mutate_glob() { printf '%s\n' '*.js' '*.mjs' '*.json' '*.md'; }
 
 # Run the pull request's code as a normal uid rather than as root. These tests
 # install nothing and own nothing, so root buys nothing and costs the usual

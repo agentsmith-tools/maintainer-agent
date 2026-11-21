@@ -8,11 +8,10 @@
 //! port. A backend therefore starts no process and reads nothing but what it is
 //! handed, so every backend is tested without a process, a file or a network.
 //!
-//! This crate holds the interface. The four implementations and
-//! [`backend_by_name`] are the work of the backends agent (brief `p2b`), and the
-//! executor that consumes a plan is the work of the orchestrator agent (brief
-//! `p2a`). The two write against this file, so a change to a signature here is a
-//! change to both briefs.
+//! This crate holds the interface and the four implementations
+//! ([`backend_by_name`], [`RealHost`], [`FakeHost`]). The executor that consumes
+//! a plan is the work of the orchestrator agent (brief `p2a`), so a change to a
+//! signature here is a change to both briefs.
 //!
 //! # What each bash function becomes
 //!
@@ -26,8 +25,18 @@
 //! | `backend_run` | [`Backend::plan`] |
 //! | `backend_transient_reason`, `backend_needs_human_reason` | `mx_profile::classify`, shared by every backend |
 
+mod claude;
+mod codex;
+mod cursor;
+mod host;
+mod opencode;
+mod util;
+
+pub use host::{FakeHost, RealHost};
+
 use mx_ports::PipelineSpec;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// What a backend function reads from the shell it is sourced into.
@@ -37,7 +46,7 @@ use std::path::{Path, PathBuf};
 /// `SUBAGENT_MODEL_<task>`, `OPENCODE_MODEL`, `MAINTAINER_SETTINGS`,
 /// `MAINTAINER_CURSOR_DIR`, `GROQ_API_KEY`, ...). This struct carries the same
 /// inputs, so no backend reads the environment itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BackendCtx {
     /// `PROFILE_DIR`: where the profile's walls and settings live.
     pub profile_dir: PathBuf,
@@ -54,6 +63,22 @@ pub struct BackendCtx {
     /// (the rehearsal wall variable, for one). Values here may be secrets, so
     /// this type has no `Display` and tests print names only.
     pub vars: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for BackendCtx {
+    /// Prints the names of the variables and never their values, because one of
+    /// them can be `GROQ_API_KEY`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.vars.keys().map(String::as_str).collect();
+        f.debug_struct("BackendCtx")
+            .field("profile_dir", &self.profile_dir)
+            .field("repo_path", &self.repo_path)
+            .field("task", &self.task)
+            .field("home", &self.home)
+            .field("scripts_dir", &self.scripts_dir)
+            .field("var_names", &names)
+            .finish()
+    }
 }
 
 impl BackendCtx {
@@ -165,10 +190,15 @@ pub trait Backend {
 /// or a dot-dot reaches any file (decision D18); this function matches the four
 /// names exactly and refuses every other string.
 ///
-/// The backends agent (`p2b`) fills this in. Until then it knows no backend.
 #[must_use]
-pub fn backend_by_name(_name: &str) -> Option<Box<dyn Backend>> {
-    None
+pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
+    match name {
+        "claude" => Some(Box::new(claude::Claude)),
+        "codex" => Some(Box::new(codex::Codex)),
+        "cursor" => Some(Box::new(cursor::Cursor)),
+        "opencode" => Some(Box::new(opencode::Opencode)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
