@@ -11,9 +11,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// How long the readers get to reach end of file after the kill.
-const KILL_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const KILL_GRACE: Duration = Duration::from_millis(500);
 /// Where the `kill` utility lives, in the order tried.
-const KILL_TOOLS: [&str; 2] = ["/bin/kill", "/usr/bin/kill"];
+pub(crate) const KILL_TOOLS: [&str; 2] = ["/bin/kill", "/usr/bin/kill"];
 /// Reported when a status carries neither an exit code nor a signal.
 const UNKNOWN_EXIT: i32 = 255;
 
@@ -174,7 +174,12 @@ impl Proc for RealProc {
 
 /// The `LC_ALL` of a call: its locale when that is a plain name, else `C`.
 fn locale_of(spec: &ProcSpec) -> &str {
-    match spec.locale.as_deref() {
+    plain_locale(spec.locale.as_deref())
+}
+
+/// `name` when it is a plain locale name, else `C`.
+pub(crate) fn plain_locale(name: Option<&str>) -> &str {
+    match name {
         Some(name)
             if !name.is_empty()
                 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.@-".contains(&b)) =>
@@ -190,7 +195,7 @@ fn locale_of(spec: &ProcSpec) -> &str {
     clippy::disallowed_methods,
     reason = "RealProc is the single adapter that starts processes; every other crate goes through the Proc trait"
 )]
-fn new_command(program: &Path) -> Command {
+pub(crate) fn new_command(program: &Path) -> Command {
     Command::new(program)
 }
 
@@ -199,7 +204,7 @@ fn new_command(program: &Path) -> Command {
 /// `Ok(true)` means the utility reported success, `Ok(false)` that it ran and
 /// reported failure (the group may already be gone), and `Err` that it could not
 /// run at all.
-fn kill_group(tools: &[PathBuf], pid: u32) -> Result<bool, String> {
+pub(crate) fn kill_group(tools: &[PathBuf], pid: u32) -> Result<bool, String> {
     let tool = tools
         .iter()
         .find(|tool| tool.is_file())
@@ -217,14 +222,14 @@ fn kill_group(tools: &[PathBuf], pid: u32) -> Result<bool, String> {
 }
 
 /// `128 + signal` for a signal death, the exit code otherwise.
-fn exit_code(status: ExitStatus) -> i32 {
+pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(UNKNOWN_EXIT)
 }
 
 /// Polls `ready` with a short, growing pause until it is true or `deadline`
 /// passes. `ready` is checked once more at the deadline, so a call that
 /// finishes on the last instant still counts.
-fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
+pub(crate) fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
     let mut pause = Duration::from_millis(1);
     loop {
         if ready() {
@@ -241,12 +246,12 @@ fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
 
 /// The absolute entries of a search path. A relative or empty entry means "the
 /// current directory" to a child, so neither is searched and neither is passed on.
-fn absolute_entries(search_path: &OsStr) -> Vec<PathBuf> {
+pub(crate) fn absolute_entries(search_path: &OsStr) -> Vec<PathBuf> {
     std::env::split_paths(search_path).filter(|dir| dir.is_absolute()).collect()
 }
 
 /// Finds the executable for `program`.
-fn resolve(search_dirs: &[PathBuf], program: &str) -> Result<PathBuf, ProcError> {
+pub(crate) fn resolve(search_dirs: &[PathBuf], program: &str) -> Result<PathBuf, ProcError> {
     if program.contains('/') {
         let path = Path::new(program);
         if !path.is_absolute() {

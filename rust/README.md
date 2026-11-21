@@ -3,8 +3,10 @@
 A Cargo workspace for the programs that replace magent's shell scripts, and the typed foundation and gate they share.
 
 - `crates/mx-core`: `Fact<T>`, `Refusal`, `NonEmpty<T>`. No I/O.
-- `crates/mx-ports`: the `Gh`, `Git`, `Containers`, `Clock`, `Fs` and `Proc` traits, an in-memory fake for each, and `RealProc`, the one real adapter.
+- `crates/mx-ports`: the `Gh`, `Git`, `Containers`, `Clock`, `Fs`, `Proc` and `Pipe` traits, an in-memory fake for each, and the two real adapters: `RealProc` (a short program whose output the caller reads) and `RealPipe` (a program or a pipeline whose streams go to files, in process groups of their own under one deadline).
 - `crates/mx-repo`: `bin/maintainer-repo` (`prune`, `release-check`, `fixup`) as a library and a binary named `maintainer-repo`. `tests/differential.sh` runs the bash program and the Rust binary on generated scenarios and compares everything they print, call and write; `tests/mutants.py` is the mutation proof.
+
+- `crates/mx-run`: `lib/run.sh` as a library and a binary named `run`, which replaces `lib/run.sh` in an assembled tree. The cadence gate, the identity verdicts, the toast text and the prompt are pure modules; `pass` is the lifecycle, step for step. It calls the Python helper `maintainer` through the `Proc` port exactly as the bash does.
 
 Run the gate from the repository root: `scripts/rust-gate.sh`. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` (more than 15 tests must run), and a probe that adds a crate calling `Command::new` and demands clippy refuse it. CI runs the same script as the `rust` job.
 
@@ -39,7 +41,7 @@ The plan names the opencode key only when the backend read it from `~/.groq-stag
 
 ## Running the bash suites against a Rust program
 
-`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (today `maintainer-repo`), and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
+`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), and `run`, which stands for `lib/run.sh`, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
 
     rust/scripts/assemble-tree.sh /scratch/tree
     MX_TREE=/scratch/tree bash tests/run-characterization.sh repo-prune.sh repo-release.sh repo-fixup.sh

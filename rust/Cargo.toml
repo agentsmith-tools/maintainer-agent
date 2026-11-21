@@ -26,6 +26,10 @@ serde_json = { version = "=1.0.149", features = ["preserve_order", "arbitrary_pr
 # clone on SIGINT, SIGTERM and SIGHUP the way bash's EXIT trap does while this workspace
 # keeps `unsafe_code = "forbid"`. Its handlers reset to the default action in every child.
 signal-hook = "=0.3.18"
+# rustix makes descriptor 9 inheritable: a Rust `File` is opened close-on-exec, so mx-run
+# duplicates the lock file onto a descriptor numbered 9 with the safe `dup2`, which leaves
+# the copy without the flag. Only its `io` module is used; the `std` feature is the default.
+rustix = { version = "=1.1.6", default-features = false, features = ["std"] }
 mx-core = { path = "crates/mx-core" }
 mx-ports = { path = "crates/mx-ports" }
 mx-profile = { path = "crates/mx-profile" }
