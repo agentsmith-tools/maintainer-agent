@@ -11,7 +11,10 @@
 //! with 143 look the same to a shell, and only the first is a clean stop to systemd.
 
 use mx_core::NonEmpty;
-use mx_ports::{Pipe, PipelineSpec, Proc, ProcExit, ProcSpec, RealPipe, RealProc, Sink, StageSpec};
+use mx_ports::{
+    Pipe, PipelineOutcome, PipelineSpec, Proc, ProcError, ProcExit, ProcSpec, RealPipe, RealProc,
+    Sink, StageSpec,
+};
 use mx_run::env::Env;
 use mx_run::exec::{Adapters, Exec};
 use std::path::{Path, PathBuf};
@@ -36,6 +39,17 @@ fn wait_for(path: &Path) {
     while !path.exists() {
         assert!(Instant::now() < deadline, "{} never appeared", path.display());
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A pipe port that writes a file when it is asked to run anything. The executor must
+/// never ask it after a signal: the file is the evidence.
+struct Marker(PathBuf);
+
+impl Pipe for Marker {
+    fn run_pipeline(&self, _spec: &PipelineSpec) -> Result<PipelineOutcome, ProcError> {
+        std::fs::write(&self.0, "1").unwrap();
+        Ok(PipelineOutcome { exits: vec![ProcExit::Code(0)] })
     }
 }
 
@@ -89,7 +103,7 @@ fn victim() {
             let exec = Exec {
                 adapters: Adapters {
                     proc: Arc::new(RealProc::new("/usr/bin:/bin", Vec::new())),
-                    pipe: Arc::new(RealPipe::new("/usr/bin:/bin", None)),
+                    pipe: Arc::new(Marker(dir.join("spawned"))),
                 },
                 env: Env::default(),
                 cwd: None,

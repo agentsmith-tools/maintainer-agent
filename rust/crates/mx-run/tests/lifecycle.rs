@@ -2213,7 +2213,18 @@ fn the_search_path_gets_the_local_bin_then_the_cargo_bin_then_the_callers_path()
 fn a_stamp_that_is_a_directory_is_not_a_stamp_and_the_run_goes_ahead() {
     let _turn = serial();
     let fx = Fx::new("stamp-dir");
-    std::fs::create_dir_all(fx.state.join("state/last-review.json")).unwrap();
+    let stamp = fx.state.join("state/last-review.json");
+    std::fs::create_dir_all(&stamp).unwrap();
+    // Dated an hour before the fixture clock, so that a directory read as a stamp would skip.
+    let touch = ProcSpec::command(
+        "touch",
+        ["-d", &format!("@{}", EPOCH - 3600), stamp.to_str().unwrap()],
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        RealProc::new("/usr/bin:/bin", Vec::new()).run(&touch).unwrap().exit,
+        ProcExit::Code(0)
+    );
     let out = fx.run(&["fx", "review"]);
     assert_eq!(out.rc, 0, "{}", out.stderr);
     assert_eq!(out.stdout, "");
