@@ -57,6 +57,8 @@ pub fn run(invocation: &Invocation, services: &mut Services<'_>) -> i32 {
             let flow = pass.go();
             // The trap runs before descriptor 9 closes, as the bash's does.
             trap::run_now();
+            // A signal that arrived meanwhile ends the process by the signal, not by this code.
+            trap::checkpoint();
             drop(pass);
             match flow {
                 Ok(()) => 0,

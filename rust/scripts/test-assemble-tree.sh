@@ -11,6 +11,9 @@
 #               link in the copy and leaves the outside file alone.
 #   rust-bin    .rust-bin is a symlink to an outside directory. The helper refuses.
 #   bin-link    bin is a symlink to an outside directory. The helper refuses.
+#   run-wrapper the crate is called `run`: its wrapper replaces lib/run.sh, carries
+#               no MAINTAINER_CHILD_ENV line, and the binary is in the copy.
+#   run-lib     lib is a symlink to an outside directory. Building `run` refuses.
 #
 # Prints `assemble-tree test: N checks, F failed`; exit 0 only with N > 0 and F = 0.
 # MX_SCRATCH moves the scratch directory; CARGO_TARGET_DIR is shared with the caller.
@@ -53,8 +56,15 @@ commit_fixture() {
 }
 digest() { find "$1" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum; }
 
-run_helper() {  # $1 = fixture name; sets RC and OUT
-    OUT="$(cd "$scratch/$1/repo" && bash rust/scripts/assemble-tree.sh "$scratch/$1/dest" prog 2>&1)"; RC=$?
+run_helper() {  # $1 = fixture name, $2 = the program (default prog); sets RC and OUT
+    OUT="$(cd "$scratch/$1/repo" && bash rust/scripts/assemble-tree.sh "$scratch/$1/dest" "${2:-prog}" 2>&1)"; RC=$?
+}
+# runfix NAME: the fixture with its crate renamed to `run`, which stands for lib/run.sh.
+runfix() {
+    fixture "$1"
+    sed -i 's/prog/run/g' "$scratch/$1/repo/rust/crates/prog/Cargo.toml"
+    (cd "$scratch/$1/repo/rust" && cargo generate-lockfile --offline -q) || exit 2
+    printf '#!/usr/bin/env bash\necho bash run\n' > "$scratch/$1/repo/lib/run.sh"
 }
 
 # 1. file-link
@@ -94,6 +104,29 @@ run_helper bin-link
 check "bin-link: the helper refused (exit $RC)" test "$RC" != 0
 check "bin-link: it says why" grep -q "symlink" <<<"$OUT"
 check "bin-link: the outside directory is unchanged" test "$(digest "$scratch/bin-link/outside")" = "$before"
+
+# 4. run-wrapper
+runfix run-wrapper
+commit_fixture run-wrapper
+run_helper run-wrapper run
+check "run-wrapper: the helper finished (exit $RC: ${OUT: -120})" test "$RC" = 0
+check "run-wrapper: lib/run.sh is the wrapper" grep -q "dest/.rust-bin/run" "$scratch/run-wrapper/dest/lib/run.sh"
+check "run-wrapper: the wrapper sets no MAINTAINER_CHILD_ENV" test "$(grep -c MAINTAINER_CHILD_ENV "$scratch/run-wrapper/dest/lib/run.sh")" = 0
+check "run-wrapper: the binary is in the copy" test -x "$scratch/run-wrapper/dest/.rust-bin/run"
+check "run-wrapper: bin/prog is untouched" grep -q "echo bash prog" "$scratch/run-wrapper/dest/bin/prog"
+
+# 5. run-lib
+runfix run-lib
+rm -r "$scratch/run-lib/repo/lib"
+mkdir -p "$scratch/run-lib/outside/libdir"
+printf '#!/usr/bin/env bash\n' > "$scratch/run-lib/outside/libdir/run.sh"
+ln -s "$scratch/run-lib/outside/libdir" "$scratch/run-lib/repo/lib"
+commit_fixture run-lib
+before="$(digest "$scratch/run-lib/outside")"
+run_helper run-lib run
+check "run-lib: the helper refused (exit $RC)" test "$RC" != 0
+check "run-lib: it says why" grep -q "symlink" <<<"$OUT"
+check "run-lib: the outside directory is unchanged" test "$(digest "$scratch/run-lib/outside")" = "$before"
 
 printf 'assemble-tree test: %d checks, %d failed\n' "$N" "$F"
 [ "$N" -gt 0 ] && [ "$F" -eq 0 ]

@@ -23,7 +23,8 @@
 #   3. replaces DEST/bin/NAME (DEST/lib/run.sh for `run`) with a short wrapper that execs that binary
 #      and hands it the wrapper's own path as argv[0], after naming the two
 #      variables the suites' stubs read (CZ_CASE_DIR, BASH_ENV) in
-#      MAINTAINER_CHILD_ENV so the program passes them to its children. The Rust program finds
+#      MAINTAINER_CHILD_ENV so the program passes them to its children (`run` passes its whole
+#      environment and gets no such line). The Rust program finds
 #      its tree (lib/, bin/maintainer) from argv[0] the way the bash program
 #      finds it from $0, so a suite that copies the wrapper to another folder
 #      still points at that folder.
@@ -156,6 +157,8 @@ if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree fail
 mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
 real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
 for sub in bin lib .rust-bin; do
+    # lib/ holds a wrapper only when `run` is built, so a tree with no lib/ is fine for the others.
+    if [ "$sub" = lib ] && [ ! -e "$dest/lib" ] && [ ! -L "$dest/lib" ]; then continue; fi
     if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
     real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
     case "$real_sub/" in "$real_dest"/*) ;; *) die "$dest/$sub resolves outside $dest" ;; esac
@@ -174,9 +177,12 @@ for i in "${!names[@]}"; do
         printf '# argv[0] is this file, so the program finds lib/ and bin/maintainer beside it.\n'
         # The suites run the program under `env -i` with stubs that read
         # CZ_CASE_DIR and BASH_ENV. A child of the Rust program gets an
-        # allowlisted environment, and MAINTAINER_CHILD_ENV names two more.
-        # shellcheck disable=SC2016  # the wrapper expands these when it runs
-        printf 'export MAINTAINER_CHILD_ENV="${MAINTAINER_CHILD_ENV:+$MAINTAINER_CHILD_ENV }CZ_CASE_DIR BASH_ENV"\n'
+        # allowlisted environment, and MAINTAINER_CHILD_ENV names two more. `run`
+        # passes its whole environment on, as lib/run.sh does, so it needs neither.
+        if [ "$rel" != "lib/run.sh" ]; then
+            # shellcheck disable=SC2016  # the wrapper expands these when it runs
+            printf 'export MAINTAINER_CHILD_ENV="${MAINTAINER_CHILD_ENV:+$MAINTAINER_CHILD_ENV }CZ_CASE_DIR BASH_ENV"\n'
+        fi
         # shellcheck disable=SC2016  # the wrapper expands these when it runs
         printf 'exec -a "${BASH_SOURCE[0]}" %q "$@"\n' "$dest/.rust-bin/$name"
         } > "$dest/$rel"

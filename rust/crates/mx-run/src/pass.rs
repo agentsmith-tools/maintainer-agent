@@ -91,6 +91,9 @@ struct Shared {
     log: PathBuf,
     prompt_file: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    /// The exported environment as it stands: a trap runs with what the shell had
+    /// exported when it ran, including what a backend exported after the trap was set.
+    env: Env,
 }
 
 type SharedCell = Arc<Mutex<Shared>>;
@@ -168,7 +171,7 @@ impl<'a, 'b> Pass<'a, 'b> {
             inv,
             svc,
             exec,
-            shared: Arc::new(Mutex::new(Shared::default())),
+            shared: Arc::new(Mutex::new(Shared { env: inv.env.clone(), ..Shared::default() })),
             argv0,
             tree,
             show: false,
@@ -223,6 +226,19 @@ impl<'a, 'b> Pass<'a, 'b> {
     fn export(&mut self, name: &str, value: &str) {
         self.exec.env.set(name, value);
         self.exported.insert(name.to_string(), value.to_string());
+        self.sync_env();
+    }
+
+    /// `unset NAME`.
+    fn unset(&mut self, name: &str) {
+        self.exec.env.unset(name);
+        self.exported.remove(name);
+        self.sync_env();
+    }
+
+    /// Lets the exit trap see the environment as it is now.
+    fn sync_env(&self) {
+        shared(&self.shared).env = self.exec.env.clone();
     }
 
     fn var(&self, name: &str) -> Option<&str> {
@@ -297,7 +313,7 @@ impl<'a, 'b> Pass<'a, 'b> {
         self.task = task;
         // Decision D13: a GH_TOKEN inherited from the caller must not reach any
         // call before the pin, so the identity check cannot run under it.
-        self.exec.env.unset("GH_TOKEN");
+        self.unset("GH_TOKEN");
         Ok(())
     }
 
@@ -450,6 +466,11 @@ impl<'a, 'b> Pass<'a, 'b> {
         match cadence::decide(&facts, now) {
             Decision::Run => Ok(()),
             Decision::Skip { age_hours, min_hours } => {
+                // `[` reads " 6 " as a number, but `printf %d` takes no trailing blank and
+                // says so on standard error before it prints the line.
+                if facts.min_hours.ends_with([' ', '\t']) {
+                    self.bash_error(142, &format!("printf: {}: invalid number", facts.min_hours));
+                }
                 let line = cadence::skip_line(&self.task, age_hours, min_hours, suffix);
                 self.say_out(&line);
                 Err(Stop(0))
@@ -471,7 +492,7 @@ impl<'a, 'b> Pass<'a, 'b> {
             self.gate(None)?;
         }
         // The override is consumed here and must not travel any further.
-        self.exec.env.unset("MAINTAINER_FORCE");
+        self.unset("MAINTAINER_FORCE");
         let marker = format!("{}/{}", self.profile, self.task);
         self.export("MAINTAINER_IN_RUN", &marker);
         Ok(())

@@ -34,12 +34,13 @@ pub fn run_id_of(context: &str) -> Option<String> {
 /// What the exit trap does about the lease: `run-lease --clear`, whose failure
 /// changes nothing.
 fn clear_lease(exec: &Exec, helper: &str, cell: &SharedCell) {
-    let (log, cwd) = {
+    let (log, cwd, env) = {
         let state = shared(cell);
-        (state.log.clone(), state.cwd.clone())
+        (state.log.clone(), state.cwd.clone(), state.env.clone())
     };
     let mut exec = exec.clone();
     exec.cwd = cwd;
+    exec.env = env;
     exec.checkpoint = false;
     let _ = exec.to_log(&[helper, "run-lease", "--clear"], &[], &log);
 }
@@ -286,8 +287,7 @@ impl Pass<'_, '_> {
             return Err(Stop(1));
         }
         self.export("GH_TOKEN", &token);
-        self.exec.env.unset("GITHUB_TOKEN");
-        self.exported.remove("GITHUB_TOKEN");
+        self.unset("GITHUB_TOKEN");
         // Every exit path from here on, including the transient exit 75 and the
         // refusals below, passes through the scrub.
         self.arm_scrub_trap(&token);
