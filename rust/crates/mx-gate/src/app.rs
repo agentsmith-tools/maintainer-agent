@@ -146,15 +146,15 @@ fn shell_quote(word: &str) -> String {
     out
 }
 
-/// `${N:?name}`: bash names its own file and the line of the read (bash 396, 455, 1222, 1748 and
-/// 2120), so the Rust program does the same with the line of each.
+/// `${N:?name}`: bash names its own file and the line of the read (bash 406, 465, 1242, 1783 and
+/// 2155), so the Rust program does the same with the line of each.
 fn missing_argument(argv0: &str, args: &[String], position: u8, name: &str) -> Exit {
     let line = match args.first().map(String::as_str) {
-        Some("receipt") => 396,
-        Some("verify-deps") => 455,
-        Some("verify" | "verify-part") => 1222,
-        Some("merge") => 1748,
-        _ => 2120,
+        Some("receipt") => 406,
+        Some("verify-deps") => 465,
+        Some("verify" | "verify-part") => 1242,
+        Some("merge") => 1783,
+        _ => 2155,
     };
     Exit { code: 1, stderr: format!("{argv0}: line {line}: {position}: {name}\n") }
 }
@@ -241,8 +241,7 @@ fn run_inner(
         });
     }
     let command = parse_command(args).map_err(|error| match error {
-        // `${N:?name}`: bash names its own file and the line of the read (bash 396, 455, 1222,
-        // 1748 and 2120), so the Rust program does the same with the line of each.
+        // `${N:?name}`: see `missing_argument`.
         crate::CommandError::Missing { position, name } => {
             missing_argument(argv0, args, position, name)
         }
@@ -445,12 +444,12 @@ mod tests {
         let line = |sub: &str| {
             missing_argument("bin/maintainer-merge", &[sub.to_string()], 1, "pr").stderr
         };
-        assert_eq!(line("receipt"), "bin/maintainer-merge: line 396: 1: pr\n");
-        assert_eq!(line("verify-deps"), "bin/maintainer-merge: line 455: 1: pr\n");
-        assert_eq!(line("verify"), "bin/maintainer-merge: line 1222: 1: pr\n");
-        assert_eq!(line("verify-part"), "bin/maintainer-merge: line 1222: 1: pr\n");
-        assert_eq!(line("merge"), "bin/maintainer-merge: line 1748: 1: pr\n");
-        assert_eq!(line("update"), "bin/maintainer-merge: line 2120: 1: pr\n");
+        assert_eq!(line("receipt"), "bin/maintainer-merge: line 406: 1: pr\n");
+        assert_eq!(line("verify-deps"), "bin/maintainer-merge: line 465: 1: pr\n");
+        assert_eq!(line("verify"), "bin/maintainer-merge: line 1242: 1: pr\n");
+        assert_eq!(line("verify-part"), "bin/maintainer-merge: line 1242: 1: pr\n");
+        assert_eq!(line("merge"), "bin/maintainer-merge: line 1783: 1: pr\n");
+        assert_eq!(line("update"), "bin/maintainer-merge: line 2155: 1: pr\n");
         assert_eq!(missing_argument("m", &["merge".into()], 1, "pr").code, 1);
     }
 
