@@ -72,6 +72,12 @@ pub enum SandboxError {
     // bash: die "cannot create $VERIFY_WORK" / "cannot create a scratch directory in $VERIFY_WORK"
     #[error("cannot create a scratch directory in {}", dir.display())]
     ScratchDir { dir: PathBuf },
+    /// The parent of the scratch directories could not be made or locked down to mode 700.
+    /// The first of the two bash sentences above; the interface had only the second.
+    /// Added by the sandbox agent (P3A-3); additive.
+    // bash: mkdir -p "$VERIFY_WORK" && chmod 700 "$VERIFY_WORK" || die "cannot create $VERIFY_WORK"
+    #[error("cannot create {}", dir.display())]
+    ScratchParent { dir: PathBuf },
     /// `git init` or `git add -A -f` failed in the extracted tree, so a test that asks git
     /// what is tracked will fail for that reason (the gate prints a note and goes on).
     #[error("could not seed a git index in the extracted tree")]
@@ -83,6 +89,15 @@ pub enum SandboxError {
     /// The sed expression is empty (bash: `${4:?sed expression}`) or has a NUL, which no argument can hold.
     #[error("the sed expression is empty or contains a NUL byte")]
     BadSedExpression,
+    /// A name for a staged executable that is not one plain file name. Added by the sandbox
+    /// agent (P3A-4).
+    #[error(
+        "'{name}' is not a name for a staged file: use letters, digits, '.', '_' and '-', not starting with '.' or '-'"
+    )]
+    BadStageName { name: String },
+    /// A file could not be staged into the tree. Added by the sandbox agent (P3A-4).
+    #[error("cannot stage {}: {reason}", path.display())]
+    Stage { path: PathBuf, reason: String },
     /// The runtime or one of its helpers could not be started or did not finish.
     #[error("the container run did not finish: {reason}")]
     Run { reason: String },

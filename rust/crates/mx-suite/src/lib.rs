@@ -41,23 +41,27 @@
 //! a suite name from the command line or from a receipt is a [`SuiteName`], and
 //! no function that reaches a suite file takes a string.
 
+mod choose;
 mod filter;
 mod glob;
 mod host;
 mod image;
 mod name;
 mod prod;
+mod real;
 mod record;
 mod selector;
 mod spec;
 pub mod text;
 
+pub use choose::HostSelector;
 pub use filter::{TestFilter, TestFilterError};
 pub use glob::{MutateGlob, MutateGlobError};
 pub use host::{FakeSuite, FakeSuiteHost, Suite, SuiteCall, SuiteError, SuiteHost};
 pub use image::{ImageRef, ImageRefError};
 pub use name::{SuiteName, SuiteNameError};
 pub use prod::{NoProdGlobs, ProdGlobs};
+pub use real::{RealSuiteHost, SUITE_ENV_NAMES, SuiteDirs};
 pub use record::Recorder;
 pub use selector::{
     CoverageFailure, CoverageRow, FakeSelector, PickRefusal, Picked, SuiteSelector,

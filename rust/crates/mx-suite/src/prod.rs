@@ -82,7 +82,12 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
                 continue;
             }
             Some(b'?') => Some(1),
-            Some(b'[') => class_match(pattern, p, text[t]),
+            Some(b'[') => match class_match(pattern, p, text[t]) {
+                Class::Hit(width) => Some(width),
+                Class::Miss => None,
+                // bash reads a `[` that never closes as a plain `[`.
+                Class::Unclosed => (text[t] == b'[').then_some(1),
+            },
             Some(b'\\') if p + 1 < pattern.len() => (pattern[p + 1] == text[t]).then_some(2),
             Some(&c) => (c == text[t]).then_some(1),
             None => None,
@@ -105,10 +110,18 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     pattern[p..].iter().all(|&c| c == b'*')
 }
 
-/// Matches one byte against the class that starts at `pattern[at]`. Returns the width of the
-/// class in the pattern when the byte is in it, and `None` when it is not or when the class
-/// never closes (an unclosed `[` is a plain `[`, which then has to equal the byte).
-fn class_match(pattern: &[u8], at: usize, byte: u8) -> Option<usize> {
+/// What a `[` in a pattern means for one byte of the text.
+enum Class {
+    /// The byte is in the class, which is this many bytes of the pattern wide.
+    Hit(usize),
+    /// A well-formed class that does not hold the byte.
+    Miss,
+    /// The class never closes, so the `[` is an ordinary character.
+    Unclosed,
+}
+
+/// Matches one byte against the class that starts at `pattern[at]`.
+fn class_match(pattern: &[u8], at: usize, byte: u8) -> Class {
     let mut i = at + 1;
     let negate = matches!(pattern.get(i), Some(b'!' | b'^'));
     if negate {
@@ -117,7 +130,7 @@ fn class_match(pattern: &[u8], at: usize, byte: u8) -> Option<usize> {
     let first = i;
     let mut hit = false;
     loop {
-        let c = *pattern.get(i)?;
+        let Some(&c) = pattern.get(i) else { return Class::Unclosed };
         if c == b']' && i > first {
             break;
         }
@@ -132,7 +145,7 @@ fn class_match(pattern: &[u8], at: usize, byte: u8) -> Option<usize> {
             i = next;
         }
     }
-    (hit != negate).then_some(i + 1 - at)
+    if hit == negate { Class::Miss } else { Class::Hit(i + 1 - at) }
 }
 
 #[cfg(test)]
@@ -159,6 +172,19 @@ mod tests {
     #[test]
     fn a_glob_is_one_word_and_is_never_expanded() {
         assert_eq!(globs("crates/*/src/*"), ["crates/*/src/*"]);
+    }
+
+    #[test]
+    fn a_bracket_that_never_closes_is_a_plain_bracket_as_in_bash() {
+        // bash: [[ "[" == [ ]] and [[ "[a" == [a ]] are true; the class never closes.
+        let globs = |g: &str| ProdGlobs::from_profile_value(g).unwrap();
+        assert!(globs("[").matches("["));
+        assert!(globs("[a").matches("[a"));
+        assert!(globs("x[").matches("x["));
+        assert!(globs("[!").matches("[!"));
+        assert!(!globs("[").matches("a"));
+        assert!(!globs("[a").matches("a"));
+        assert!(globs("[a]").matches("a"), "a class that closes is still a class");
     }
 
     #[test]

@@ -112,6 +112,13 @@ impl ContainerSpec {
         }
     }
 
+    /// The run's own `--timeout`, in seconds. The real adapter bounds the client process a
+    /// little above it, so a runtime that hangs after its container ended cannot hold the gate.
+    #[must_use]
+    pub fn timeout(&self) -> Timeout {
+        self.inputs.timeout
+    }
+
     /// The runtime this run starts.
     #[must_use]
     pub fn runtime(&self) -> Runtime {
