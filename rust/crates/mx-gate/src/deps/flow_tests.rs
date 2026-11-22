@@ -823,6 +823,15 @@ fn a_merge_base_that_is_not_forty_hex_digits_refuses_and_shows_forty_characters(
 }
 
 #[test]
+fn a_merge_base_of_the_wrong_length_or_case_refuses() {
+    for bad in ["c".repeat(39), "c".repeat(41), "C".repeat(40), "c".repeat(7)] {
+        let rig = whole_rig();
+        rig.net.script_merge_base(Script::always(Ok(bad.clone())));
+        assert!(matches!(rig.refusal(), DepsRefusal::NoMergeBase { .. }), "{bad}");
+    }
+}
+
+#[test]
 fn a_requirements_path_that_is_not_plain_never_reaches_an_api_url() {
     let rig = Rig::new(&bump(&json!({"../etc/passwd": "pip-requirements"}), &[], &[], &[]));
     rig.gh.script_base_ref(Script::always(Ok("main".into())));
@@ -1096,4 +1105,116 @@ fn nothing_was_written_by_any_refusal() {
             .iter()
             .all(|effect| matches!(effect, mx_ports::Effect::Fs(mx_ports::FsEffect::Read(_))))
     );
+}
+
+// ----- the head is pinned from the first read to the last check (P3C-12) -----
+
+const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+fn heads(rig: &Rig, answers: Vec<Result<String, GhFailure>>) {
+    rig.gh.script_head(Script::sequence(answers));
+}
+
+fn at(head: &str) -> Result<String, GhFailure> {
+    Ok(head.to_string())
+}
+
+fn moved() -> DepsRefusal {
+    DepsRefusal::HeadMoved { pr: pr(), real_head_8: "fedcba98".into(), sha_8: "01234567".into() }
+}
+
+#[test]
+fn a_push_after_the_head_was_read_and_before_the_diff_was_classified_refuses() {
+    let rig = Rig::new(&lockfile());
+    heads(&rig, vec![at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+    assert!(rig.classifier.calls().is_empty(), "nothing is classified at a head that moved");
+}
+
+#[test]
+fn a_push_during_the_last_check_of_a_bump_with_nothing_to_ask_refuses() {
+    let rig = Rig::new(&lockfile());
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+}
+
+#[test]
+fn a_push_during_a_pin_check_refuses_and_says_nothing_more() {
+    let rig =
+        workflow_rig(&[pin("actions/checkout", "v4", false), pin("actions/cache", "v3", false)]);
+    rig.net.script_tag_ref(Script::always(Ok(tag_ref("v4", "commit", PIN_SHA))));
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+    assert_eq!(rig.net.calls().len(), 1, "the second pin is not asked about at a moved head");
+}
+
+#[test]
+fn a_push_during_an_image_check_refuses() {
+    let rig = dockerfile_rig();
+    rig.net.script_image_digest(Script::always(Ok(DIGEST.into())));
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+}
+
+#[test]
+fn a_push_during_a_pip_check_refuses() {
+    let rig = whole_rig();
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+    assert!(rig.whole.calls().is_empty());
+}
+
+#[test]
+fn a_push_while_a_requirements_file_is_read_whole_refuses() {
+    let rig = whole_rig();
+    heads(&rig, vec![at(HEAD), at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+}
+
+#[test]
+fn a_head_that_cannot_be_read_again_is_a_head_that_was_not_confirmed() {
+    for answer in [Err(GhFailure { exit: 1, output: "x".into() }), at("\n")] {
+        let rig = Rig::new(&lockfile());
+        heads(&rig, vec![at(HEAD), answer]);
+        assert_eq!(rig.refusal(), DepsRefusal::HeadUnreadable { pr: pr() });
+    }
+}
+
+#[test]
+fn a_head_that_stays_put_through_every_stage_is_read_once_per_stage() {
+    let rig = whole_rig();
+    rig.run().unwrap();
+    // the first read, the diff, the pip package, the requirements file, the end
+    assert_eq!(rig.gh.calls().iter().filter(|c| format!("{c:?}").contains("Head")).count(), 5);
+}
+
+#[test]
+fn a_push_after_the_first_of_two_images_stops_the_second_from_being_asked() {
+    let rig = Rig::new(&bump(
+        &json!({"Dockerfile": "dockerfile"}),
+        &[],
+        &[image("docker.io/library/rust", "1"), image("docker.io/library/debian", "12")],
+        &[],
+    ));
+    rig.net.script_image_digest(Script::always(Ok(DIGEST.into())));
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+    assert_eq!(rig.net.calls().len(), 1);
+}
+
+#[test]
+fn a_push_after_the_first_of_two_pip_packages_stops_the_second_from_being_asked() {
+    let rig = Rig::new(&bump(
+        &json!({"requirements.txt": "pip-requirements"}),
+        &[],
+        &[],
+        &[
+            package("requirements.txt", "A", "2", &[HASH_A]),
+            package("requirements.txt", "B", "3", &[HASH_B]),
+        ],
+    ));
+    rig.net.script_pypi_release(Script::always(Ok("1 of 1".into())));
+    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    assert_eq!(rig.refusal(), moved());
+    assert_eq!(rig.net.calls().len(), 1);
 }

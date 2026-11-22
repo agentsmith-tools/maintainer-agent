@@ -270,12 +270,13 @@ pub fn verify_deps(
     let pr = lease.pr();
     missing(ports.fs, HelperScript::Classifier, &config.scripts.classifier)?;
     let head = real_head(ports, pr, sha)?;
-    let bump = classify(config, ports, pr)?;
-    let pins = check_pins(ports, &bump)?;
-    let images = check_images(config, ports, &bump)?;
-    let pip = check_pip(config, ports, &bump)?;
+    let bump = classify(config, ports, pr, &head)?;
+    let pins = check_pins(ports, pr, &head, &bump)?;
+    let images = check_images(config, ports, pr, &head, &bump)?;
+    let pip = check_pip(config, ports, pr, &head, &bump)?;
     check_pip_files(config, ports, pr, &head, &bump)?;
     let checked = Checked::new(&bump, pins, images, pip)?;
+    still_at(ports, pr, &head)?;
     Ok(DepsVerified { pr: pr.clone(), head, facts: checked.facts(&bump) })
 }
 
@@ -298,15 +299,38 @@ fn real_head(ports: &DepsPorts<'_>, pr: &PrNumber, sha: &HeadArg) -> Result<Comm
     CommitId::parse(real).map_err(|_| unreadable())
 }
 
+/// Reads the head again and refuses when it is not `head`. The bash reads the head once and
+/// classifies and checks whatever the pull request holds afterwards, so a push in between got
+/// a receipt for one commit about the content of another. Every stage ends here (decision
+/// `P3C-12`); a head that cannot be read is a head that was not confirmed.
+fn still_at(ports: &DepsPorts<'_>, pr: &PrNumber, head: &CommitId) -> Result<(), DepsRefusal> {
+    let unreadable = || DepsRefusal::HeadUnreadable { pr: pr.clone() };
+    let raw = ports.gh.head(pr).map_err(|_| unreadable())?;
+    let now = captured(&raw);
+    if now.is_empty() {
+        return Err(unreadable());
+    }
+    if now != head.as_str() {
+        return Err(DepsRefusal::HeadMoved {
+            pr: pr.clone(),
+            real_head_8: slice(now, 0, 8),
+            sha_8: head.short().to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn classify(
     config: &DepsConfig,
     ports: &DepsPorts<'_>,
     pr: &PrNumber,
+    head: &CommitId,
 ) -> Result<Bump, DepsRefusal> {
     let raw = ports
         .gh
         .diff(pr)
         .map_err(|failure| DepsRefusal::DiffUnreadable { pr: pr.clone(), diff: failure.output })?;
+    still_at(ports, pr, head)?;
     let diff = captured(&raw);
     if diff.is_empty() {
         return Err(DepsRefusal::DiffEmpty { pr: pr.clone() });
@@ -371,7 +395,12 @@ fn unreadable_verdict(stdout: &str) -> DepsRefusal {
     }
 }
 
-fn check_pins(ports: &DepsPorts<'_>, bump: &Bump) -> Result<u64, DepsRefusal> {
+fn check_pins(
+    ports: &DepsPorts<'_>,
+    pr: &PrNumber,
+    head: &CommitId,
+    bump: &Bump,
+) -> Result<u64, DepsRefusal> {
     let mut checked = 0;
     for pin in &bump.pins {
         let repo = ActionRepo::of_action(&pin.action)?;
@@ -381,6 +410,7 @@ fn check_pins(ports: &DepsPorts<'_>, bump: &Bump) -> Result<u64, DepsRefusal> {
         } else {
             check_tag_pin(ports, &repo, &pin.action, &pin.tag, &pin.sha, &pinsha_12)?;
         }
+        still_at(ports, pr, head)?;
         checked += 1;
     }
     Ok(checked)
@@ -507,6 +537,8 @@ fn check_tag_pin(
 fn check_images(
     config: &DepsConfig,
     ports: &DepsPorts<'_>,
+    pr: &PrNumber,
+    head: &CommitId,
     bump: &Bump,
 ) -> Result<u64, DepsRefusal> {
     let mut checked = 0;
@@ -533,13 +565,20 @@ fn check_images(
             tag: image.tag.clone(),
             digest: slice(&image.digest, 7, 19),
         });
+        still_at(ports, pr, head)?;
         checked += 1;
     }
     Ok(checked)
 }
 
 /// Every pip requirement against the release on `PyPI`.
-fn check_pip(config: &DepsConfig, ports: &DepsPorts<'_>, bump: &Bump) -> Result<u64, DepsRefusal> {
+fn check_pip(
+    config: &DepsConfig,
+    ports: &DepsPorts<'_>,
+    pr: &PrNumber,
+    head: &CommitId,
+    bump: &Bump,
+) -> Result<u64, DepsRefusal> {
     let mut checked = 0;
     for package in &bump.pip {
         missing(ports.fs, HelperScript::PypiVerifier, &config.scripts.pypi_verifier)?;
@@ -556,6 +595,7 @@ fn check_pip(config: &DepsConfig, ports: &DepsPorts<'_>, bump: &Bump) -> Result<
             version: package.version.clone(),
             answer: captured(&answer).to_string(),
         });
+        still_at(ports, pr, head)?;
         checked += 1;
     }
     Ok(checked)
@@ -645,6 +685,7 @@ fn check_pip_files(
             merge_base_8: merge_base.short().to_string(),
             real_head_8: head.short().to_string(),
         });
+        still_at(ports, pr, head)?;
     }
     Ok(())
 }
