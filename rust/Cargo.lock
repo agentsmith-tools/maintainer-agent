@@ -161,6 +161,7 @@ version = "0.1.0"
 dependencies = [
  "mx-core",
  "mx-ports",
+ "mx-profile",
  "mx-receipt",
  "mx-sandbox",
  "mx-suite",
