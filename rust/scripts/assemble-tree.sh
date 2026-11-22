@@ -12,9 +12,16 @@
 #
 # DEST must not exist, or must be an empty directory. A PROGRAM is the name of a
 # file under bin/ whose Rust build is a [[bin]] of the workspace under rust/
-# (maintainer-repo, maintainer-doctor, ...), or `run`, whose Rust build replaces
-# lib/run.sh. With no PROGRAM every such program is built and swapped in; a named
-# program that has no Rust build is an error.
+# (maintainer-repo, maintainer-doctor, ...), `run`, whose Rust build replaces
+# lib/run.sh, or one of the five repository checks, whose Rust builds replace the
+# script of the same purpose:
+#   scripts/check_claims.sh          is built from check-claims
+#   scripts/shellcheck-sweep.sh      is built from shellcheck-sweep
+#   scripts/verify-action-pins.sh    is built from verify-action-pins
+#   evals/run-evals.sh               is built from run-evals
+#   tests/containment-probe.sh       is built from containment-probe
+# With no PROGRAM every such program is built and swapped in; a named program that
+# has no Rust build is an error.
 #
 # For each program the script
 #   1. builds it with `cargo build --release --locked --offline`, in the cargo
@@ -23,8 +30,8 @@
 #   3. replaces DEST/bin/NAME (DEST/lib/run.sh for `run`) with a short wrapper that execs that binary
 #      and hands it the wrapper's own path as argv[0], after naming the two
 #      variables the suites' stubs read (CZ_CASE_DIR, BASH_ENV) in
-#      MAINTAINER_CHILD_ENV so the program passes them to its children (`run` passes its whole
-#      environment and gets no such line). The Rust program finds
+#      MAINTAINER_CHILD_ENV so the program passes them to its children (`run` and the
+#      repository checks pass their whole environment and get no such line). The Rust program finds
 #      its tree (lib/, bin/maintainer) from argv[0] the way the bash program
 #      finds it from $0, so a suite that copies the wrapper to another folder
 #      still points at that folder.
@@ -70,14 +77,23 @@ esac
 if [ -n "$(ls -A -- "$dest")" ]; then die "$dest is not empty"; fi
 
 # Which programs have a Rust build: the [[bin]] targets of the workspace whose
-# name is also a file under bin/, and `run`, which stands for lib/run.sh. One line
-# each: `package name path`, where path is the file the wrapper replaces.
+# name is also a file under bin/, `run`, which stands for lib/run.sh, and the five
+# repository checks, each of which stands for one script. One line each:
+# `package name path`, where path is the file the wrapper replaces.
 meta="$(cd "$ws" && cargo metadata --no-deps --format-version 1 --locked --offline 2>&1)"; rc=$?
 [ "$rc" = 0 ] || die "cargo metadata exited $rc: $(tr '\n' ' ' <<<"$meta" | cut -c1-300)"
 listing="$(python3 -I -c '
 import json, os, sys
 root = sys.argv[1]
 meta = json.loads(sys.stdin.read())
+# The repository checks: the binary name and the script it replaces.
+SCRIPTS = {
+    "check-claims": "scripts/check_claims.sh",
+    "shellcheck-sweep": "scripts/shellcheck-sweep.sh",
+    "verify-action-pins": "scripts/verify-action-pins.sh",
+    "run-evals": "evals/run-evals.sh",
+    "containment-probe": "tests/containment-probe.sh",
+}
 rows = []
 for pkg in meta["packages"]:
     for target in pkg["targets"]:
@@ -88,6 +104,8 @@ for pkg in meta["packages"]:
             rows.append((pkg["name"], name, "bin/" + name))
         elif name == "run" and os.path.isfile(os.path.join(root, "lib", "run.sh")):
             rows.append((pkg["name"], name, "lib/run.sh"))
+        elif name in SCRIPTS and os.path.isfile(os.path.join(root, SCRIPTS[name])):
+            rows.append((pkg["name"], name, SCRIPTS[name]))
 for pkg, name, rel in sorted(rows):
     print(pkg, name, rel)
 ' "$root" <<<"$meta")"; rc=$?
@@ -143,7 +161,7 @@ for rel in sys.stdin.buffer.read().split(b"\0"):
 ' "$root" < "$list" | sort -u | head -n 5)"; rc=$?
 [ "$rc" = 0 ] || die "could not scan the file list for symlinks"
 [ -z "$bad" ] || die "a tracked symlink stands where a directory is expected, so the copy would write through it: $(tr '\n' ' ' <<<"$bad")"
-for top in bin lib .rust-bin; do
+for top in bin lib scripts evals tests .rust-bin; do
     if [ -L "$root/$top" ]; then die "$top is a symlink in the source tree; refusing to copy it"; fi
 done
 tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$dest" -xf -
@@ -156,9 +174,10 @@ if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree fail
 # never followed) before the new one is created with noclobber.
 mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
 real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
-for sub in bin lib .rust-bin; do
-    # lib/ holds a wrapper only when `run` is built, so a tree with no lib/ is fine for the others.
-    if [ "$sub" = lib ] && [ ! -e "$dest/lib" ] && [ ! -L "$dest/lib" ]; then continue; fi
+for sub in bin lib scripts evals tests .rust-bin; do
+    # lib/, scripts/, evals/ and tests/ hold a wrapper only when `run` or a check is built, so a
+    # tree with none of them is fine for the others.
+    if [ "$sub" != bin ] && [ "$sub" != .rust-bin ] && [ ! -e "$dest/$sub" ] && [ ! -L "$dest/$sub" ]; then continue; fi
     if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
     real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
     case "$real_sub/" in "$real_dest"/*) ;; *) die "$dest/$sub resolves outside $dest" ;; esac
@@ -177,9 +196,9 @@ for i in "${!names[@]}"; do
         printf '# argv[0] is this file, so the program finds lib/ and bin/maintainer beside it.\n'
         # The suites run the program under `env -i` with stubs that read
         # CZ_CASE_DIR and BASH_ENV. A child of the Rust program gets an
-        # allowlisted environment, and MAINTAINER_CHILD_ENV names two more. `run`
-        # passes its whole environment on, as lib/run.sh does, so it needs neither.
-        if [ "$rel" != "lib/run.sh" ]; then
+        # allowlisted environment, and MAINTAINER_CHILD_ENV names two more. `run` and the
+        # repository checks pass their whole environment on, as the scripts do, so they need neither.
+        if [ "${rel#bin/}" != "$rel" ]; then
             # shellcheck disable=SC2016  # the wrapper expands these when it runs
             printf 'export MAINTAINER_CHILD_ENV="${MAINTAINER_CHILD_ENV:+$MAINTAINER_CHILD_ENV }CZ_CASE_DIR BASH_ENV"\n'
         fi

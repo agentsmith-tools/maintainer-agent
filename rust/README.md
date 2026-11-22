@@ -39,9 +39,24 @@ The doctor writes each finding and each diagnostic the moment it is made, so a c
 
 The plan names the opencode key only when the backend read it from `~/.groq-staging-key`, and then only in the environment of the opencode stage. A key the run inherited is the executor's to pass on. No argument, export, log note or `Debug` print holds a key. A path that is not UTF-8 cannot be an argument or an environment value, so a plan that needs one refuses.
 
+## mx-checks
+
+`crates/mx-checks` is the five repository checks in Rust: `check-claims` (`scripts/check_claims.sh`), `shellcheck-sweep` (`scripts/shellcheck-sweep.sh`), `verify-action-pins` (`scripts/verify-action-pins.sh`), `run-evals` (`evals/run-evals.sh`) and `containment-probe` (`tests/containment-probe.sh`). Each is a library function over facts read through two ports, the process port of `mx-ports` and the `Host` trait of this crate (the file system and `command -v`), plus a binary of three lines. `scripts/with-hook-lock.sh` and `.githooks/pre-commit` stay bash: the gate that tests the Rust build must not depend on it.
+
+The sweep keeps the memory cap: the program waits for `MemAvailable`, probes `systemd-run --user --scope`, and runs each linter as `systemd-run ... -p MemoryMax=12G -p MemorySwapMax=0 nice -n 15 shellcheck --severity=warning FILE`. A test pins that chain, in that order, for the probe and for every run.
+
+Its tests are in `crates/mx-checks/tests/`:
+
+- `claims.rs`, `pins.rs`, `sweep.rs`, `evals.rs` and `probe.rs`: each program over fakes (`FakeProc`, `FakeHost`, `FakeTagRefs`), named for the behaviour.
+- `blackbox.sh`: the characterization cases `tests/characterization/checks-*.sh` run against an assembled tree three times, with the case count compared to the bash tree; `--with-suite` also runs `tests/run-tests.sh`.
+- `differential.sh` and `differential.py`: generated sandboxes run through the bash script and the Rust binary, comparing standard output, standard error, the exit code, the order and environment of every external call and the state tree, over 350 seeded comparisons plus the explained ones.
+- `mutants.py`: the mutation table. Each mutant changes one line in a copy of the tree and must turn a named test red.
+
+Where a script does something wrong that nothing asked to change, the port keeps it, a characterization case pins it, and the module docs list it under "Found, not fixed". The `P4B-n` decisions are in `lib.rs` and in each module.
+
 ## Running the bash suites against a Rust program
 
-`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), and `run`, which stands for `lib/run.sh`, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
+`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), `run`, which stands for `lib/run.sh`, and the five checks (`check-claims`, `shellcheck-sweep`, `verify-action-pins`, `run-evals`, `containment-probe`), each standing for its script, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
 
     rust/scripts/assemble-tree.sh /scratch/tree
     MX_TREE=/scratch/tree bash tests/run-characterization.sh repo-prune.sh repo-release.sh repo-fixup.sh

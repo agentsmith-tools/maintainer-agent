@@ -1,0 +1,41 @@
+[package]
+name = "mx-checks"
+version = "0.1.0"
+description = "The repository checks in Rust: check-claims, shellcheck-sweep, verify-action-pins, run-evals and containment-probe, with the oracle that proves them equal to the bash scripts"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mx_checks"
+path = "src/lib.rs"
+
+[[bin]]
+name = "check-claims"
+path = "src/bin/check-claims.rs"
+
+[[bin]]
+name = "shellcheck-sweep"
+path = "src/bin/shellcheck-sweep.rs"
+
+[[bin]]
+name = "verify-action-pins"
+path = "src/bin/verify-action-pins.rs"
+
+[[bin]]
+name = "run-evals"
+path = "src/bin/run-evals.rs"
+
+[[bin]]
+name = "containment-probe"
+path = "src/bin/containment-probe.rs"
+
+[dependencies]
+mx-core.workspace = true
+mx-ports.workspace = true
+mx-profile.workspace = true
+signal-hook.workspace = true
+
+[lints]
+workspace = true
