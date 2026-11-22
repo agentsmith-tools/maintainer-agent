@@ -295,13 +295,28 @@ fn with_gh<T>(rig: &Rig, body: impl FnOnce(&Ctx<'_>) -> T) -> T {
 fn the_real_adapter_asks_gh_api_with_the_scripts_arguments() {
     use mx_checks::pins::TagRefs;
     let rig = Rig::new();
-    rig.always(&["gh", "api", "repos/a/b/git/ref/tags/v1", "--jq", ".object.sha"], ok("OBJ\n"));
+    rig.always(
+        &["gh", "api", "repos/a/b/git/ref/tags/v1", "--jq", ".object.sha"],
+        ok("1111111111111111111111111111111111111111\n"),
+    );
     rig.always(&["gh", "api", "repos/a/b/git/ref/tags/v1", "--jq", ".object.type"], ok("tag\n"));
-    rig.always(&["gh", "api", "repos/a/b/git/tags/OBJ", "--jq", ".object.sha"], ok("COMMIT\n"));
+    rig.always(
+        &[
+            "gh",
+            "api",
+            "repos/a/b/git/tags/1111111111111111111111111111111111111111",
+            "--jq",
+            ".object.sha",
+        ],
+        ok("COMMIT\n"),
+    );
     with_gh(&rig, |ctx| {
-        assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"v1"), Some(b"OBJ".to_vec()));
+        assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"v1"), Some(vec![b'1'; 40]));
         assert_eq!(GhTagRefs.ref_type(ctx, b"a/b", b"v1"), b"tag");
-        assert_eq!(GhTagRefs.tag_object_sha(ctx, b"a/b", b"OBJ"), b"COMMIT");
+        assert_eq!(
+            GhTagRefs.tag_object_sha(ctx, b"a/b", b"1111111111111111111111111111111111111111"),
+            b"COMMIT"
+        );
     });
     assert_eq!(rig.calls().len(), 3);
 }
@@ -316,12 +331,21 @@ fn the_real_adapter_reads_a_failed_first_call_as_none_and_uses_the_last_calls_ou
         exited(1, "{\"message\":\"Not Found\"}\n", "HTTP 404"),
     );
     rig.always(
-        &["gh", "api", "repos/a/b/git/tags/OBJ", "--jq", ".object.sha"],
+        &[
+            "gh",
+            "api",
+            "repos/a/b/git/tags/1111111111111111111111111111111111111111",
+            "--jq",
+            ".object.sha",
+        ],
         exited(1, "partial\n", "boom"),
     );
     with_gh(&rig, |ctx| {
         assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"v9"), None);
-        assert_eq!(GhTagRefs.tag_object_sha(ctx, b"a/b", b"OBJ"), b"partial");
+        assert_eq!(
+            GhTagRefs.tag_object_sha(ctx, b"a/b", b"1111111111111111111111111111111111111111"),
+            b"partial"
+        );
     });
 }
 
@@ -349,4 +373,120 @@ fn a_workflow_with_a_nul_byte_is_binary_to_grep_and_contributes_no_line() {
     assert_eq!(outcome.code, 0, "{outcome:?}");
     assert_eq!(outcome.out_lines(), [ok_line("acme/one", A, "v1"), ALL_OK.to_string()]);
     assert_eq!(outcome.err, "");
+}
+
+#[test]
+fn a_hostile_repository_or_tag_is_refused_by_name_and_gh_is_never_asked() {
+    let rig = Rig::new();
+    workflow(
+        &rig,
+        "w.yml",
+        &[
+            format!("      - uses: ../../orgs/victim@{A} # v1"),
+            format!("      - uses: acme/one@{A} # v1?x=1"),
+            format!("      - uses: acme/two@{A} # v1#"),
+            format!("      - uses: acme/three@{A} # ..%2f..%2fuser"),
+            format!("      - uses: acme/four@{A} # v1%2e"),
+            format!("      - uses: acme/five@{A} # a..b"),
+            format!("      - uses: soloname@{A} # v1"),
+        ],
+    );
+    let refs = FakeTagRefs::new();
+    let outcome = run(&rig, &refs, &[]);
+    assert_eq!(outcome.code, 1, "{outcome:?}");
+    assert!(refs.calls().is_empty(), "{:?}", refs.calls());
+    let refused: Vec<&str> =
+        outcome.out_lines().into_iter().filter(|line| line.contains("cannot be checked")).collect();
+    assert_eq!(refused.len(), 7, "{}", outcome.out);
+    assert!(refused.iter().any(|line| line.ends_with("claims v1, which cannot be checked: the repository is not OWNER/NAME of letters, digits, _, . and -")), "{refused:?}");
+    assert!(
+        refused.iter().any(|line| line
+            .ends_with("claims v1?x=1, which cannot be checked: the tag holds ?, # or %")),
+        "{refused:?}"
+    );
+    assert!(
+        refused.iter().any(|line| line
+            .ends_with("claims ..%2f..%2fuser, which cannot be checked: the tag holds ..")),
+        "{refused:?}"
+    );
+    assert!(
+        refused.iter().any(|line| line
+            .ends_with("claims v1, which cannot be checked: the repository is not OWNER/NAME")),
+        "{refused:?}"
+    );
+    assert_eq!(outcome.err, format!("{SOME_BAD}\n"));
+}
+
+#[test]
+fn a_refused_pin_does_not_stop_the_good_pin_beside_it_from_being_checked() {
+    let rig = Rig::new();
+    workflow(
+        &rig,
+        "w.yml",
+        &[
+            format!("      - uses: acme/bad@{A} # v1?x"),
+            format!("      - uses: acme/good@{A} # v1"),
+        ],
+    );
+    let refs = FakeTagRefs::new().lightweight("acme/good", "v1", A);
+    let outcome = run(&rig, &refs, &[]);
+    assert_eq!(outcome.code, 1);
+    assert!(outcome.out.contains(&ok_line("acme/good", A, "v1")), "{}", outcome.out);
+    assert_eq!(refs.calls(), ["sha acme/good v1", "type acme/good v1"]);
+}
+
+#[test]
+fn a_branch_claim_makes_no_call_so_a_strange_repository_is_not_refused_for_it() {
+    let rig = Rig::new();
+    workflow(&rig, "w.yml", &[format!("      - uses: ../x@{A} # main")]);
+    let refs = FakeTagRefs::new();
+    let outcome = run(&rig, &refs, &[]);
+    assert_eq!(outcome.code, 0, "{outcome:?}");
+    assert!(refs.calls().is_empty());
+}
+
+#[test]
+fn a_control_character_in_a_refused_pin_shows_as_a_question_mark() {
+    let rig = Rig::new();
+    workflow(&rig, "w.yml", &[format!("      - uses: acme/one@{A} # v1\u{1b}[31m")]);
+    let outcome = run(&rig, &FakeTagRefs::new(), &[]);
+    assert_eq!(outcome.code, 1);
+    assert!(!outcome.out.contains('\u{1b}'), "{:?}", outcome.out);
+    assert!(
+        outcome
+            .out
+            .contains("claims v1?[31m, which cannot be checked: the tag holds a control character"),
+        "{}",
+        outcome.out
+    );
+}
+
+#[test]
+fn the_real_adapter_percent_encodes_the_tag_and_refuses_what_could_steer_the_path_without_a_call() {
+    use mx_checks::pins::TagRefs;
+    let rig = Rig::new();
+    rig.always(
+        &["gh", "api", "repos/a/b/git/ref/tags/caf%C3%A9%5Cx%22", "--jq", ".object.sha"],
+        ok("OBJ\n"),
+    );
+    rig.always(
+        &["gh", "api", "repos/a/b/git/ref/tags/release/1+x;y", "--jq", ".object.sha"],
+        ok("PLAIN\n"),
+    );
+    with_gh(&rig, |ctx| {
+        assert_eq!(
+            GhTagRefs.ref_sha(ctx, b"a/b", "caf\u{e9}\\x\"".as_bytes()),
+            Some(b"OBJ".to_vec())
+        );
+        assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"release/1+x;y"), Some(b"PLAIN".to_vec()));
+        // None of these reaches the process port: a call would panic on the unscripted argument vector.
+        assert_eq!(GhTagRefs.ref_sha(ctx, b"../..", b"v1"), None);
+        assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"v1?x=1"), None);
+        assert_eq!(GhTagRefs.ref_sha(ctx, b"a/b", b"../x"), None);
+        assert_eq!(GhTagRefs.ref_type(ctx, b"a/b", b"v1%2e"), b"");
+        assert_eq!(GhTagRefs.tag_object_sha(ctx, b"../..", &[b'1'; 40]), b"");
+        assert_eq!(GhTagRefs.tag_object_sha(ctx, b"a/b", b"../../x"), b"");
+        assert_eq!(GhTagRefs.tag_object_sha(ctx, b"a/b", b"OBJ"), b"");
+    });
+    assert_eq!(rig.calls().len(), 2);
 }

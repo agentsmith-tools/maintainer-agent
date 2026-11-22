@@ -14,6 +14,14 @@
 //! - `P4B-6`: lines and names sort by bytes, the order the script gets under `LC_ALL=C`.
 //! - `P4B-14`: a workflow file with a NUL byte in its first 32 KiB is binary to `grep` and contributes no
 //!   line, as it does under GNU `grep` and under `ugrep`.
+//! - `P4B-16` (a fix): the repository and the tag of a pin become the path of `gh api`, and the script
+//!   sends them as they are, so `../../orgs/x@SHA # v1` asks for `repos/../../git/ref/tags/v1` and a tag
+//!   of `v1?x=1` or `..%2f..%2fuser` changes the request. A pin whose repository is not `OWNER/NAME`
+//!   (letters, digits, `_`, `.`, `-`, neither part `.` or `..`) or whose tag holds `..`, `?`, `#`, `%`, a
+//!   control character or an empty path segment is refused without a call, with a named line and exit 1
+//!   ([`lookup_refusal`]). The tag is percent-encoded where it is not a URL path character
+//!   ([`encode_tag`]), and a tag object id that GitHub answers is asked about only when it is
+//!   hexadecimal ([`is_object_id`]).
 //! - A comment that is not UTF-8 reaches `gh` with U+FFFD in its place (the process port takes text).
 //!
 //! # Found, not fixed
@@ -61,28 +69,36 @@ impl GhTagRefs {
     fn jq(ctx: &Ctx<'_>, path: &str, filter: &str) -> crate::ctx::Done {
         ctx.exec(&Call::new(["gh", "api", path, "--jq", filter]))
     }
+
+    /// The API path of a tag's ref, or `None` when the repository or the tag could steer the path
+    /// (decision `P4B-16`). The caller has refused such a pin already; this is the second lock.
+    fn ref_path(repo: &[u8], tag: &[u8]) -> Option<String> {
+        if lookup_refusal(repo, tag).is_some() {
+            return None;
+        }
+        Some(format!("repos/{}/git/ref/tags/{}", text(repo), encode_tag(tag)))
+    }
 }
 
 impl TagRefs for GhTagRefs {
     fn ref_sha(&self, ctx: &Ctx<'_>, repo: &[u8], tag: &[u8]) -> Option<Vec<u8>> {
-        let done = Self::jq(
-            ctx,
-            &format!("repos/{}/git/ref/tags/{}", text(repo), text(tag)),
-            ".object.sha",
-        );
+        let path = Self::ref_path(repo, tag)?;
+        let done = Self::jq(ctx, &path, ".object.sha");
         done.ok().then(|| shell::command_substitution(&done.stdout))
     }
 
     fn ref_type(&self, ctx: &Ctx<'_>, repo: &[u8], tag: &[u8]) -> Vec<u8> {
-        let done = Self::jq(
-            ctx,
-            &format!("repos/{}/git/ref/tags/{}", text(repo), text(tag)),
-            ".object.type",
-        );
+        let Some(path) = Self::ref_path(repo, tag) else { return Vec::new() };
+        let done = Self::jq(ctx, &path, ".object.type");
         shell::command_substitution(&done.stdout)
     }
 
     fn tag_object_sha(&self, ctx: &Ctx<'_>, repo: &[u8], object: &[u8]) -> Vec<u8> {
+        // The object id comes from GitHub's answer, and it too becomes part of a path: only a
+        // hexadecimal id is asked about.
+        if lookup_refusal(repo, b"x").is_some() || !is_object_id(object) {
+            return Vec::new();
+        }
         let done = Self::jq(
             ctx,
             &format!("repos/{}/git/tags/{}", text(repo), text(object)),
@@ -90,6 +106,69 @@ impl TagRefs for GhTagRefs {
         );
         shell::command_substitution(&done.stdout)
     }
+}
+
+/// Why a pin cannot be looked up on GitHub, or `None` when it can (decision `P4B-16`).
+///
+/// The repository and the tag come from the text of a workflow file, and they become a path of
+/// `gh api`. The script sends them as they are, so `uses: ../../orgs/x@SHA # v1` asks for
+/// `repos/../../git/ref/tags/v1`, and a tag of `v1?x=1` or `..%2f..%2fuser` changes the request
+/// that is made. Here the repository must be `OWNER/NAME` of letters, digits, `_`, `.` and `-`
+/// with neither part `.` or `..`, and the tag must hold no `..`, `?`, `#`, `%`, control character or
+/// empty path segment (no leading, trailing or doubled `/`).
+#[must_use]
+pub fn lookup_refusal(repo: &[u8], tag: &[u8]) -> Option<&'static str> {
+    let name_byte = |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-');
+    let mut parts = repo.split(|byte| *byte == b'/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Some("the repository is not OWNER/NAME");
+    };
+    for part in [owner, name] {
+        if part.is_empty() || part == b"." || part == b".." || !part.iter().all(name_byte) {
+            return Some("the repository is not OWNER/NAME of letters, digits, _, . and -");
+        }
+    }
+    if tag.is_empty() {
+        return Some("the tag is empty");
+    }
+    if shell::contains(tag, b"..") {
+        return Some("the tag holds ..");
+    }
+    if tag.iter().any(|byte| matches!(byte, b'?' | b'#' | b'%')) {
+        return Some("the tag holds ?, # or %");
+    }
+    if tag.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {
+        return Some("the tag holds a control character");
+    }
+    if tag.starts_with(b"/") || tag.ends_with(b"/") || shell::contains(tag, b"//") {
+        return Some("the tag holds an empty path segment");
+    }
+    None
+}
+
+/// The tag as it goes into the path of a request: every byte that is not a letter, a digit or one
+/// of ``-._~!$&'()*+,;=:@/`` (the characters a URL path takes as they are) is percent-encoded.
+#[must_use]
+pub fn encode_tag(tag: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in tag {
+        if byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(byte) {
+            out.push(char::from(*byte));
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push('%');
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    out
+}
+
+/// A git object id as GitHub prints it: 40 to 64 lower-case hexadecimal digits.
+#[must_use]
+pub fn is_object_id(object: &[u8]) -> bool {
+    (40..=64).contains(&object.len())
+        && object.iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// What a [`FakeTagRefs`] was told about one tag.
@@ -342,6 +421,8 @@ pub enum Verdict {
     Ok,
     /// The comment is a tag on another commit.
     Mismatch { real: Vec<u8> },
+    /// The pin names a repository or a tag that could steer the API path, so GitHub was not asked.
+    Refused(&'static str),
 }
 
 /// `deref`: the commit a tag names, as GitHub says it. Empty when it could not be had.
@@ -356,6 +437,9 @@ pub fn judge(refs: &dyn TagRefs, ctx: &Ctx<'_>, pin: &Pin) -> Verdict {
     if pin.claim == b"main" || pin.claim == b"master" {
         return Verdict::Branch;
     }
+    if let Some(reason) = lookup_refusal(&pin.repo, &pin.claim) {
+        return Verdict::Refused(reason);
+    }
     let real = deref(refs, ctx, pin);
     if real.is_empty() {
         Verdict::NotATag
@@ -364,6 +448,11 @@ pub fn judge(refs: &dyn TagRefs, ctx: &Ctx<'_>, pin: &Pin) -> Verdict {
     } else {
         Verdict::Mismatch { real }
     }
+}
+
+/// Text for a terminal: a control byte (a hostile workflow may hold an escape sequence) shows as `?`.
+fn printable(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(|byte| if *byte < 0x20 || *byte == 0x7f { b'?' } else { *byte }).collect()
 }
 
 /// The line the script prints for a pin, without its newline, and whether it counts as a failure.
@@ -388,6 +477,15 @@ pub fn render(pin: &Pin, verdict: &Verdict) -> (Vec<u8>, bool) {
             line.extend_from_slice(&pin.claim);
             line.extend_from_slice(b", which is not a tag in ");
             line.extend_from_slice(&pin.repo);
+            (line, true)
+        }
+        Verdict::Refused(reason) => {
+            line.extend_from_slice(b"  FAIL    ");
+            line.extend_from_slice(&shell::pad_right(&printable(&pin.action), 46));
+            line.extend_from_slice(b" claims ");
+            line.extend_from_slice(&printable(&pin.claim));
+            line.extend_from_slice(b", which cannot be checked: ");
+            line.extend_from_slice(reason.as_bytes());
             (line, true)
         }
         Verdict::Ok => {
@@ -746,6 +844,126 @@ mod tests {
         assert!(refs.calls().is_empty());
         let near = FakeTagRefs::new().missing("a/b", "mainline");
         assert_eq!(judged(&near, &format!("a/b@{A} # mainline")), Verdict::NotATag);
+    }
+
+    #[test]
+    fn real_repositories_and_tags_are_not_refused() {
+        for repo in [
+            "actions/checkout",
+            "a/b",
+            "Alpha/b",
+            "o/r",
+            "owner/repo.name",
+            "my-org/my_repo",
+            "a/b..c",
+            "github/codeql-action",
+        ] {
+            assert_eq!(lookup_refusal(repo.as_bytes(), b"v1"), None, "{repo}");
+        }
+        for tag in [
+            "v1",
+            "v1.2.3",
+            "release/1",
+            "v1+x",
+            "v1.0+x;y",
+            "mainline",
+            "v1.0.0-rc.1",
+            "caf\u{e9}",
+        ] {
+            assert_eq!(lookup_refusal(b"a/b", tag.as_bytes()), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_repository_that_is_not_owner_slash_name_is_refused() {
+        for repo in [
+            "",
+            "a",
+            "a/b/c",
+            "../..",
+            "a/..",
+            "./b",
+            "a/.",
+            "/b",
+            "a/",
+            "a//b",
+            "a%2fb/c",
+            "a/b?x",
+            "a/b#f",
+            "a b/c",
+            "a/b\u{1}",
+            "a\\b/c",
+            "caf\u{e9}/b",
+        ] {
+            assert!(lookup_refusal(repo.as_bytes(), b"v1").is_some(), "{repo:?}");
+        }
+    }
+
+    #[test]
+    fn a_tag_that_could_steer_the_path_is_refused() {
+        for tag in [
+            "", "..", "v1..2", "../x", "x/..", "..%2f", "v1?x=1", "v1#f", "v1%2e", "/v1", "v1/",
+            "a//b", "v1\u{1}", "v1\u{7f}", "v1\n",
+        ] {
+            assert!(lookup_refusal(b"a/b", tag.as_bytes()).is_some(), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn each_refusal_names_its_reason() {
+        assert_eq!(lookup_refusal(b"a", b"v1"), Some("the repository is not OWNER/NAME"));
+        assert_eq!(
+            lookup_refusal(b"a/..", b"v1"),
+            Some("the repository is not OWNER/NAME of letters, digits, _, . and -")
+        );
+        assert_eq!(lookup_refusal(b"a/b", b""), Some("the tag is empty"));
+        assert_eq!(lookup_refusal(b"a/b", b"v1..2"), Some("the tag holds .."));
+        assert_eq!(lookup_refusal(b"a/b", b"v1?"), Some("the tag holds ?, # or %"));
+        assert_eq!(lookup_refusal(b"a/b", b"v1\x01"), Some("the tag holds a control character"));
+        assert_eq!(lookup_refusal(b"a/b", b"/v1"), Some("the tag holds an empty path segment"));
+    }
+
+    #[test]
+    fn encode_tag_keeps_path_characters_and_encodes_the_rest() {
+        assert_eq!(encode_tag(b"v1.0+x;y"), "v1.0+x;y");
+        assert_eq!(encode_tag(b"release/1"), "release/1");
+        assert_eq!(encode_tag(b"a:b@c~d"), "a:b@c~d");
+        assert_eq!(encode_tag("caf\u{e9}".as_bytes()), "caf%C3%A9");
+        assert_eq!(encode_tag(b"a\\b\"c<d>e f"), "a%5Cb%22c%3Cd%3Ee%20f");
+        assert_eq!(encode_tag(b"a`b{c|d}e^f"), "a%60b%7Bc%7Cd%7De%5Ef");
+    }
+
+    #[test]
+    fn only_a_hexadecimal_id_of_a_plausible_length_is_an_object_id() {
+        assert!(is_object_id(&[b'a'; 40]));
+        assert!(is_object_id(&[b'0'; 64]));
+        assert!(!is_object_id(&[b'a'; 39]));
+        assert!(!is_object_id(&[b'a'; 65]));
+        assert!(!is_object_id(&[b'A'; 40]));
+        assert!(!is_object_id(b"../../x"));
+        assert!(!is_object_id(b""));
+    }
+
+    #[test]
+    fn a_refused_pin_is_judged_without_asking_the_port() {
+        let refs = FakeTagRefs::new();
+        assert_eq!(
+            judged(&refs, &format!("../../x@{A} # v1")),
+            Verdict::Refused("the repository is not OWNER/NAME of letters, digits, _, . and -")
+        );
+        assert_eq!(
+            judged(&refs, &format!("a/b@{A} # v1?x=1")),
+            Verdict::Refused("the tag holds ?, # or %")
+        );
+        assert!(refs.calls().is_empty());
+    }
+
+    #[test]
+    fn a_refused_pin_renders_a_failing_line_with_control_bytes_shown_as_question_marks() {
+        let pin = Pin::parse(format!("a/b@{A} # v\u{1b}[1").as_bytes());
+        let (line, failed) = render(&pin, &Verdict::Refused("the tag holds a control character"));
+        assert!(failed);
+        assert_eq!(line, format!("  FAIL    {:<46} claims v?[1, which cannot be checked: the tag holds a control character", "a/b").into_bytes());
     }
 
     #[test]

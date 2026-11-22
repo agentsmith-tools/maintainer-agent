@@ -38,6 +38,9 @@
 //! - `P4B-13`: a temporary file or directory that cannot be made ends the program with one line and exit 1,
 //!   where the script goes on and fails in a cascade of shell messages.
 //!
+//! The decisions only one program applies (`P4B-2`, `P4B-14`, `P4B-16` in `pins`, for instance) are in that
+//! program's module.
+//!
 //! Not reproduced, and said so where it matters: a count with a leading zero is octal in the shell's
 //! arithmetic (here decimal); an argument that is not UTF-8 reaches a child with U+FFFD in its place; a child
 //! starts with an empty standard input where the shell's child inherits the caller's; a missing coreutil

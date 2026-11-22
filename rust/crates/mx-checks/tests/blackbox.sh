@@ -16,8 +16,11 @@
 #
 # Phase 2 (--with-suite). tests/run-tests.sh runs against the bash tree and against the Rust tree with
 # MX_SKIP_SOURCE_COUPLED=1 (the Rust tree holds wrappers where the cases grep the text of a script).
-# The cases that fail on the Rust tree and pass on the bash tree are listed, and each must be a case that
-# reads the text of one of the five scripts.
+# Run it with MX_SCRATCH outside $HOME (for instance /tmp/mx): the suite greps the tree for the user name,
+# and the wrappers of the Rust tree hold the tree's own path.
+# The bash tree must pass every case. A case that fails only on the Rust tree is a difference, except the one
+# whose reason is checked: the suite greps the tree for the user name, and a Rust binary holds the toolchain's
+# source paths (see the code). Anything else makes the run fail.
 #
 # Exit 0 when every check holds.
 set -uo pipefail
@@ -95,8 +98,9 @@ if [ "$with_suite" = 1 ]; then
     ( cd "$tree" && git init -q -b main && git add -A && git -c user.name=blackbox -c user.email=blackbox@example.invalid commit -q -m tree ) \
         || { echo "blackbox: could not make the Rust tree a git checkout" >&2; exit 2; }
     bashlog="$scratch/suite-bash.log"; rustlog="$scratch/suite-rust.log"
-    MX_TREE="$root" bash "$root/tests/run-tests.sh" > "$bashlog" 2>&1; brc=$?
-    MX_TREE="$tree" MX_SKIP_SOURCE_COUPLED=1 bash "$root/tests/run-tests.sh" > "$rustlog" 2>&1; rrc=$?
+    suite="${BLACKBOX_SUITE:-$root/tests/run-tests.sh}"
+    MX_TREE="$root" bash "$suite" > "$bashlog" 2>&1; brc=$?
+    MX_TREE="$tree" MX_SKIP_SOURCE_COUPLED=1 bash "$suite" > "$rustlog" 2>&1; rrc=$?
     say "run-tests.sh: bash tree exit $brc, Rust tree exit $rrc"
     LC_ALL=C grep -E '^  FAIL  ' "$bashlog" | LC_ALL=C sort -u > "$scratch/fail-bash.txt"
     LC_ALL=C grep -E '^  FAIL  ' "$rustlog" | LC_ALL=C sort -u > "$scratch/fail-rust.txt"
@@ -106,6 +110,22 @@ if [ "$with_suite" = 1 ]; then
     n="$(wc -l < "$scratch/only-rust.txt" | tr -d ' ')"
     say "cases that fail only on the Rust tree: $n"
     cat "$scratch/only-rust.txt"
+    [ "$brc" = 0 ] && [ -s "$bashlog" ] || bad "the suite does not pass on the bash tree (exit $brc)"
+    # One case may fail only on the Rust tree: the suite greps the whole tree for the user name, and a Rust
+    # binary holds the toolchain's source paths (std's panic locations) under $HOME. The reason is checked, not
+    # assumed: the grep must find the name in .rust-bin and nowhere else. Any other case is a difference.
+    leak='  FAIL  a home path leaked into the repository'
+    others="$(LC_ALL=C grep -vxF "$leak" "$scratch/only-rust.txt")"
+    [ -z "$others" ] || bad "cases fail only on the Rust tree and have no recorded reason: $others"
+    if LC_ALL=C grep -qxF "$leak" "$scratch/only-rust.txt"; then
+        user="${HOME##*/}"
+        outside="$(cd "$tree" && LC_ALL=C grep -rIl -e "$user" --exclude-dir=.git --exclude-dir=.rust-bin .)"; grc=$?
+        { [ "$grc" = 0 ] || [ "$grc" = 1 ]; } || bad "could not search the Rust tree for the user name (grep exit $grc)"
+        [ -z "$outside" ] || bad "the user name is in the Rust tree outside .rust-bin (the wrappers hold the tree's own path, so MX_SCRATCH must be outside \$HOME for --with-suite): $outside"
+        inside="$(cd "$tree" && LC_ALL=C grep -rl -e "$user" .rust-bin | wc -l | tr -d ' ')"
+        [ "${inside:-0}" -gt 0 ] || bad "the leak case failed on the Rust tree and .rust-bin does not hold the user name: the reason is not the binaries"
+        [ "$fail" = 0 ] && say "the home-path case: the user name is in $inside binaries of .rust-bin (toolchain source paths) and in no other file"
+    fi
     tail -3 "$bashlog" | sed 's/^/bash tree: /'
     tail -3 "$rustlog" | sed 's/^/Rust tree: /'
 fi

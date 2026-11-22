@@ -808,6 +808,50 @@ def explained_cases(seed):
     cases.append(("explained-sweep-glob-expansion", sweep_glob,
                   lambda r: "shellcheck --severity=warning gx.sh" in r["calls"] and "checking 3 scripts" in r["stdout"],
                   lambda r: "gx.sh" not in r["calls"] and "checking 2 scripts" in r["stdout"]))
+
+    # P4B-16: a repository or tag taken from workflow text steers the path of `gh api`. The bash sends it
+    # as written (the stub answers that path, so the pin verifies); the port refuses before any call.
+    # A `#` cannot reach a tag (the claim is the text after the last `#`), so it has no case here.
+    def pins_hostile(action, tag, ask_paths):
+        def build(sb, tree_src):
+            prog = copy_program(sb, tree_src, "scripts/verify-action-pins.sh")
+            sb.stub("gh", GH_STUB)
+            sb.fail_unplanned("podman", "docker")
+            sha = SHAS[0]
+            sb.write(".github/workflows/w.yml", b"      - uses: " + action + b"@" + sha.encode() + b" # " + tag + b"\n")
+            with open(os.path.join(sb.path, "answers"), "w") as f:
+                for path in ask_paths:
+                    f.write("%s\x1f.object.sha\x1f0\x1f%s\n" % (path, sha))
+                    f.write("%s\x1f.object.type\x1f0\x1fcommit\n" % path)
+            spec = Spec(prog)
+            spec.rust_name = "verify-action-pins"
+            return spec
+        return build
+
+    hostile = [
+        ("repo-dotdot", b"o/..", b"v1", ["repos/o/../git/ref/tags/v1"]),
+        ("repo-dots", b"../..", b"v1", ["repos/../../git/ref/tags/v1"]),
+        ("repo-percent", b"o/r%2e", b"v1", ["repos/o/r%2e/git/ref/tags/v1"]),
+        ("tag-query", b"o/r", b"v1?x=1", ["repos/o/r/git/ref/tags/v1?x=1"]),
+        ("tag-percent", b"o/r", b"v%41", ["repos/o/r/git/ref/tags/v%41"]),
+        ("tag-dotdot-encoded", b"o/r", b"..%2f..%2fuser", ["repos/o/r/git/ref/tags/..%2f..%2fuser"]),
+        ("tag-dotdot", b"o/r", b"a/../b", ["repos/o/r/git/ref/tags/a/../b"]),
+        ("tag-leading-slash", b"o/r", b"/v1", ["repos/o/r/git/ref/tags//v1"]),
+        ("tag-control", b"o/r", b"v1\x01", ["repos/o/r/git/ref/tags/v1\x01"]),
+    ]
+    for label, action, tag, paths in hostile:
+        cases.append(("explained-pins-hostile-%s" % label, pins_hostile(action, tag, paths),
+                      lambda r: "gh api " in r["calls"] and r["rc"] == "0" and "cannot be checked" not in r["stdout"],
+                      lambda r: "gh api" not in r["calls"] and "cannot be checked" in r["stdout"] and r["rc"] == "1"))
+
+    # P4B-16: a tag with a byte a URL path does not take is percent-encoded; the pin still verifies.
+    def pins_encoded():
+        raw, enc = "repos/o/r/git/ref/tags/v1{x}", "repos/o/r/git/ref/tags/v1%7Bx%7D"
+        return pins_hostile(b"o/r", b"v1{x}", [raw, enc])
+
+    cases.append(("explained-pins-tag-encoded", pins_encoded(),
+                  lambda r: "gh api repos/o/r/git/ref/tags/v1\\{x\\} " in r["calls"] and r["rc"] == "0",
+                  lambda r: "gh api repos/o/r/git/ref/tags/v1%7Bx%7D " in r["calls"] and "v1\\{x" not in r["calls"] and r["rc"] == "0"))
     return cases
 
 

@@ -45,6 +45,8 @@ The plan names the opencode key only when the backend read it from `~/.groq-stag
 
 The sweep keeps the memory cap: the program waits for `MemAvailable`, probes `systemd-run --user --scope`, and runs each linter as `systemd-run ... -p MemoryMax=12G -p MemorySwapMax=0 nice -n 15 shellcheck --severity=warning FILE`. A test pins that chain, in that order, for the probe and for every run.
 
+`verify-action-pins` is the one program that does not repeat its script on a hostile input (decision `P4B-16`). The script puts the repository and the tag of a pin, text from a workflow file, into the path of `gh api` as they are, so `uses: o/..@SHA # v1` or a tag of `v1?x=1` changes the request. The port refuses such a pin without a call, names it on a `FAIL` line, exits 1, and percent-encodes a tag byte that a URL path does not take. Tests, a differential group of ten explained cases and twenty-two mutants pin it.
+
 Its tests are in `crates/mx-checks/tests/`:
 
 - `claims.rs`, `pins.rs`, `sweep.rs`, `evals.rs` and `probe.rs`: each program over fakes (`FakeProc`, `FakeHost`, `FakeTagRefs`), named for the behaviour.

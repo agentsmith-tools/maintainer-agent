@@ -49,7 +49,7 @@ MUTANTS = [
     # --- pins.rs ---
     ("M09", PN, 'if !text[start..].starts_with(b"uses: ") {', 'if !text[start..].starts_with(b"uses:") {', "a missing space after uses: is accepted in a pin"),
     ("M10", PN, "let sha = text.get(at..at + 40)?;", "let sha = text.get(at..at + 39)?;", "a 39-character SHA is a pin"),
-    ("M11", PN, "matches!(byte, b'0'..=b'9' | b'a'..=b'f')", "matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')", "an upper-case SHA is a pin"),
+    ("M11", PN, "if !sha.iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {", "if !sha.iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')) {", "an upper-case SHA is a pin"),
     ("M12", PN, "(at > word).then_some(at)", "Some(at)", "an empty comment is a pin"),
     ("M13", PN, "    pin_end(line, 0) == Some(line.len())", "    pin_end(line, 0).is_some()", "a longer comment is a strict pin"),
     ("M14", PN, "    tails.dedup();\n", "", "an unparsed line in two files is named twice"),
@@ -133,6 +133,29 @@ MUTANTS = [
     ("M88", PR, '            ctx.err_line(&format!("cannot obtain {image}"));\n            return 1;', '            ctx.err_line(&format!("cannot obtain {image}"));\n            return 0;', "no image exits zero"),
     ("M89", PR, '    "--cpus",\n];', '    "--cpux",\n];', "the gate section looks for --cpux"),
     ("M90", PR, "    drop(ctx.host().write(&work.join(\"repofile\"), b\"host file\\n\"));", "    drop(ctx.host().write(&work.join(\"repofile\"), b\"other\\n\"));", "the mounted file holds something else"),
+    # --- pins.rs: the lookup refusal and the tag encoding (P4B-16) ---
+    ("M91", PN, 'if part.is_empty() || part == b"." || part == b".." || !part.iter().all(name_byte) {', 'if part.is_empty() || part == b"." || !part.iter().all(name_byte) {', "a repository part of .. is allowed"),
+    ("M92", PN, 'if shell::contains(tag, b"..") {', 'if tag == b".." {', "only a tag that is exactly .. is refused"),
+    ("M93", PN, "if tag.iter().any(|byte| matches!(byte, b'?' | b'#' | b'%')) {", "if tag.iter().any(|byte| matches!(byte, b'?' | b'#')) {", "a % in a tag is allowed"),
+    ("M94", PN, "if tag.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {", "if tag.iter().any(|byte| *byte < 0x20) {", "DEL in a tag is allowed"),
+    ("M95", PN, "b\"-._~!$&'()*+,;=:@/\".contains(byte)", "b\"-._~!$&'()*+,;=:@\".contains(byte)", "a slash in a tag is percent-encoded"),
+    ("M96", PN, "if lookup_refusal(repo, b\"x\").is_some() || !is_object_id(object) {", "if lookup_refusal(repo, b\"x\").is_some() {", "a tag object id that is not hexadecimal is asked about"),
+    ("M97", PN, "    if let Some(reason) = lookup_refusal(&pin.repo, &pin.claim) {", "    if let Some(reason) = None::<&'static str> {", "a pin is judged without the refusal"),
+    ("M98", PN, 'if tag.starts_with(b"/") || tag.ends_with(b"/") || shell::contains(tag, b"//") {', 'if tag.ends_with(b"/") || shell::contains(tag, b"//") {', "a tag with a leading slash is allowed"),
+    ("M99", PN, "        if lookup_refusal(repo, tag).is_some() {\n            return None;", "        if false {\n            return None;", "the adapter trusts its caller"),
+    ("M100", PN, "(40..=64).contains(&object.len())", "(1..=64).contains(&object.len())", "a short hexadecimal object id is accepted"),
+    ("M101", PN, "if *byte < 0x20 || *byte == 0x7f { b'?' } else { *byte }", "*byte", "control bytes of a refused pin reach the terminal"),
+    ("M102", PN, "if tag.iter().any(|byte| matches!(byte, b'?' | b'#' | b'%')) {", "if tag.iter().any(|byte| matches!(byte, b'#' | b'%')) {", "a ? in a tag is allowed"),
+    ("M103", PN, "if tag.iter().any(|byte| matches!(byte, b'?' | b'#' | b'%')) {", "if tag.iter().any(|byte| matches!(byte, b'?' | b'%')) {", "a # in a tag is allowed"),
+    ("M104", PN, 'if tag.starts_with(b"/") || tag.ends_with(b"/") || shell::contains(tag, b"//") {', 'if tag.starts_with(b"/") || shell::contains(tag, b"//") {', "a tag with a trailing slash is allowed"),
+    ("M105", PN, 'if tag.starts_with(b"/") || tag.ends_with(b"/") || shell::contains(tag, b"//") {', 'if tag.starts_with(b"/") || tag.ends_with(b"/") {', "a tag with a doubled slash is allowed"),
+    ("M106", PN, "    if tag.is_empty() {\n        return Some(\"the tag is empty\");", "    if false {\n        return Some(\"the tag is empty\");", "an empty tag is looked up"),
+    ("M107", PN, "if tag.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {", "if tag.iter().any(|byte| *byte < 0x10 || *byte == 0x7f) {", "a control byte from 0x10 to 0x1f in a tag is allowed"),
+    ("M108", PN, 'if part.is_empty() || part == b"." || part == b".." || !part.iter().all(name_byte) {', 'if part.is_empty() || part == b".." || !part.iter().all(name_byte) {', "a repository part of . is allowed"),
+    ("M109", PN, "let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {", "let (Some(owner), Some(name), _) = (parts.next(), parts.next(), parts.next()) else {", "a repository of three parts is allowed"),
+    ("M110", PN, "matches!(byte, b'_' | b'.' | b'-')", "matches!(byte, b'_' | b'.' | b'-' | b'%')", "a % in a repository name is allowed"),
+    ("M111", PN, 'const HEX: &[u8; 16] = b"0123456789ABCDEF";', 'const HEX: &[u8; 16] = b"0123456789abcdef";', "the hex digits of an encoded byte are lower case"),
+    ("M112", PN, "b\"-._~!$&'()*+,;=:@/\".contains(byte)", "b\"-._~!$&'()*,;=:@/\".contains(byte)", "a + in a tag is percent-encoded"),
 ]
 
 
