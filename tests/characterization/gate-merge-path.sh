@@ -161,18 +161,20 @@ case_post_off_refusal_first() {
 }
 cz_case "POST=off: a failed condition still refuses with exit 1 on stderr" case_post_off_refusal_first
 
-# Pins current behaviour. Only the exact word "off" rehearses. Any other value,
-# including a different case, posts.
+# Only "on" and "off" are values of MAINTAINER_POST (plan decision PB-3). Any
+# other value, a different case included, is refused with exit 64 before the
+# program does anything. tests/characterization/gate-hardening.sh holds the table.
 case_post_not_off() {
     cz_merge_ready 7
     cz_set MAINTAINER_POST "$POST_VALUE"
     cz_mm merge 7
-    cz_expect_rc 0
-    cz_expect_gh_count "pr merge" 1
-    cz_expect_stdout_has "  merged #7"
+    cz_expect_rc 64
+    cz_expect_stdout_empty
+    cz_expect_stderr "maintainer-merge: MAINTAINER_POST must be on or off, not $POST_VALUE"
+    cz_expect_gh_count "pr merge" 0
 }
 for POST_VALUE in OFF Off false 0 no; do
-    cz_case "POST=$POST_VALUE is not a rehearsal: the merge is made (pins current behaviour)" case_post_not_off
+    cz_case "POST=$POST_VALUE is refused, not read as permission to merge (PB-3)" case_post_not_off
 done
 
 # --- 5. the board of checks, when gh pr checks exits non-zero ------------------

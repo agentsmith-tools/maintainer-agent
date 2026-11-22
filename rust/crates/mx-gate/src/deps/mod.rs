@@ -33,9 +33,15 @@
 //! adapter of [`Net`] are the dependency agent's work.
 
 mod checked;
+mod entry;
+mod flow;
+#[cfg(test)]
+mod flow_tests;
 mod net;
 mod paths;
 mod ports;
+mod pydump;
+mod real;
 mod refusal;
 mod verdict;
 
@@ -46,10 +52,19 @@ pub use refusal::DepsRefusal;
 pub(crate) fn refusal_texts() -> Vec<String> {
     refusal::samples().into_iter().map(|(_, text)| text).collect()
 }
+pub use entry::{Wiring, record, run};
+pub use flow::{
+    ClassifyLimit, DepsConfig, DepsFailure, DepsGh, DepsPorts, DepsVerified, ScriptPaths,
+    lease_gate, verify_deps,
+};
 pub use net::{FakeNet, GitObject, Net, NetCall, NetFailure, TagRef};
 pub use paths::{ActionRepo, PlainPath};
 pub use ports::{
     Classifier, ClassifierCall, ClassifierExit, ClassifierRun, FakeClassifier, FakeWholeFile,
     HelperScript, WholeFile,
+};
+pub use real::{
+    GH_TIMEOUT, ProcGh, RealClassifier, RealNet, RealWholeFile, SCRIPT_TIMEOUT, is_ref_name,
+    is_slug,
 };
 pub use verdict::{Bump, Image, LineRef, Pin, PipPackage, Refused, Verdict, VerdictError};

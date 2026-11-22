@@ -13,6 +13,9 @@
 #   run-wrapper the crate is called `run`: its wrapper replaces lib/run.sh, carries
 #               no MAINTAINER_CHILD_ENV line, and the binary is in the copy.
 #   run-lib     lib is a symlink to an outside directory. Building `run` refuses.
+#   install-wrapper the crate is called `install`: its wrapper replaces install.sh at the
+#               root of the tree and carries the MAINTAINER_CHILD_ENV line.
+#   platform-link platform is a symlink to an outside directory. Building `alert` refuses.
 #   git-init    DEST is a fresh repository with one commit that holds the copied
 #               files, and the source repository is byte for byte what it was.
 #   git-env     the same with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE exported, as
@@ -28,6 +31,9 @@
 #               unflagged build of the same crate holds all three). The caller's
 #               RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS still reach the compiler, and a
 #               build with HOME unset works.
+#   check-wrapper the crate is called `check-claims`: its wrapper replaces scripts/check_claims.sh
+#               and carries no MAINTAINER_CHILD_ENV line.
+#   check-link  scripts is a symlink to an outside directory. Building `check-claims` refuses.
 #
 # Prints `assemble-tree test: N checks, F failed`; exit 0 only with N > 0 and F = 0.
 # MX_SCRATCH moves the scratch directory; CARGO_TARGET_DIR is shared with the caller.
@@ -162,6 +168,37 @@ check "run-lib: the helper refused (exit $RC)" test "$RC" != 0
 check "run-lib: it says why" grep -q "symlink" <<<"$OUT"
 check "run-lib: the outside directory is unchanged" test "$(digest "$scratch/run-lib/outside")" = "$before"
 
+# 6. install-wrapper: the crate is called `install`, which stands for install.sh at the root of
+# the tree. The wrapper replaces it, names the two variables the suites' stubs read, and
+# leaves bin/prog alone.
+progfix() {  # progfix NAME CRATE: the fixture with its crate renamed
+    fixture "$1"
+    sed -i "s/prog/$2/g" "$scratch/$1/repo/rust/crates/prog/Cargo.toml"
+    (cd "$scratch/$1/repo/rust" && cargo generate-lockfile --offline -q) || exit 2
+}
+progfix install-wrapper install
+printf '#!/usr/bin/env bash\necho bash install\n' > "$scratch/install-wrapper/repo/install.sh"
+commit_fixture install-wrapper
+run_helper install-wrapper install
+check "install-wrapper: the helper finished (exit $RC: ${OUT: -120})" test "$RC" = 0
+check "install-wrapper: install.sh is the wrapper" test "$(wrapper_target "$scratch/install-wrapper/dest/install.sh")" = "$scratch/install-wrapper/dest/.rust-bin/install"
+check "install-wrapper: the wrapper names the two variables for the children" grep -q "MAINTAINER_CHILD_ENV" "$scratch/install-wrapper/dest/install.sh"
+check "install-wrapper: the binary is in the copy" test -x "$scratch/install-wrapper/dest/.rust-bin/install"
+check "install-wrapper: bin/prog is untouched" grep -q "echo bash prog" "$scratch/install-wrapper/dest/bin/prog"
+
+# 7. platform-link: the crate is called `alert`, which stands for platform/linux/alert.sh, and
+# platform is a symlink to an outside directory. The helper refuses and writes nothing there.
+progfix platform-link alert
+rm -rf "$scratch/platform-link/repo/platform"
+mkdir -p "$scratch/platform-link/outside/platdir/linux"
+printf '#!/usr/bin/env bash\n' > "$scratch/platform-link/outside/platdir/linux/alert.sh"
+ln -s "$scratch/platform-link/outside/platdir" "$scratch/platform-link/repo/platform"
+commit_fixture platform-link
+before="$(digest "$scratch/platform-link/outside")"
+run_helper platform-link alert
+check "platform-link: the helper refused (exit $RC)" test "$RC" != 0
+check "platform-link: it says why" grep -q "symlink" <<<"$OUT"
+check "platform-link: the outside directory is unchanged" test "$(digest "$scratch/platform-link/outside")" = "$before"
 # lines_of DIR: the files git lists for a work tree, sorted, in the byte order of C.
 src_files() { git -C "$1" ls-files --cached --others --exclude-standard | LC_ALL=C sort; }
 dest_files() { git -C "$1" ls-files | LC_ALL=C sort; }
@@ -381,6 +418,37 @@ bp_build dest-rootHome "HOME=/"
 check "binary-path: HOME=/ invents no prefix: the dependency's absolute path is unchanged" \
     grep -qx "dep=$bp_home/dep/src/lib.rs" <<<"$BP_RUN"
 bp_clean "$scratch/binary-path/dest-rootHome/.rust-bin/prog" "HOME=/" nohome
+
+# 12. check-wrapper: a crate called `check-claims` stands for scripts/check_claims.sh, which is a
+# wrapper without MAINTAINER_CHILD_ENV; a tree that holds a `scripts` symlink is refused (7).
+checkfix() {  # $1 = fixture name: the fixture with its crate renamed to check-claims
+    fixture "$1"
+    sed -i 's/prog/check-claims/g' "$scratch/$1/repo/rust/crates/prog/Cargo.toml"
+    (cd "$scratch/$1/repo/rust" && cargo generate-lockfile --offline -q) || exit 2
+    mkdir -p "$scratch/$1/repo/scripts"
+    printf '#!/usr/bin/env bash\necho bash check_claims\n' > "$scratch/$1/repo/scripts/check_claims.sh"
+}
+checkfix check-wrapper
+commit_fixture check-wrapper
+run_helper check-wrapper check-claims
+check "check-wrapper: the helper finished (exit $RC: ${OUT: -120})" test "$RC" = 0
+check "check-wrapper: scripts/check_claims.sh is the wrapper" test "$(wrapper_target "$scratch/check-wrapper/dest/scripts/check_claims.sh")" = "$scratch/check-wrapper/dest/.rust-bin/check-claims"
+check "check-wrapper: the wrapper sets no MAINTAINER_CHILD_ENV" test "$(grep -c MAINTAINER_CHILD_ENV "$scratch/check-wrapper/dest/scripts/check_claims.sh")" = 0
+check "check-wrapper: the binary is in the copy" test -x "$scratch/check-wrapper/dest/.rust-bin/check-claims"
+check "check-wrapper: bin/prog is untouched" grep -q "echo bash prog" "$scratch/check-wrapper/dest/bin/prog"
+
+# 13. check-scripts-link
+checkfix check-link
+rm -r "$scratch/check-link/repo/scripts"
+mkdir -p "$scratch/check-link/outside/scriptsdir"
+printf '#!/usr/bin/env bash\n' > "$scratch/check-link/outside/scriptsdir/check_claims.sh"
+ln -s "$scratch/check-link/outside/scriptsdir" "$scratch/check-link/repo/scripts"
+commit_fixture check-link
+before="$(digest "$scratch/check-link/outside")"
+run_helper check-link check-claims
+check "check-link: the helper refused (exit $RC)" test "$RC" != 0
+check "check-link: it says why" grep -q "symlink" <<<"$OUT"
+check "check-link: the outside directory is unchanged" test "$(digest "$scratch/check-link/outside")" = "$before"
 
 printf 'assemble-tree test: %d checks, %d failed\n' "$N" "$F"
 [ "$N" -gt 0 ] && [ "$F" -eq 0 ]

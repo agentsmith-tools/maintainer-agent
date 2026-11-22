@@ -286,6 +286,7 @@ fn the_rule_count_reads_a_list_a_dict_or_a_string_and_nothing_else() {
 fn claude_is_run_once_with_version_and_only_its_first_line_is_shown() {
     let rig = Rig::new(&[]);
     rig.host.file(&format!("{SHARE}/backends/claude.sh"), b"", false, 0);
+    rig.proc.have("flock", "/bin/flock");
     rig.proc.have("claude", "/bin/claude");
     rig.proc.on(&["claude", "--version"], 0, "2.0.0 (Claude Code)\nsecond line\n");
     let mut o = out();
@@ -293,6 +294,38 @@ fn claude_is_run_once_with_version_and_only_its_first_line_is_shown() {
     assert!(has_ok(&o.report, "backend 'claude' installed"));
     assert!(has_ok(&o.report, "claude on PATH (2.0.0 (Claude Code))"));
     assert_eq!(rig.proc.tool_calls(), ["claude --version"]);
+}
+
+// Bash PR #243 added this check after the port: `flock` is the first line under Backend.
+#[test]
+fn flock_on_path_is_the_first_backend_line_and_is_ok() {
+    let rig = Rig::new(&[("BACKEND", "weird")]);
+    rig.host.file(&format!("{SHARE}/backends/weird.sh"), b"", false, 0);
+    rig.proc.have("flock", "/usr/bin/flock");
+    let mut o = out();
+    install::backend(&rig.ctx(), &mut o);
+    let lines = lines(&o.report);
+    let at = lines.iter().position(|l| l.contains("flock on PATH")).expect("flock line missing");
+    assert!(lines[at].contains("ok"), "{lines:?}");
+    assert!(lines[at - 1].contains("Backend"), "{lines:?}");
+    assert!(lines[at + 1].contains("backend 'weird' installed"), "{lines:?}");
+    assert_eq!(o.report.counts(), (2, 0, 0));
+}
+
+#[test]
+fn flock_missing_fails_with_the_install_fix_and_the_backend_checks_still_run() {
+    let rig = Rig::new(&[("BACKEND", "weird")]);
+    rig.host.file(&format!("{SHARE}/backends/weird.sh"), b"", false, 0);
+    rig.proc.lack("flock");
+    let mut o = out();
+    install::backend(&rig.ctx(), &mut o);
+    assert!(has_fail(
+        &o.report,
+        "flock is required to serialize runs and is NOT on PATH",
+        "install flock for this platform"
+    ));
+    assert!(has_ok(&o.report, "backend 'weird' installed"));
+    assert_eq!(o.report.counts(), (1, 0, 1));
 }
 
 #[test]
@@ -303,6 +336,7 @@ fn each_backend_checks_its_own_binary_and_names_its_own_fix() {
         ("opencode", "opencode", "curl -fsSL https://opencode.ai/install | bash"),
     ] {
         let rig = Rig::new(&[("BACKEND", backend)]);
+        rig.proc.have("flock", "/bin/flock");
         rig.proc.lack(binary);
         let mut o = out();
         install::backend(&rig.ctx(), &mut o);
@@ -316,10 +350,13 @@ fn each_backend_checks_its_own_binary_and_names_its_own_fix() {
 fn an_unknown_backend_with_a_script_is_ok_and_gets_no_path_check() {
     let rig = Rig::new(&[("BACKEND", "weird")]);
     rig.host.file(&format!("{SHARE}/backends/weird.sh"), b"", false, 0);
+    rig.proc.have("flock", "/bin/flock");
     let mut o = out();
     install::backend(&rig.ctx(), &mut o);
-    assert_eq!(o.report.counts(), (1, 0, 0));
-    assert!(rig.proc.argvs().is_empty());
+    assert_eq!(o.report.counts(), (2, 0, 0));
+    // The only lookup is flock's; the unknown backend's own binary is never asked for.
+    let lookups: Vec<String> = rig.proc.argvs().iter().map(|a| a.join(" ")).collect();
+    assert_eq!(lookups, ["bash -c command -v \"$1\" _ flock"]);
 }
 
 #[test]

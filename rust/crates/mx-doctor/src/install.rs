@@ -164,6 +164,15 @@ pub fn profile_and_containment(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop>
 /// Backend.
 pub fn backend(ctx: &Ctx<'_>, out: &mut Out) {
     out.add(Item::head("Backend"));
+    // bash PR #243: runs are serialised with flock, so a host without it cannot run.
+    if ctx.command_v("flock").is_some() {
+        out.add(Item::ok("flock on PATH"));
+    } else {
+        out.add(Item::fail(
+            "flock is required to serialize runs and is NOT on PATH",
+            "install flock for this platform",
+        ));
+    }
     let b = ctx.settings.get_or("BACKEND", "claude");
     if ctx.host.stat(&format!("{}/backends/{b}.sh", ctx.share)).is_file() {
         out.add(Item::ok(format!("backend '{b}' installed")));

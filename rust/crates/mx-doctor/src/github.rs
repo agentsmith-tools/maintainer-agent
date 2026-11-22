@@ -130,13 +130,13 @@ fn main_runs(ctx: &Ctx<'_>, out: &mut Out) -> Result<(), Stop> {
     if slug.is_empty() || ctx.command_v("gh").is_none() {
         return Ok(());
     }
-    let grace = ctx.settings.need("RED_GRACE_HOURS", 185, out)?.to_string();
+    let grace = ctx.settings.need("RED_GRACE_HOURS", 187, out)?.to_string();
     // The expansion sits inside the `$(gh run list ...)` of the bash, so an unset
-    // limit kills only that substitution: the doctor warns and goes on (line 187).
+    // limit kills only that substitution: the doctor warns and goes on (line 189).
     let limit_text = if ctx.settings.is_set("DOCTOR_RUN_LIMIT") {
         Some(ctx.settings.get("DOCTOR_RUN_LIMIT").to_string())
     } else {
-        out.warn_text("maintainer-doctor: line 187: DOCTOR_RUN_LIMIT: unbound variable\n");
+        out.warn_text("maintainer-doctor: line 189: DOCTOR_RUN_LIMIT: unbound variable\n");
         None
     };
     let unknown = || {

@@ -138,6 +138,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mx-checks"
+version = "0.1.0"
+dependencies = [
+ "mx-core",
+ "mx-ports",
+ "mx-profile",
+ "signal-hook",
+]
+
+[[package]]
 name = "mx-core"
 version = "0.1.0"
 dependencies = [
@@ -167,6 +177,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "mx-install"
+version = "0.1.0"
+dependencies = [
+ "mx-ports",
+ "rustix",
+ "sha2",
 ]
 
 [[package]]

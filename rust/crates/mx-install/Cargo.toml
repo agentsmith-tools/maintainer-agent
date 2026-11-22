@@ -1,0 +1,49 @@
+[package]
+name = "mx-install"
+version = "0.1.0"
+description = "install.sh, new-profile.sh and the platform scripts in Rust: a pure install plan applied through a live or a dry sink, with the oracle that proves it equal to the bash"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mx_install"
+path = "src/lib.rs"
+
+# `install` stands for install.sh and `new-profile` for new-profile.sh. The four platform
+# scripts are programs of their own (decision P4A-bins): systemd runs run-instance.sh and
+# alert.sh by name, and the suites run install-cron.sh and install-launchd.sh by path.
+[[bin]]
+name = "install"
+path = "src/bin/install.rs"
+
+[[bin]]
+name = "new-profile"
+path = "src/bin/new-profile.rs"
+
+[[bin]]
+name = "install-cron"
+path = "src/bin/install-cron.rs"
+
+[[bin]]
+name = "install-launchd"
+path = "src/bin/install-launchd.rs"
+
+[[bin]]
+name = "alert"
+path = "src/bin/alert.rs"
+
+[[bin]]
+name = "run-instance"
+path = "src/bin/run-instance.rs"
+
+[dependencies]
+mx-ports.workspace = true
+sha2.workspace = true
+# umask and getuid: the file mode `cp` and `chmod +x` give depends on the caller's umask, and
+# the alert's bus address names the caller's uid. Both calls are safe in rustix.
+rustix = { workspace = true, features = ["fs", "process"] }
+
+[lints]
+workspace = true
