@@ -423,6 +423,18 @@ def named_scenarios():
     add("profile-exits-0", lambda sb: sb.profile_add("exit 0"))
     add("profile-prints", lambda sb: sb.profile_add("echo profile-says-hello; echo and-an-error >&2"))
     add("profile-last-command-fails", lambda sb: sb.profile_add("false"))
+
+    # --- plan decision P5B-1: a helper that names no interpreter runs as a shell script -------------------
+    # `execve` refuses the file with ENOEXEC and bash then runs it as a shell script. Starting it
+    # directly fails with "Exec format error", so the Rust build must do what bash does.
+    def helper_without_interpreter_line(sb):
+        text = (sb.dir / "stub").read_text().split("\n", 1)[1]
+        helper = sb.dir / "home" / ".local" / "bin" / "maintainer"
+        helper.unlink()
+        helper.write_text(text)
+        os.chmod(helper, 0o755)
+
+    add("helper-without-interpreter-line", helper_without_interpreter_line)
     for i, marker in enumerate(["other/task", "x", " "]):
         add("nested-%d" % i, lambda sb, m=marker: sb.env.update({"MAINTAINER_IN_RUN": m}))
         add("nested-preview-%d" % i, lambda sb, m=marker: sb.env.update({"MAINTAINER_IN_RUN": m}),
