@@ -1,6 +1,6 @@
 use crate::real_proc::{
-    KILL_TOOLS, absolute_entries, exit_code, kill_group, launch, new_command, plain_locale,
-    resolve, wait_until,
+    Deadline, KILL_TOOLS, absolute_entries, exit_code, kill_group, launch, new_command,
+    plain_locale, resolve, wait_until,
 };
 use crate::{Pipe, PipelineOutcome, PipelineSpec, ProcError, ProcExit, Sink, Source, StageSpec};
 use std::ffi::OsString;
@@ -10,7 +10,6 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Instant;
 
 /// The leaders of the process groups of the pipelines that run now, and whether
 /// the owner has begun to stop them.
@@ -355,7 +354,7 @@ impl Pipe for RealPipe {
     fn run_pipeline(&self, spec: &PipelineSpec) -> Result<PipelineOutcome, ProcError> {
         let stages = spec.stages.as_slice();
         validate(stages)?;
-        let deadline = Instant::now() + spec.timeout;
+        let deadline = Deadline::after(spec.timeout);
 
         let mut running: Vec<Running> = Vec::with_capacity(stages.len());
         let mut upstream: Option<PipeReader> = None;
@@ -426,7 +425,7 @@ mod tests {
     use mx_core::NonEmpty;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const SEARCH_PATH: &str = "/usr/bin:/bin";
     const LONG: Duration = Duration::from_secs(30);
@@ -734,6 +733,75 @@ mod tests {
         let outcome =
             run_bounded(pipe(), spec(vec![first, second], Duration::from_millis(1500))).unwrap();
         assert_eq!(exits(&outcome), vec![ProcExit::Code(5), ProcExit::TimedOut]);
+    }
+
+    /// Runs `spec` on its own thread and tells an answer from a panic from a hang. A timeout the
+    /// platform's time type cannot hold once made the call panic (decision `FU1-1`).
+    fn run_watched(spec: PipelineSpec) -> Result<Result<PipelineOutcome, ProcError>, String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(std::thread::spawn(move || drop(sender.send(pipe().run_pipeline(&spec)))));
+        receiver.recv_timeout(BOUND).map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Disconnected => "the call panicked".to_string(),
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                format!("the call did not return within {BOUND:?}")
+            }
+        })
+    }
+
+    fn assert_oversized_timeout_waits_for_the_stage(timeout: Duration) {
+        let dir = TempDir::new("oversized");
+        let log = dir.path("log");
+        let mut stage = sh("sleep 0.3; echo finished");
+        stage.stdout = Sink::AppendFile(log.clone());
+        let answer = run_watched(spec(vec![stage], timeout))
+            .unwrap_or_else(|why| panic!("timeout {timeout:?}: {why}"));
+        let outcome = answer.unwrap_or_else(|error| panic!("timeout {timeout:?}: {error}"));
+        assert_eq!(
+            exits(&outcome),
+            vec![ProcExit::Code(0)],
+            "timeout {timeout:?} expired a stage that was still running"
+        );
+        assert_eq!(read(&log), "finished\n", "timeout {timeout:?}");
+    }
+
+    fn assert_tiny_timeout_kills_a_long_stage(timeout: Duration) {
+        let started = Instant::now();
+        let answer = run_watched(spec(vec![sh("sleep 30")], timeout))
+            .unwrap_or_else(|why| panic!("timeout {timeout:?}: {why}"));
+        let outcome = answer.unwrap_or_else(|error| panic!("timeout {timeout:?}: {error}"));
+        assert_eq!(exits(&outcome), vec![ProcExit::TimedOut], "timeout {timeout:?}");
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(5), "timeout {timeout:?} returned after {elapsed:?}");
+    }
+
+    #[test]
+    fn a_pipeline_timeout_of_duration_max_waits_for_the_stage_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_stage(Duration::MAX);
+    }
+
+    #[test]
+    fn a_pipeline_timeout_of_u64_max_seconds_waits_for_the_stage_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_stage(Duration::from_secs(u64::MAX));
+    }
+
+    #[test]
+    fn a_pipeline_timeout_of_i64_max_seconds_waits_for_the_stage_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_stage(Duration::from_secs(u64::MAX / 2));
+    }
+
+    #[test]
+    fn a_pipeline_timeout_the_platform_clock_can_still_hold_waits_for_the_stage() {
+        assert_oversized_timeout_waits_for_the_stage(Duration::from_secs(1 << 62));
+    }
+
+    #[test]
+    fn a_zero_pipeline_timeout_times_out_a_stage_that_is_still_running() {
+        assert_tiny_timeout_kills_a_long_stage(Duration::ZERO);
+    }
+
+    #[test]
+    fn a_pipeline_timeout_of_one_nanosecond_times_out_a_stage_that_is_still_running() {
+        assert_tiny_timeout_kills_a_long_stage(Duration::from_nanos(1));
     }
 
     #[test]

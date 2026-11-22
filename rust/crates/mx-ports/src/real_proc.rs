@@ -160,7 +160,7 @@ impl RealProc {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let deadline = Instant::now() + spec.timeout;
+        let deadline = Deadline::after(spec.timeout);
         let (mut child, _registered) = {
             let mut live = lock(&LIVE);
             if live.stopping.is_some() {
@@ -229,7 +229,7 @@ impl RealProc {
         let group = kill_group(&self.kill_tools, pid);
         let _ = child.kill();
         let _ = child.wait();
-        wait_until(Instant::now() + KILL_GRACE, || out.is_done() && err.is_done());
+        wait_until(Deadline::after(KILL_GRACE), || out.is_done() && err.is_done());
         match group {
             Err(reason) => Err(ProcError::KillFailed { program: name.clone(), reason }),
             Ok(false) if status.is_none() => Err(ProcError::KillFailed {
@@ -368,20 +368,53 @@ pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(UNKNOWN_EXIT)
 }
 
+/// When a call must be over: an instant, or never.
+///
+/// Decision `FU1-1`. A timeout that does not fit the platform's `Instant` (`Duration::MAX`,
+/// `u64::MAX` seconds, anything beyond about 292 billion years on Linux) made `Instant + Duration`
+/// panic. Such a deadline never comes before the program ends, so the call waits for the program,
+/// as `timeout` and `sleep` do in bash for a number that large. The callers already saturate their
+/// own sums (`wait.saturating_add(60)` in `mx-repo`) and expect this. A zero timeout and a
+/// one-nanosecond timeout are ordinary small deadlines: they pass at once, and the call kills a
+/// program that is still running.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline(Option<Instant>);
+
+impl Deadline {
+    /// The deadline `timeout` from now.
+    pub(crate) fn after(timeout: Duration) -> Self {
+        Self(Instant::now().checked_add(timeout))
+    }
+}
+
+impl From<Instant> for Deadline {
+    fn from(at: Instant) -> Self {
+        Self(Some(at))
+    }
+}
+
 /// Polls `ready` with a short, growing pause until it is true or `deadline`
 /// passes. `ready` is checked once more at the deadline, so a call that
-/// finishes on the last instant still counts.
-pub(crate) fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
+/// finishes on the last instant still counts. A deadline that never comes
+/// polls until `ready` is true.
+pub(crate) fn wait_until(deadline: impl Into<Deadline>, mut ready: impl FnMut() -> bool) -> bool {
+    let Deadline(deadline) = deadline.into();
     let mut pause = Duration::from_millis(1);
     loop {
         if ready() {
             return true;
         }
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        thread::sleep(pause.min(deadline - now));
+        let nap = match deadline {
+            None => pause,
+            Some(at) => {
+                let now = Instant::now();
+                if now >= at {
+                    return false;
+                }
+                pause.min(at - now)
+            }
+        };
+        thread::sleep(nap);
         pause = (pause * 2).min(Duration::from_millis(20));
     }
 }
@@ -637,6 +670,73 @@ mod tests {
         let out = run_bounded(proc(), spec).unwrap();
         assert_eq!(out.exit, ProcExit::TimedOut);
         assert_eq!(text(&out.stdout), "done\n");
+    }
+
+    /// Runs `spec` on its own thread and tells an answer from a panic from a hang. A timeout the
+    /// platform's time type cannot hold once made the call panic (decision `FU1-1`).
+    fn run_watched(spec: ProcSpec) -> Result<Result<ProcOutput, ProcError>, String> {
+        let (sender, receiver) = mpsc::channel();
+        drop(thread::spawn(move || drop(sender.send(proc().run(&spec)))));
+        receiver.recv_timeout(BOUND).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Disconnected => "the call panicked".to_string(),
+            mpsc::RecvTimeoutError::Timeout => format!("the call did not return within {BOUND:?}"),
+        })
+    }
+
+    /// A child that is still running for a moment and then prints, so a deadline that counts as
+    /// already passed shows as a timeout and a deadline that never comes shows as this output.
+    const SHORT_JOB: &str = "sleep 0.3; echo finished";
+
+    fn assert_oversized_timeout_waits_for_the_child(timeout: Duration) {
+        let spec = ProcSpec::command("sh", ["-c", SHORT_JOB], timeout);
+        let answer = run_watched(spec).unwrap_or_else(|why| panic!("timeout {timeout:?}: {why}"));
+        let out = answer.unwrap_or_else(|error| panic!("timeout {timeout:?}: {error}"));
+        assert_eq!(
+            out.exit,
+            ProcExit::Code(0),
+            "timeout {timeout:?} expired a child that was still running"
+        );
+        assert_eq!(text(&out.stdout), "finished\n", "timeout {timeout:?}");
+    }
+
+    fn assert_tiny_timeout_kills_a_long_child(timeout: Duration) {
+        let spec = ProcSpec::command("sleep", ["30"], timeout);
+        let started = Instant::now();
+        let answer = run_watched(spec).unwrap_or_else(|why| panic!("timeout {timeout:?}: {why}"));
+        let out = answer.unwrap_or_else(|error| panic!("timeout {timeout:?}: {error}"));
+        assert_eq!(out.exit, ProcExit::TimedOut, "timeout {timeout:?}");
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(5), "timeout {timeout:?} returned after {elapsed:?}");
+    }
+
+    #[test]
+    fn a_timeout_of_duration_max_waits_for_the_child_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_child(Duration::MAX);
+    }
+
+    #[test]
+    fn a_timeout_of_u64_max_seconds_waits_for_the_child_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_child(Duration::from_secs(u64::MAX));
+    }
+
+    #[test]
+    fn a_timeout_of_i64_max_seconds_waits_for_the_child_and_does_not_panic() {
+        assert_oversized_timeout_waits_for_the_child(Duration::from_secs(u64::MAX / 2));
+    }
+
+    #[test]
+    fn a_timeout_the_platform_clock_can_still_hold_waits_for_the_child() {
+        assert_oversized_timeout_waits_for_the_child(Duration::from_secs(1 << 62));
+    }
+
+    #[test]
+    fn a_zero_timeout_times_out_a_child_that_is_still_running() {
+        assert_tiny_timeout_kills_a_long_child(Duration::ZERO);
+    }
+
+    #[test]
+    fn a_timeout_of_one_nanosecond_times_out_a_child_that_is_still_running() {
+        assert_tiny_timeout_kills_a_long_child(Duration::from_nanos(1));
     }
 
     #[test]
