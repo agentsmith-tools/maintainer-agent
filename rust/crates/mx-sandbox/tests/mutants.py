@@ -71,7 +71,7 @@ MUTANTS = [
  ("M40", B+"real.rs", '["sed", "--sandbox", "-i", "-e"]', '["sed", "-i", "-e"]', "sed runs without --sandbox"),
  ("M41", B+"real.rs", "before.get(*n) != after.get(*n)", "before.get(*n) == after.get(*n)", "unchanged files are reported"),
  ("M43", B+"real.rs", "Permissions::from_mode(0o755))\n            .map_err(|e| stage_err(&dest, e))?;", "Permissions::from_mode(0o644))\n            .map_err(|e| stage_err(&dest, e))?;", "the staged file is not executable"),
- ("M44", B+"real.rs", "        drop(std::fs::remove_file(&dest));\n", "", "staging writes through a link"),
+ ("M44", B+"real.rs", "            Ok(_) => std::fs::remove_file(&dest).map_err(|e| stage_err(&dest, e))?,", "            Ok(_) => {}", "a leftover staged file or link is not removed"),
  ("M45", B+"real.rs", "            && !name.starts_with(['.', '-']);", "            ;", "a staged name may start with a dot or dash"),
  ("M46", B+"real.rs", "        if spec.log_mode() == LogMode::Truncate {", "        if false {", "the prefetch log is not started over"),
  ("M47", B+"real.rs", "ProcExit::TimedOut => Ok(ContainerExit(TIMED_OUT)),", "ProcExit::TimedOut => Ok(ContainerExit(0)),", "a hung client reads as success"),
@@ -87,6 +87,10 @@ MUTANTS = [
  ("M57", B+"real.rs", '("GIT_INDEX_FILE".to_string(), text(&index)?.to_string())', '("GIT_INDEX_FILEX".to_string(), text(&index)?.to_string())', "extraction uses the repository index"),
  ("M58", B+"realpath.rs", "        if target.first() == Some(&b'/') {", "        if target.first() == Some(&b'.') {", "an absolute target does not restart the path"),
  ("M59", B+"real.rs", "found.sort_by_key(ToString::to_string);", "", "escapes are not sorted"),
+ ("M61", B+"real.rs", "            Ok(meta) if !meta.is_file() => {", "            Ok(meta) if false && !meta.is_file() => {", "a link at the log path is written through"),
+ ("M62", B+"real.rs", "        ensure_plain_dir(&target)?;\n", "", "a linked .container-target is followed"),
+ ("M63", B+"real.rs", "        ensure_plain_dir(&dir)?;\n", "", "a linked stage directory is followed"),
+ ("M64", B+"real.rs", "Ok(meta) if meta.is_dir() => Ok(()),", "Ok(_) => Ok(()),", "any entry counts as a plain directory"),
  ("M60", B+"real.rs", "let mut bytes = [0_u8; 8];", "let mut bytes = [0_u8; 7];", "scratch names are 7 characters"),
 ]
 

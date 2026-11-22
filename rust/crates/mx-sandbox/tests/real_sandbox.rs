@@ -919,3 +919,74 @@ fn podman_is_preferred_to_docker_and_neither_is_none() {
     make("podman", 0o755);
     assert_eq!(container_runtime(&search), Some(Runtime::Podman));
 }
+
+#[test]
+fn a_link_planted_at_the_log_path_is_refused_and_nothing_is_written_through_it() {
+    // Today's bash `>>"$log"` follows such a link; the tree is the container's to write to.
+    let scratch = Scratch::new("loglink");
+    let path = stub_runtime(&scratch, "echo ran");
+    let victim = scratch.path("victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    let work = scratch.path("work");
+    std::fs::create_dir_all(&work).unwrap();
+    symlink(&victim, work.join("mutated.log")).unwrap();
+    let sandbox = sandbox_with(&path, Vec::new(), Duration::from_secs(30));
+    let refused =
+        run_container(&sandbox, &spec(&work, false), &work.join("mutated.log")).unwrap_err();
+    assert!(
+        matches!(&refused, SandboxError::Run { reason } if reason.contains("not a regular file")),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+    // a directory at the path is refused too
+    std::fs::create_dir(work.join("d.log")).unwrap();
+    assert!(run_container(&sandbox, &spec(&work, false), &work.join("d.log")).is_err());
+}
+
+#[test]
+fn a_link_at_the_prefetch_log_is_replaced_and_not_followed() {
+    let scratch = Scratch::new("prelink");
+    let path = stub_runtime(&scratch, "echo ran");
+    let victim = scratch.path("victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    let work = scratch.path("work");
+    std::fs::create_dir_all(&work).unwrap();
+    symlink(&victim, work.join("prefetch.log")).unwrap();
+    let sandbox = sandbox_with(&path, Vec::new(), Duration::from_secs(30));
+    run_container(&sandbox, &spec(&work, true), &work.join("prefetch.log")).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+    assert_eq!(std::fs::read_to_string(work.join("prefetch.log")).unwrap(), "ran\n");
+}
+
+#[test]
+fn staging_refuses_a_linked_container_target_or_stage_directory() {
+    let scratch = Scratch::new("stagedir");
+    let bin = scratch.path("gate");
+    std::fs::write(&bin, "new").unwrap();
+    let outside = scratch.path("outside");
+    std::fs::create_dir_all(outside.join("stage")).unwrap();
+    // a linked .container-target
+    let (_s, tree) = mutable("stagedir-a", &[("a", "x")]);
+    symlink(&outside, tree.root().join(".container-target")).unwrap();
+    let refused = sandbox().stage_executable(&tree, &bin, "gate").unwrap_err();
+    assert!(
+        matches!(&refused, SandboxError::Stage { reason, .. } if reason.contains("not a plain directory")),
+        "{refused:?}"
+    );
+    assert!(!outside.join("stage/gate").exists());
+    // a linked stage directory under a real .container-target
+    let (_s2, tree2) = mutable("stagedir-b", &[("a", "x")]);
+    std::fs::create_dir_all(tree2.root().join(".container-target")).unwrap();
+    symlink(outside.join("stage"), tree2.root().join(".container-target/stage")).unwrap();
+    assert!(matches!(
+        sandbox().stage_executable(&tree2, &bin, "gate"),
+        Err(SandboxError::Stage { .. })
+    ));
+    assert!(!outside.join("stage/gate").exists());
+    // a file standing where the directory must be
+    let (_s3, tree3) = mutable("stagedir-c", &[("a", "x"), (".container-target", "file")]);
+    assert!(matches!(
+        sandbox().stage_executable(&tree3, &bin, "gate"),
+        Err(SandboxError::Stage { .. })
+    ));
+}

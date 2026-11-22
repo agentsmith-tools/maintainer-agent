@@ -190,17 +190,31 @@ impl RealSandbox {
                 reason: "not a regular file".into(),
             });
         }
-        let dir = tree.root().join(".container-target").join("stage");
         let stage_err = |path: &Path, e: std::io::Error| SandboxError::Stage {
             path: path.to_path_buf(),
             reason: e.to_string(),
         };
-        std::fs::create_dir_all(&dir).map_err(|e| stage_err(&dir, e))?;
+        // Both directories must be plain directories: a link there (planted by an earlier
+        // container run, which has the tree mounted writable) would carry the copy elsewhere.
+        let target = tree.root().join(".container-target");
+        let dir = target.join("stage");
+        ensure_plain_dir(&target)?;
+        ensure_plain_dir(&dir)?;
         let dest = dir.join(name);
-        // A leftover link must not carry the write somewhere else.
-        drop(std::fs::remove_file(&dest));
-        std::fs::copy(src, &dest).map_err(|e| stage_err(&dest, e))?;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+        // A leftover link is removed, never written through; create_new refuses to follow one.
+        match std::fs::symlink_metadata(&dest) {
+            Ok(_) => std::fs::remove_file(&dest).map_err(|e| stage_err(&dest, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(stage_err(&dest, e)),
+        }
+        let mut from = std::fs::File::open(src).map_err(|e| stage_err(src, e))?;
+        let mut to = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| stage_err(&dest, e))?;
+        std::io::copy(&mut from, &mut to).map_err(|e| stage_err(&dest, e))?;
+        to.set_permissions(std::fs::Permissions::from_mode(0o755))
             .map_err(|e| stage_err(&dest, e))?;
         Ok(format!(".container-target/stage/{name}"))
     }
@@ -238,6 +252,20 @@ impl RealSandbox {
 impl Drop for RealSandbox {
     fn drop(&mut self) {
         self.remove_scratch();
+    }
+}
+
+/// `path` is a directory that is not a link, made when it is missing. `create_dir_all` and
+/// `metadata` follow links, so neither is used.
+fn ensure_plain_dir(path: &Path) -> Result<(), SandboxError> {
+    let err = |reason: String| SandboxError::Stage { path: path.to_path_buf(), reason };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(err("is not a plain directory (a link or a file stands there)".into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map_err(|e| err(e.to_string()))
+        }
+        Err(e) => Err(err(e.to_string())),
     }
 }
 
@@ -521,6 +549,26 @@ impl Sandbox for RealSandbox {
                         reason: format!("cannot start {} over: {e}", log.display()),
                     });
                 }
+            }
+        }
+        // The tree is mounted writable, so an earlier container could have left a link at the
+        // log path; the host's append would write through it. Nothing runs in the tree between
+        // this check and the open, because the container of this run has not started yet.
+        match std::fs::symlink_metadata(log) {
+            Ok(meta) if !meta.is_file() => {
+                return Err(SandboxError::Run {
+                    reason: format!(
+                        "{} is not a regular file, so it is not appended to",
+                        log.display()
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(SandboxError::Run {
+                    reason: format!("cannot check {}: {e}", log.display()),
+                });
             }
         }
         let mut stage = StageSpec::new(spec.argv());
