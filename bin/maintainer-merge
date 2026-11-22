@@ -55,7 +55,14 @@ _executed && trap _remove_scratch EXIT
 # Same reasoning as maintainer-repo: `gh pr merge` runs inside this script, so
 # no Bash deny rule sees it. Without this, a POST=off rehearsal could merge a
 # pull request while reporting that it reached nobody.
-POST="${MAINTAINER_POST:-on}"
+#
+# Only `on` and `off` are values. This used to compare against the exact word
+# `off` and treat everything else as permission, so `OFF`, `false` or a typo in a
+# profile unit posted for real. An unknown value refuses, as a usage error.
+case "${MAINTAINER_POST:-on}" in
+    on|off) POST="${MAINTAINER_POST:-on}" ;;
+    *) printf 'maintainer-merge: MAINTAINER_POST must be on or off, not %q\n' "$MAINTAINER_POST" >&2; exit 64 ;;
+esac
 # Paths whose change invalidates a receipt. Tests, docs and the evidence
 # artifact may move between the verified head and the merged one; production
 # code and CI configuration may not.
@@ -70,7 +77,10 @@ POST="${MAINTAINER_POST:-on}"
 # It comes from the profile now, and a profile that does not declare it gets no
 # merge. There is no default: guessing which paths are production is how the
 # original bug worked.
-read -r -a PROD_GLOBS <<< "${PROD_GLOBS:-}"
+# Split on every run of whitespace, newlines included. `read -r -a` stops at the
+# first newline, so the patterns on a second line were dropped without a word
+# and receipt_fresh then compared less than the profile asked for.
+mapfile -t PROD_GLOBS < <(tr -s '[:space:]' '\n' <<<"${PROD_GLOBS:-}" | sed '/^$/d')
 
 die() { printf 'maintainer-merge: %s\n' "$1" >&2; exit 1; }
 
@@ -1031,7 +1041,7 @@ apply_mutation() {  # $1 = extracted tree, $2 = sed expression
         rm -rf "$sums"; return 1; }
     ( cd "$work" && xargs -0 -r -a "$sums/list" sha256sum ) > "$sums/before" 2>/dev/null
     # -r, so a glob that matches nothing does not leave sed reading stdin.
-    if ! ( cd "$work" && xargs -0 -r -a "$sums/list" sed --sandbox -i "$mutation" ); then
+    if ! ( cd "$work" && xargs -0 -r -a "$sums/list" sed --sandbox -i -e "$mutation" -- ); then
         rm -rf "$sums"; return 1
     fi
     ( cd "$work" && xargs -0 -r -a "$sums/list" sha256sum ) > "$sums/after" 2>/dev/null
@@ -1113,6 +1123,16 @@ container_runtime() {
 # a suite reaching into its caller's scope works until somebody renames the
 # variable. A suite that ignores the argument behaves exactly as before.
 suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args "$1" "${2:-}"; }
+
+# The suite prints one container argument per line. Word splitting the printed
+# text cut an argument at every blank, so a HOME of "/x/h o" became two
+# arguments and podman rejected the run. The lines go into EXTRA_ARGS instead.
+split_extra_args() {  # $1 = runtime, $2 = scratch
+    EXTRA_ARGS=()
+    local lines
+    lines="$(suite_extra_args "$@")" || true
+    [ -z "$lines" ] || mapfile -t EXTRA_ARGS <<<"$lines"
+}
 
 # Symlinks that leave the tree, listed.
 #
@@ -1221,6 +1241,15 @@ verify_limit() {  # $1 = key in lib/defaults.env, $2 = the suite function that m
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     pr="$(pr_or_die "$pr")" || exit 1
+    # The filter is spliced into `sh -c` inside the container by suite_command,
+    # so a filter with a shell metacharacter writes its own test log: it can
+    # print a passing summary for the clean run and a failing one for the mutated
+    # run. Letters, digits and _ . : / - and spaces cover every filter a suite
+    # takes; a leading dash would be read as an option by the test runner.
+    case "$filter" in
+        ''|-*|*[!A-Za-z0-9_.:/\ -]*)
+            die "the test filter may hold only letters, digits and _ . : / - and spaces, and may not start with -: '$filter'" ;;
+    esac
     lease_gate "$pr" verify
     local named="${5:-}"
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
@@ -1371,7 +1400,7 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
         # PR can already execute whatever it likes. nosuid stays, as do
         # --cap-drop=ALL, --read-only, --security-opt=no-new-privileges and
         # --network=none, which are the isolation that actually holds.
-        # shellcheck disable=SC2046
+        split_extra_args "$rt" "$scratch"
         "$rt" --log-level=error run --rm \
             --timeout "$VERIFY_TIMEOUT" \
             --network=none \
@@ -1382,7 +1411,7 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
             --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
             --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
             --cpus "$(verify_limit VERIFY_CPUS suite_cpus)" \
-            -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
+            -v "$work:/repo:z" "${EXTRA_ARGS[@]}" \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
@@ -1412,7 +1441,7 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
 $(printf '%s' "$gmsg" | sed 's/^/    /')"
         fi
         say "fetching what the lockfile pins (network, no build scripts, --locked)"
-        # shellcheck disable=SC2046
+        split_extra_args "$rt" "$scratch"
         "$rt" --log-level=error run --rm \
             --timeout "$PREFETCH_TIMEOUT" \
             --cap-drop=ALL \
@@ -1421,7 +1450,7 @@ $(printf '%s' "$gmsg" | sed 's/^/    /')"
             --tmpfs "/tmp:rw,nosuid,size=$(verify_limit VERIFY_TMPFS suite_tmpfs)" \
             --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
             --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
-            -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
+            -v "$work:/repo:z" "${EXTRA_ARGS[@]}" \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_prefetch_command)" >"$work/prefetch.log" 2>&1 \
         || die "the dependency fetch failed. That is my container's network or a
@@ -1655,9 +1684,15 @@ PYEOF
 
 cmd_show() {
     mkdir -p "$RECEIPTS"
-    if [ $# -ge 1 ]; then cat "$RECEIPTS/$1.json" 2>/dev/null || die "no receipt for #$1"; return; fi
+    if [ $# -ge 1 ]; then
+        local one; one="$(pr_or_die "$1")" || exit 1
+        cat "$RECEIPTS/$one.json" 2>/dev/null || die "no receipt for #$one"
+        return
+    fi
     local n=0
-    for f in "$RECEIPTS"/*.json; do [ -e "$f" ] || continue; n=$((n+1)); printf '  %s\n' "$(basename "$f" .json): $(python3 -c "import json,sys;d=json.load(open('$f'));print(d['head'][:8], d['proof'][:60])")"; done
+    # The file name reaches python as argv, never as source text: a receipt
+    # directory is writable by the agent, and a name is whatever it chose.
+    for f in "$RECEIPTS"/*.json; do [ -e "$f" ] || continue; n=$((n+1)); printf '  %s\n' "$(basename "$f" .json): $(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d['head'][:8], d['proof'][:60])" "$f")"; done
     [ "$n" = 0 ] && say "no receipts recorded"
     return 0
 }

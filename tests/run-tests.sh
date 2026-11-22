@@ -1772,7 +1772,7 @@ echo "== the mutation cannot execute on the host =="
 # transform and nothing else. Asserted on the source because the exec path needs
 # a real container run to exercise end to end; the flag is the guarantee.
 if sc_case 1; then
-grep -q 'sed --sandbox -i "$mutation"' "$root/bin/maintainer-merge" \
+grep -q 'sed --sandbox -i -e "$mutation" --' "$root/bin/maintainer-merge" \
     && ok "the host-side mutation runs sed in --sandbox mode" \
     || bad "the mutation runs sed without --sandbox, so an e-flag mutation execs on the host"
 sc_end; fi

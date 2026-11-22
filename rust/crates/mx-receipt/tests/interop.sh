@@ -268,7 +268,7 @@ expect_rc "c: rust refuses a six-character head" 1 "$rc" "$out"
 out="$("$bin" show "$sb/receipts" ../../state-a/receipts/7 2>&1)"; rc=$?
 expect_rc "c: rust show refuses a path in place of a number (decision F2)" 1 "$rc" "$out"
 out="$(gate "$sb" show ../../state-a/receipts/7 2>&1)"; rc=$?
-[ "$rc" = 0 ] && ok "c: bash show still reads outside the directory (the behaviour F2 fixes)" || bad "c: bash show refused ../ (the control changed)" "$out"
+expect_rc "c: bash show refuses a path in place of a number too (PB-2, F2 fixed in bash)" 1 "$rc" "$out"
 
 printf 'interop: %d checks, %d failed\n' "$N" "$F"
 if [ "$N" != "$EXPECTED_CHECKS" ]; then

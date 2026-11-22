@@ -207,15 +207,15 @@ fn leases_check(ctx: &Ctx<'_>, out: &mut Out<'_>, st: &str) -> Result<(), Stop> 
         } else {
             // The expansion sits inside the `$(python3 ...)` of the bash: only that
             // substitution dies, with the line the substitution ends on.
-            out.warn_text("maintainer-doctor: line 452: DOCTOR_LEASE_HOURS: unbound variable\n");
+            out.warn_text("maintainer-doctor: line 454: DOCTOR_LEASE_HOURS: unbound variable\n");
             could_not_read(out);
         }
     }
-    // The summary line expands the limit at the top level: line 458 when leases were
-    // listed, 461 otherwise. An unset limit ends the shell there.
+    // The summary line expands the limit at the top level: line 460 when leases were
+    // listed, 463 otherwise. An unset limit ends the shell there.
     let hours = ctx
         .settings
-        .need("DOCTOR_LEASE_HOURS", if found.is_empty() { 461 } else { 458 }, out)?
+        .need("DOCTOR_LEASE_HOURS", if found.is_empty() { 463 } else { 460 }, out)?
         .to_string();
     out.add(decide_leases(&found, &hours));
     Ok(())
@@ -319,7 +319,7 @@ fn tasks_check(ctx: &Ctx<'_>, out: &mut Out, st: &str) -> Result<(), Stop> {
             let variable = format!("MIN_HOURS_{task}");
             if !is_identifier(&variable) {
                 out.warn_text(&format!(
-                    "maintainer-doctor: line 530: {variable}: invalid variable name\n"
+                    "maintainer-doctor: line 532: {variable}: invalid variable name\n"
                 ));
                 return Err(Stop::AbortSection);
             }
@@ -327,7 +327,7 @@ fn tasks_check(ctx: &Ctx<'_>, out: &mut Out, st: &str) -> Result<(), Stop> {
             let within = if let Some(min) = text::test_int(&min) {
                 min > 0 && since < min
             } else {
-                out.warn_text(&text::integer_expected(531, &min));
+                out.warn_text(&text::integer_expected(533, &min));
                 false
             };
             if within {
