@@ -1,9 +1,9 @@
 //! Reading `profile.env` the way a bash script that sources it would, in a child bash.
 //!
 //! `profile.env` is shell code, so a child `bash` evaluates it (the same rule as
-//! `mx-profile`): nothing here parses shell. The child sees the allowlisted environment
-//! and the `MAINTAINER_*` variables (decision P4A-env), and answers with the few variables
-//! the schedulers read, framed so that anything the profile itself prints stays apart.
+//! `mx-profile`): nothing here parses shell. The child sees the caller's environment, as the
+//! bash scripts that source the file do (decision P4A-env), and answers with the few
+//! variables the schedulers read, framed so that anything the profile itself prints stays apart.
 
 use crate::env::Env;
 use crate::tools::{self, QUICK, Ran};
@@ -74,15 +74,12 @@ pub fn source(proc: &dyn Proc, env: &Env, file: &Path, mode: Mode) -> Result<Sou
         Mode::Cron => "cron",
         Mode::Launchd => "launchd",
     };
-    let mut spec = tools::spec(
+    let spec = tools::spec(
         env,
         "bash",
         &["-c", SCRIPT, "bash", &file.to_string_lossy(), mode_word],
         QUICK,
     );
-    for (name, value) in env.maintainer_vars() {
-        spec = spec.env(name, value);
-    }
     let output = match tools::call(proc, &spec) {
         Ran::Done(output) => output,
         other => {

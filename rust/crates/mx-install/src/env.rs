@@ -1,38 +1,24 @@
 //! What a program reads from its surroundings, collected once at the start.
 //!
 //! The library reads no environment of its own: `main` builds an [`Env`] and everything
-//! below asks it. Children get an allowlist of variables and no others (decision P4A-env):
-//! `GIT_DIR` and its kin are left out because a git hook exports them and a child `git`
-//! would then work on the hook's repository.
+//! below asks it. A child gets the caller's whole environment, as a child of the bash script
+//! does, except the variables in [`CHILD_DENY`] (decision P4A-env).
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-/// Variables a tool the installer starts may see, besides `PATH` and `LC_ALL`.
-pub const CHILD_ALLOW: &[&str] = &[
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TZ",
-    "LANG",
-    "XDG_RUNTIME_DIR",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_STATE_HOME",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GIT_TERMINAL_PROMPT",
-    "GIT_EXEC_PATH",
-    // A program that starts another Rust program passes the operator's list on.
-    "MAINTAINER_CHILD_ENV",
+/// Variables a child does not inherit. `PATH` and `LC_ALL` belong to the process adapter. The
+/// five `GIT_*` names are what a git hook exports: a child `git` that inherited them would
+/// work on the hook's repository and not on the checkout it was asked about.
+pub const CHILD_DENY: &[&str] = &[
+    "PATH",
+    "LC_ALL",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
 ];
 
 /// What bash searches when `PATH` is unset.
@@ -101,33 +87,15 @@ impl Env {
         std::env::split_paths(&self.path()).filter(|dir| dir.is_absolute()).collect()
     }
 
-    /// The variables a child sees: the allowlist, and the names `MAINTAINER_CHILD_ENV`
-    /// adds (an operator or a test harness chooses them). A value that is not UTF-8 is
-    /// left out.
+    /// The variables a child sees: the caller's, less [`CHILD_DENY`]. A value that is not
+    /// UTF-8 is left out, because a call carries its variables as text.
     #[must_use]
     pub fn child_vars(&self) -> Vec<(String, String)> {
-        let mut allowed: Vec<String> = CHILD_ALLOW.iter().map(|n| (*n).to_string()).collect();
-        if let Some(extra) = self.get("MAINTAINER_CHILD_ENV").and_then(OsStr::to_str) {
-            allowed.extend(extra.split_whitespace().map(str::to_string));
-        }
-        let mut out = Vec::new();
-        for name in allowed {
-            if name == "PATH" || name == "LC_ALL" {
-                continue;
-            }
-            if let Some(value) = self.get(&name).and_then(OsStr::to_str) {
-                out.push((name, value.to_string()));
-            }
-        }
-        out
-    }
-
-    /// The `MAINTAINER_*` variables: a profile file reads them (`${MAINTAINER_STATE_DIR:-...}`).
-    #[must_use]
-    pub fn maintainer_vars(&self) -> Vec<(String, String)> {
         self.vars
             .iter()
-            .filter(|(name, _)| name.as_bytes().starts_with(b"MAINTAINER_"))
+            .filter(|(name, _)| {
+                !CHILD_DENY.iter().any(|denied| OsStr::new(denied) == name.as_os_str())
+            })
             .filter_map(|(name, value)| {
                 Some((name.to_str()?.to_string(), value.to_str()?.to_string()))
             })
@@ -176,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_child_gets_the_allowlist_and_the_names_the_operator_adds_and_nothing_else() {
+    fn a_child_gets_the_whole_environment_except_path_locale_and_the_hooks_git_variables() {
         let env = Env::new(
             "x",
             &[],
@@ -185,16 +153,18 @@ mod tests {
                 ("HOME", "/h"),
                 ("GH_TOKEN", "secret"),
                 ("GIT_DIR", "/hook/.git"),
-                ("CZ_CASE_DIR", "/case"),
-                ("MAINTAINER_CHILD_ENV", "CZ_CASE_DIR"),
+                ("GIT_WORK_TREE", "/hook"),
+                ("GIT_INDEX_FILE", "/hook/.git/index"),
+                ("GIT_OBJECT_DIRECTORY", "/hook/.git/objects"),
+                ("GIT_COMMON_DIR", "/hook/.git"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("SYSTEMCTL_LOG", "/log"),
+                ("LC_ALL", "de_DE.UTF-8"),
                 ("PATH", "/bin"),
             ],
         );
         let names: Vec<String> = env.child_vars().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(
-            names,
-            vec!["HOME".to_string(), "MAINTAINER_CHILD_ENV".to_string(), "CZ_CASE_DIR".to_string()]
-        );
+        assert_eq!(names, ["GH_TOKEN", "GIT_CONFIG_GLOBAL", "HOME", "SYSTEMCTL_LOG"]);
     }
 
     #[test]

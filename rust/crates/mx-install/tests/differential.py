@@ -28,9 +28,9 @@ TREE_FILES = ["install.sh", "new-profile.sh", "lib", "scripts", "bin", "profiles
 LOG = r'''d="${CZ_CASE_DIR:?}"
 { printf '%s' "$CZ_STUB"; for a in "$@"; do printf ' %q' "$a"; done
   printf ' | cwd=%s | env=' "$PWD"
-  env | grep -E '^(HOME|LC_ALL|TZ|DISPLAY|DBUS_SESSION_BUS_ADDRESS|USER|LOGNAME)=' | LC_ALL=C sort | tr '\n' ' '
+  env | grep -E '^(HOME|LC_ALL|TZ|DISPLAY|DBUS_SESSION_BUS_ADDRESS|MAINTAINER_PROFILE|MAINTAINER_NOTIFY|MAINTAINER_UNINSTALL_YES|USER|LOGNAME)=' | LC_ALL=C sort | tr '\n' ' '
   printf '| names='
-  env | cut -d= -f1 | grep -vE '^(_|SHLVL|PWD|OLDPWD|BASH_ENV|MAINTAINER_[A-Z_]*)$' | LC_ALL=C sort | tr '\n' ' '
+  env | cut -d= -f1 | grep -vE '^(_|SHLVL|PWD|OLDPWD|BASH_ENV|MAINTAINER_CHILD_ENV)$' | LC_ALL=C sort | tr '\n' ' '
   printf '\n'; } >> "$d/calls.log"
 '''
 STUBS = {

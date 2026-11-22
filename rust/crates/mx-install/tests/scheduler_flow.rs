@@ -675,3 +675,37 @@ fn a_cron_install_for_a_profile_with_no_tasks_writes_a_block_with_no_closing_lin
     assert_eq!(out.err, format!("{line}{line}"));
     assert!(out.out.starts_with("  installed 0 cron entries for profile 'sk'\n"));
 }
+
+#[test]
+fn a_home_with_a_space_in_its_name_loses_the_alert_because_the_directory_list_is_split_on_blanks() {
+    // Pins current behaviour (found, not fixed): alert.sh passes `$dirs` unquoted to printf, so
+    // a path with a blank becomes two words and neither is a directory.
+    let sb = Sandbox::new("alertspace");
+    let spaced = sb.dir.join("my home");
+    fs::create_dir_all(spaced.join(".local/state/sk-maint")).unwrap();
+    let proc = ScriptedProc::new();
+    let env = mx_install::env::Env::new(
+        &sb.co.join("platform/linux/alert.sh").to_string_lossy(),
+        &["sk-ci"],
+        &spaced.to_string_lossy(),
+        &[
+            ("HOME", &spaced.to_string_lossy()),
+            ("PATH", &sb.tools.to_string_lossy()),
+            ("MAINTAINER_NOTIFY", "off"),
+        ],
+    );
+    let out = capture(|con| alert(&env, &RealMachine, &proc, con));
+    assert_eq!(out.code, 0);
+    assert!(!spaced.join(".local/state/sk-maint/logs").exists(), "the alert was written nowhere");
+}
+
+#[test]
+fn a_profile_that_stops_on_an_unbound_variable_ends_install_cron_with_1_and_says_nothing() {
+    // Pins current behaviour: `set -u` ends the shell inside the sourced file, and the
+    // redirection hides the message (the shell script ends with 1, not bash -c's 127).
+    let sb = deployed("cronunboundvar", "echo \"$NO_SUCH_VARIABLE\"\nTASKS=a\nSTATE_DIR=/s\n");
+    let proc = ScriptedProc::new();
+    proc.on("crontab -l", Answer::err(1, "no crontab for u\n"));
+    let out = cron(&sb, &proc, &["--dry-run"], Some("sk"));
+    assert_eq!((out.code, out.out.as_str(), out.err.as_str()), (1, "", ""));
+}

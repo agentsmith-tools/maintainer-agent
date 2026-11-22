@@ -35,11 +35,8 @@ pub fn uname(proc: &dyn Proc, env: &Env) -> String {
 pub fn state_dir_of(proc: &dyn Proc, env: &Env, profile_env: &Path) -> Vec<u8> {
     const SCRIPT: &str =
         "set -u; set -o pipefail; . \"$1\" >/dev/null 2>&1; printf '%s' \"${STATE_DIR:-}\"";
-    let mut spec =
+    let spec =
         tools::spec(env, "bash", &["-c", SCRIPT, "bash", &profile_env.to_string_lossy()], QUICK);
-    for (name, value) in env.maintainer_vars() {
-        spec = spec.env(name, value);
-    }
     let ran = tools::call(proc, &spec);
     strip_trailing_newlines(ran.stdout().to_vec())
 }

@@ -419,6 +419,13 @@ fn enabled_timers_refuse_an_uninstall_with_3_and_the_count_in_the_first_line() {
 }
 
 #[test]
+fn one_enabled_timer_is_enough_for_the_plan_to_refuse() {
+    let mut f = ufacts();
+    f.live_timers = Some(1);
+    assert_eq!(refusal(decide_uninstall(&f)), Refusal::LiveTimers { count: 1 });
+}
+
+#[test]
 fn the_yes_answer_and_a_dry_run_skip_the_question() {
     let mut f = ufacts();
     f.live_timers = Some(2);

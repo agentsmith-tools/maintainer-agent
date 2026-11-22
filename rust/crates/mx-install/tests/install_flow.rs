@@ -252,6 +252,12 @@ fn the_lock_is_asked_only_for_a_profile_whose_state_has_a_lock_file_and_never_wi
         let out = run(&sb, &proc, &[flag]);
         assert_eq!(out.code, 0, "{flag}: {}", out.err);
         assert_eq!(proc.of("flock").len(), before, "{flag} must not ask the lock");
+        assert_eq!(
+            out.out.contains("would"),
+            flag == "--dry-run",
+            "{flag}: only a dry run says would: {}",
+            out.out
+        );
     }
     let free = Sandbox::new("free");
     let proc2 = ScriptedProc::new();

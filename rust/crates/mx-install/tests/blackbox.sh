@@ -108,20 +108,46 @@ done
 printf 'pinned differences (%d), the only failures allowed:\n' "${#PINNED[@]}"
 for row in "${PINNED[@]}"; do printf '  - %s\n      %s\n' "${row%%|*}" "${row#*|}"; done
 
-# --- the install cases of tests/run-tests.sh, plain tree and Rust tree -----------------------
+# --- tests/run-tests.sh, plain tree and Rust tree --------------------------------------------
+# Four runs. The first pair is the whole suite and is information: its cases that grep the
+# text of install.sh, new-profile.sh or a platform script fail against a two-line wrapper.
+# The second pair skips the source-coupled blocks (MX_SKIP_SOURCE_COUPLED=1, the suite's own
+# switch), so what still fails only on the Rust tree is behaviour, and that list is a gate:
+# it may hold only the cases named in SUITE_PINNED.
+SUITE_PINNED=(
+"a home path leaked into the repository|the suite greps the whole tree for the author's home path, and the Rust binaries in .rust-bin carry the path they were built in"
+)
 if [ "$with_suite" = 1 ]; then
     plain="$scratch/bb-plain"
     rm -rf "$plain"; mkdir -p "$plain"
     list="$scratch/bb-list"
     git -C "$root" ls-files -z --cached --others --exclude-standard > "$list" || die "git ls-files failed"
     tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$plain" -xf - || die "copying the plain tree failed"
-    sb="$(MX_TREE="$plain" TMPDIR="$scratch" PYTHONDONTWRITEBYTECODE=1 bash "$root/tests/run-tests.sh" 2>&1)"
-    sr="$(MX_TREE="$tree" TMPDIR="$scratch" PYTHONDONTWRITEBYTECODE=1 bash "$root/tests/run-tests.sh" 2>&1)"
-    printf 'suite, bash tree (no .git): %s\n' "$(grep -E '[0-9]+ passed, [0-9]+ failed' <<<"$sb" | tail -1 | sed 's/^ *//')"
-    printf 'suite, Rust tree          : %s\n' "$(grep -E '[0-9]+ passed, [0-9]+ failed' <<<"$sr" | tail -1 | sed 's/^ *//')"
-    only_rust="$(LC_ALL=C comm -13 <(grep -E '^ *FAIL' <<<"$sb" | sed 's/^ *//' | LC_ALL=C sort -u) <(grep -E '^ *FAIL' <<<"$sr" | sed 's/^ *//' | LC_ALL=C sort -u))"
-    echo "cases that fail only on the Rust tree:"
-    printf '%s\n' "$only_rust" | sed 's/^/  /'
+    mkdir -p "$scratch/czhome" "$scratch/cztmp"
+    suite() {  # suite TREE [ENV...]: prints the suite's output
+        local t="$1"; shift
+        env HOME="$scratch/czhome" TMPDIR="$scratch/cztmp" MX_TREE="$t" PYTHONDONTWRITEBYTECODE=1 "$@" bash "$root/tests/run-tests.sh" 2>&1
+    }
+    sb="$(suite "$plain")"; sr="$(suite "$tree")"
+    sbs="$(suite "$plain" MX_SKIP_SOURCE_COUPLED=1)"; srs="$(suite "$tree" MX_SKIP_SOURCE_COUPLED=1)"
+    tally() { grep -E '[0-9]+ passed, [0-9]+ failed' <<<"$1" | tail -1 | sed 's/^ *//'; }
+    fails() { grep -E '^ *FAIL' <<<"$1" | sed 's/^ *//' | LC_ALL=C sort -u; }
+    printf 'suite, bash tree (no .git)                  : %s\n' "$(tally "$sb")"
+    printf 'suite, Rust tree                            : %s\n' "$(tally "$sr")"
+    printf 'suite without source-coupled, bash tree     : %s\n' "$(tally "$sbs")"
+    printf 'suite without source-coupled, Rust tree     : %s\n' "$(tally "$srs")"
+    echo "cases that fail only on the Rust tree (the whole suite; source-coupled cases included):"
+    LC_ALL=C comm -13 <(fails "$sb") <(fails "$sr") | sed 's/^/  /'
+    behaviour="$(LC_ALL=C comm -13 <(fails "$sbs") <(fails "$srs"))"
+    echo "cases that fail only on the Rust tree with the source-coupled blocks skipped (behaviour):"
+    printf '%s\n' "$behaviour" | sed 's/^/  /'
+    want_suite=""
+    for row in "${SUITE_PINNED[@]}"; do want_suite+="FAIL  ${row%%|*}"$'\n'; done
+    want_suite="$(printf '%s' "$want_suite" | LC_ALL=C sort -u)"
+    if [ "$behaviour" != "$want_suite" ]; then
+        echo "  !! the behavioural failures are not the pinned ones"; status=1
+    fi
+    for row in "${SUITE_PINNED[@]}"; do printf '  - %s\n      %s\n' "${row%%|*}" "${row#*|}"; done
 fi
 
 [ "$status" = 0 ] || { echo "RESULT: FAIL"; exit 1; }

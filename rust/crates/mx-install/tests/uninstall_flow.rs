@@ -47,6 +47,27 @@ fn enabled_timers_refuse_the_uninstall_with_3_and_the_count_and_remove_nothing()
 }
 
 #[test]
+fn a_single_enabled_timer_is_enough_to_refuse() {
+    let sb = Sandbox::new("guardone");
+    deploy(&sb);
+    let proc = ScriptedProc::new();
+    proc.on(LIST, Answer::ok("maintainer@sk-ci.timer n/a n/a\n"));
+    let out = run(&sb, &proc, &["--uninstall"], &[]);
+    assert_eq!(out.code, 3);
+    assert!(
+        out.err.starts_with("install.sh: 1 maintainer timer(s) are enabled on this machine.\n"),
+        "{}",
+        out.err
+    );
+    assert!(sb.share().join("VERSION").is_file());
+    assert_eq!(
+        proc.of("systemctl"),
+        vec!["systemctl --user show-environment".to_string(), LIST.to_string()],
+        "the refusal comes before the second question about the session"
+    );
+}
+
+#[test]
 fn only_the_value_1_answers_the_question() {
     for value in ["yes", "true", "0", ""] {
         let sb = Sandbox::new("only1");

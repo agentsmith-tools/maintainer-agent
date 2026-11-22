@@ -11,6 +11,7 @@ use mx_install::machine::{Change, FakeMachine};
 use mx_install::plan::{
     Cmd, Decision, Layout, OnFail, Plan, Step, UninstallFacts, decide_uninstall,
 };
+use sha2::Digest;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -335,4 +336,30 @@ fn an_unreadable_profile_step_in_a_kept_line_prints_sed_s_error_then_an_empty_li
         "sed: -e expression #1, char 32: invalid reference \\1 on `s' command's RHS\n"
     );
     assert_eq!(ran.out, "           \n");
+}
+
+#[test]
+fn the_rust_stamp_records_the_hash_of_the_file_that_is_installed_and_not_of_the_one_it_came_from() {
+    use mx_install::plan::RustProgram;
+    let program = RustProgram {
+        build: "maintainer-doctor",
+        installed: PathBuf::from("/h/.local/bin/maintainer-doctor"),
+        backup: PathBuf::from("/h/.local/bin/maintainer-doctor.sh"),
+        source: PathBuf::from("/b/maintainer-doctor"),
+        linux_only: false,
+    };
+    let machine = FakeMachine::new();
+    machine.put("/h/.local/bin/maintainer-doctor", "what is installed");
+    machine.put("/b/maintainer-doctor", "what the directory holds");
+    let plan = Plan { steps: vec![Step::WriteRustStamp(vec![program])], exit: 0 };
+    let ran = live(&machine, &ScriptedProc::new(), &plan);
+    assert_eq!(ran.result, Ok(0));
+    let want = format!(
+        "{}  /h/.local/bin/maintainer-doctor\n",
+        mx_install::util::hex(&sha2::Sha256::digest(b"what is installed"))
+    );
+    assert_eq!(
+        machine.peek(std::path::Path::new("/h/.local/share/maintainer/RUST_STAMP")),
+        Some(want.into_bytes())
+    );
 }
