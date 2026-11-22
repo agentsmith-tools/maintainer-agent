@@ -143,3 +143,16 @@ read -r interop_n interop_f <<<"$summary"
 [ "${interop_n:-0}" -gt 0 ] || fail "interop (no summary line, so no check ran)" "$out"
 [ "${interop_f:-1}" = 0 ] || fail "interop ($interop_f failed)" "$out"
 say "interop: ok ($interop_n checks, $interop_f failed; bash and rust verify each other's receipts)"
+
+# 7. the compile_fail examples of the gate crates fail with the code in their tag.
+# rustdoc on stable accepts any tag for any compile error, so a typo would keep an
+# example green while it tested nothing.
+cf="$ws/scripts/check-compile-fail-codes.sh"
+[ -f "$cf" ] || fail "compile-fail codes ($cf is missing, so no example was checked)"
+out="$(bash "$cf" 2>&1)"; rc=$?
+[ "$rc" = 0 ] || fail "compile-fail codes (exited $rc)" "$out"
+summary="$(sed -n 's/^compile-fail: \([0-9][0-9]*\) examples, \([0-9][0-9]*\) failed$/\1 \2/p' <<<"$out")"
+read -r cf_n cf_f <<<"$summary"
+[ "${cf_n:-0}" -gt 0 ] || fail "compile-fail codes (no summary line, so no example was checked)" "$out"
+[ "${cf_f:-1}" = 0 ] || fail "compile-fail codes ($cf_f failed)" "$out"
+say "compile-fail codes: ok ($cf_n examples, each fails with the code in its tag)"
