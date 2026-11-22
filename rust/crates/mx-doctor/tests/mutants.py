@@ -121,10 +121,33 @@ MUTANTS = [
      "if root_path.file_name().is_some_and(|base| names.iter().any(|name| base == *name)) {\n                count += 1;\n            }",
      ""),
     ("prof-ambient", "profile", C + "run.rs", '"HOME" && valid_name(name)', '"HOME" && false && valid_name(name)'),
+    # --- the flock check (bash PR #243), added after the port ---
+    ("flock-ok-text", "message", C + "install.rs", 'Item::ok("flock on PATH")', 'Item::ok("flock on the PATH")'),
+    ("flock-fail-text", "message", C + "install.rs", '"flock is required to serialize runs and is NOT on PATH"',
+     '"flock is required to serialise runs and is NOT on PATH"'),
+    ("flock-fix-text", "message", C + "install.rs", '"install flock for this platform"', '"install flock"'),
+    ("flock-inverted", "branch", C + "install.rs", 'ctx.command_v("flock").is_some()', 'ctx.command_v("flock").is_none()'),
+    ("flock-always-ok", "branch", C + "install.rs", 'ctx.command_v("flock").is_some()',
+     'ctx.command_v("flock").is_some() || true'),
+    ("flock-wrong-name", "branch", C + "install.rs", 'ctx.command_v("flock")', 'ctx.command_v("flocks")'),
+    ("flock-fail-to-warn", "severity", C + "install.rs",
+     'Item::fail(\n            "flock is required', 'Item::warn(\n            "flock is required'),
+    ("flock-ok-to-warn", "severity", C + "install.rs", 'Item::ok("flock on PATH")', 'Item::warn("flock on PATH", "x")'),
+    ("flock-ok-to-fail", "severity", C + "install.rs", 'Item::ok("flock on PATH")', 'Item::fail("flock on PATH", "x")'),
+    ("flock-early-return", "order", C + "install.rs",
+     '"install flock for this platform",\n        ));\n', '"install flock for this platform",\n        ));\n        return;\n'),
+    ("flock-heading-gone", "order", C + "install.rs",
+     '    out.add(Item::head("Backend"));\n    // bash PR #243', '    // bash PR #243'),
+    # --- stderr line numbers moved by two when bash gained the flock lines ---
+    ("flockline-run-limit", "unbound", C + "github.rs", 'line 189: DOCTOR_RUN_LIMIT', 'line 187: DOCTOR_RUN_LIMIT'),
+    ("flockline-grace", "unbound", C + "github.rs", 'need("RED_GRACE_HOURS", 187,', 'need("RED_GRACE_HOURS", 185,'),
+    ("flockline-lease-warn", "unbound", C + "audit.rs", 'line 454: DOCTOR_LEASE_HOURS', 'line 452: DOCTOR_LEASE_HOURS'),
+    ("flockline-invalid-name", "unbound", C + "audit.rs", 'line 532: {variable}', 'line 530: {variable}'),
+    ("flockline-min-hours", "unbound", C + "audit.rs", 'integer_expected(533,', 'integer_expected(531,'),
     # --- the review's fixes ---
     ("rv-exit-home", "exit-code", C + "run.rs", 'HOME: unbound variable\\n", 1)', 'HOME: unbound variable\\n", 127)'),
     ("rv-run-limit", "unbound", C + "github.rs", 'if ctx.settings.is_set("DOCTOR_RUN_LIMIT") {', "if true {"),
-    ("rv-lease-limit-line", "unbound", C + "audit.rs", "if found.is_empty() { 461 } else { 458 }", "if found.is_empty() { 440 } else { 458 }"),
+    ("rv-lease-limit-line", "unbound", C + "audit.rs", "if found.is_empty() { 463 } else { 460 }", "if found.is_empty() { 440 } else { 460 }"),
     ("rv-scan-overlap", "scan-stream", C + "host.rs", "max().unwrap_or(0).saturating_sub(1);", "max().unwrap_or(0).saturating_sub(2);"),
     ("rv-scan-chunk", "scan-stream", C + "host.rs", "pub const SCAN_CHUNK: usize = 64 * 1024;", "pub const SCAN_CHUNK: usize = 1024 * 1024;"),
     ("rv-py-wall", "python", C + "install.rs", "if ctx.python_available() { rule_count(contents) } else { None }", "rule_count(contents)"),
@@ -149,7 +172,7 @@ MUTANTS = [
     ("rv-lease-glob", "lease-boundary", C + "audit.rs", 'glob_names(ctx.host, &dir, "pr-", ".json")', 'glob_names(ctx.host, &dir, "pr", ".json")'),
     ("rv-linger", "per-os", C + "hostchecks.rs", 'call.text() == "yes"', 'call.text().starts_with("y")'),
     ("rv-noting", "missing-log", C + "run.rs", "if let Err(mx_ports::ProcError::NotFound { program }) = &result {", "if let Err(mx_ports::ProcError::Spawn { program, .. }) = &result {"),
-    ("rv-lease-452", "unbound", C + "audit.rs", "line 452: DOCTOR_LEASE_HOURS", "line 453: DOCTOR_LEASE_HOURS"),
+    ("rv-lease-first-line", "unbound", C + "audit.rs", "line 454: DOCTOR_LEASE_HOURS", "line 455: DOCTOR_LEASE_HOURS"),
     ("rv-leap-400", "date", C + "pyval.rs", "year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)", "year % 4 == 0"),
     ("rv-leap-100", "date", C + "pyval.rs", "year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)", "year % 4 == 0 && year % 100 != 0"),
     ("rv-interrupted", "scan-stream", C + "host.rs", "Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,", "Err(error) if false => continue,"),
@@ -202,7 +225,7 @@ def summarize(out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scratch", required=True)
-    ap.add_argument("--only")
+    ap.add_argument("--only", help="run the mutants whose id starts with this text")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--check", action="store_true", help="only verify that every old text is unique")
     a = ap.parse_args()
@@ -251,7 +274,7 @@ def main():
     survivors = build_errs = 0
     for mid, cat, rel, old, new, *rest in MUTANTS:
         cmd = rest[0] if rest else None
-        if a.only and mid != a.only:
+        if a.only and not mid.startswith(a.only):
             continue
         shutil.rmtree(work, ignore_errors=True)
         shutil.copytree(pristine, work)

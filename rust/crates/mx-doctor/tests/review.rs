@@ -40,7 +40,7 @@ fn without(rig: &mut Rig, name: &str, extra: &[(&str, &str)]) {
 #[test]
 fn an_unset_floor_grace_or_lease_limit_ends_the_run_with_status_1_and_the_bash_line_numbers() {
     for (name, line) in
-        [("DENY_WALL_MIN_RULES", 92), ("RED_GRACE_HOURS", 185), ("DOCTOR_LEASE_HOURS", 461)]
+        [("DENY_WALL_MIN_RULES", 92), ("RED_GRACE_HOURS", 187), ("DOCTOR_LEASE_HOURS", 463)]
     {
         let mut rig = Rig::new(&[]);
         without(
@@ -79,7 +79,7 @@ fn an_unset_floor_grace_or_lease_limit_ends_the_run_with_status_1_and_the_bash_l
 // --- B2: an unset run limit kills only the substitution --------------------------------
 
 #[test]
-fn an_unset_run_limit_warns_on_line_187_and_goes_on_without_asking_gh_for_runs() {
+fn an_unset_run_limit_warns_on_line_189_and_goes_on_without_asking_gh_for_runs() {
     let mut rig = Rig::new(&[("REPO_SLUG", "o/r"), ("REPO_PATH", "")]);
     without(&mut rig, "DOCTOR_RUN_LIMIT", &[("REPO_SLUG", "o/r"), ("REPO_PATH", "")]);
     rig.proc.have("gh", "/bin/gh");
@@ -87,7 +87,7 @@ fn an_unset_run_limit_warns_on_line_187_and_goes_on_without_asking_gh_for_runs()
     assert_eq!(github::repository(&rig.ctx(), &mut o), Ok(()));
     assert_eq!(
         String::from_utf8_lossy(&o.stderr),
-        "maintainer-doctor: line 187: DOCTOR_RUN_LIMIT: unbound variable\n"
+        "maintainer-doctor: line 189: DOCTOR_RUN_LIMIT: unbound variable\n"
     );
     assert!(has_warn(
         &o.report,
@@ -512,7 +512,7 @@ fn only_the_exact_answer_yes_means_lingering() {
 }
 
 #[test]
-fn an_unset_lease_limit_with_a_leases_directory_prints_line_452_then_line_461() {
+fn an_unset_lease_limit_with_a_leases_directory_prints_line_454_then_line_463() {
     let mut rig = Rig::new(&[("STATE_DIR", "/state"), ("GH_ACCOUNT", "a")]);
     without(&mut rig, "DOCTOR_LEASE_HOURS", &[("STATE_DIR", "/state"), ("GH_ACCOUNT", "a")]);
     rig.host.dir("/state/leases");
@@ -522,7 +522,7 @@ fn an_unset_lease_limit_with_a_leases_directory_prints_line_452_then_line_461() 
     assert_eq!(stop, Stop::Exit(1));
     assert_eq!(
         String::from_utf8_lossy(&o.stderr),
-        "maintainer-doctor: line 452: DOCTOR_LEASE_HOURS: unbound variable\nmaintainer-doctor: line 461: DOCTOR_LEASE_HOURS: unbound variable\n"
+        "maintainer-doctor: line 454: DOCTOR_LEASE_HOURS: unbound variable\nmaintainer-doctor: line 463: DOCTOR_LEASE_HOURS: unbound variable\n"
     );
 }
 

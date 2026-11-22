@@ -22,7 +22,7 @@ If you read one section, read [Writing a test that can fail](#3-writing-a-test-t
 | layer | what it proves | add a case when | run it | time |
 |---|---|---|---|---|
 | `tests/run-tests.sh` | The black-box oracle. Every program, profile, script and document refuses what it must and says so. Cases that read program text carry an `sc_case` tag. | You add or change a guard, a prompt rule, a profile file, a script or a doc claim. This is the default home for a new case. | `bash tests/run-tests.sh` | about 4 minutes on a loaded laptop |
-| `tests/characterization/` | What `bin/maintainer-merge`, `bin/maintainer-doctor` and `bin/maintainer-repo` do today, odd behaviour included, by exit code, stream and `gh` argv, so a port can be held to it. | You change the merge gate's observable behaviour: its argv, its exit codes, its messages, its order of calls. | `bash tests/run-characterization.sh` | about 2.5 to 4 minutes |
+| `tests/characterization/` | What `bin/maintainer-merge`, `bin/maintainer-doctor`, `bin/maintainer-repo`, the orchestrator, the installers and the five repository checks (`scripts/check_claims.sh`, `scripts/verify-action-pins.sh`, `scripts/shellcheck-sweep.sh`, `evals/run-evals.sh`, `tests/containment-probe.sh`) do today, odd behaviour included, by exit code, stream and tool argv, so a port can be held to it. | You change the merge gate's observable behaviour: its argv, its exit codes, its messages, its order of calls. | `bash tests/run-characterization.sh` | about 2.5 to 4 minutes |
 | `tests/diff/` | That two program trees (the bash tree and a Rust tree) behave the same on the scenarios in `tests/diff/scenarios/`: argv per stub tool, exit code, stdout, stderr, state tree. | You add a scenario for a program that a port will replace. | `bash tests/diff/record.sh`, `compare.sh`; the recorder's own checks are `selftest.sh` and `prove.sh` | `selftest.sh` about 25 s, `prove.sh` under 2 minutes |
 | `scripts/rust-gate.sh` | The Rust workspace formats, lints clean, passes its tests, keeps process spawning inside `mx-ports`, and exchanges receipts with the bash gate. | You touch anything under `rust/`. | `scripts/rust-gate.sh` | about 30 s once built |
 
@@ -76,7 +76,7 @@ sc_end; fi
 
 A characterization case records what the bash gate does now. Where the bash program does something a port is meant to change, the comment above the case says `pins current behaviour, see plan decision F<n>` (`F<n>` numbers a decision in the maintainer's private migration plan, so read the case's own comment for the reason), and the case still pins it. Where a case caught a defect, it flips to the fixed behaviour and says `fixed`, as the F9 head-fence cases do (`tests/characterization/gate-merge-path.sh`).
 
-`tests/run-characterization.sh` runs every file of a known family (`gate`, `run`, `doctor`, `repo`, `install`, matched as `<family>-*.sh`), skips helper files named `lib*.sh`, and takes file names to run a subset:
+`tests/run-characterization.sh` runs every file of a known family (`gate`, `run`, `doctor`, `repo`, `install`, `checks`, matched as `<family>-*.sh`), skips helper files named `lib*.sh`, and takes file names to run a subset:
 
 ```sh
 bash tests/run-characterization.sh gate-merge-path.sh

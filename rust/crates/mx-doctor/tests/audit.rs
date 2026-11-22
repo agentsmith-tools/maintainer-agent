@@ -557,7 +557,7 @@ fn an_interval_of_zero_or_text_never_excuses_a_failure_and_text_prints_the_test_
     );
     assert_eq!(
         String::from_utf8_lossy(&o.stderr),
-        "maintainer-doctor: line 531: [: abc: integer expected\n"
+        "maintainer-doctor: line 533: [: abc: integer expected\n"
     );
 }
 
@@ -583,7 +583,7 @@ fn a_task_name_with_a_hyphen_and_a_success_on_record_aborts_the_rest_of_the_sect
     assert_eq!(r, Err(Stop::AbortSection));
     assert_eq!(
         String::from_utf8_lossy(&o.stderr),
-        "maintainer-doctor: line 530: MIN_HOURS_read-only: invalid variable name\n"
+        "maintainer-doctor: line 532: MIN_HOURS_read-only: invalid variable name\n"
     );
     assert!(!lines(&o.report).iter().any(|l| l.contains("zeta") || l.contains("every task")));
 }
