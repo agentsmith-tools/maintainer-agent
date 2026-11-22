@@ -23,11 +23,12 @@ suite_named_only() { return 0; }
 # orchestrator, the doctor, the repo tool, the MCP server), everything under
 # lib/ (run.sh, the classifier's failure-shapes.json, the profile loader and
 # every backend in lib/backends/), the installers, the platform units the
-# installer cases read, and the evals the doctor cases run. A path outside this
-# list is not run by any case, so a receipt for it would prove nothing.
+# installer cases read, the evals the doctor cases run, and scripts/cutover.sh,
+# which the cutover cases drive. A path outside this list is not run by any
+# case, so a receipt for it would prove nothing.
 suite_covers() {
     case "$1" in
-        bin/*|lib/*|install.sh|new-profile.sh|platform/*|evals/*) return 0 ;;
+        bin/*|lib/*|install.sh|new-profile.sh|platform/*|evals/*|scripts/cutover.sh) return 0 ;;
     esac
     return 1
 }

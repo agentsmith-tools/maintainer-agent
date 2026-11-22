@@ -17,6 +17,7 @@
 - [Verifying a pull request](verifying.md)
 - [When a release is owed](release.md)
 - [Deploying it](deploy/README.md)
+- [Moving a machine to the Rust programs](deploy/cutover.md)
 - [Going public](going-public.md)
 
 # The record

@@ -11957,13 +11957,13 @@ echo "== the characterization runner finds every family of case files =="
 # that must not run.
 cr="$stub_dir/crun"; rm -rf "$cr"; mkdir -p "$cr/tests/characterization"
 cp "$suite_root/tests/run-characterization.sh" "$cr/tests/"
-for fam in gate run doctor repo install checks; do
+for fam in gate run doctor repo install checks cutover; do
     printf '#!/usr/bin/env bash\necho "PASS  %s case"\necho "SUMMARY cases=1 pass=1 fail=0"\n' "$fam" > "$cr/tests/characterization/$fam-x.sh"
 done
 printf '#!/usr/bin/env bash\nexit 1\n' > "$cr/tests/characterization/lib-x.sh"
 out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2>&1)"; rc=$?
-[ "$rc" = 0 ] && grep -q '^6 cases, 6 passed, 0 failed' <<<"$out" \
-    && ok "the characterization runner runs the gate, run, doctor, repo, install and checks families and skips helpers" \
+[ "$rc" = 0 ] && grep -q '^7 cases, 7 passed, 0 failed' <<<"$out" \
+    && ok "the characterization runner runs the gate, run, doctor, repo, install, checks and cutover families and skips helpers" \
     || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$cr"
 
@@ -12057,7 +12057,7 @@ chf_cmd="$( . "$cs" >/dev/null 2>&1; CHARACTERIZATION_DIR="$cdir" suite_command 
 
 # suite_covers: the paths the cases exercise, and not the documentation.
 for cp in bin/maintainer-merge lib/run.sh lib/backends/opencode.sh lib/failure-shapes.json \
-          install.sh new-profile.sh platform/linux/maintainer.service evals/run-evals.sh; do
+          install.sh new-profile.sh platform/linux/maintainer.service evals/run-evals.sh scripts/cutover.sh; do
     # shellcheck disable=SC1090
     ( . "$cs" >/dev/null 2>&1; suite_covers "$cp" ) \
         && ok "the characterization suite covers $cp" \
