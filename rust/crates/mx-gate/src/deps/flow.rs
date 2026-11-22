@@ -84,7 +84,7 @@ impl ScriptPaths {
 /// refusal quotes, and the time it means.
 ///
 /// `timeout` takes a number with an optional `s`, `m`, `h` or `d`. A text it cannot read, a limit
-/// that is not positive and finite, and `0` (which `timeout` reads as "no limit"), are no limit
+/// that is not positive and finite, and `0` (which `timeout` reads as "no limit"), and one past a day, are no limit
 /// at all here: the classifier is not
 /// started and the pull request is refused, because an unbounded read of text its author
 /// wrote is the stall the limit exists to prevent (decision `P3C-4`).
@@ -128,8 +128,15 @@ fn duration_of(text: &str) -> Option<Duration> {
     if seconds <= 0.0 {
         return None;
     }
-    Duration::try_from_secs_f64(seconds).ok().filter(|limit| !limit.is_zero())
+    // A limit past a day is longer than any run waits, and a time that large cannot be added to
+    // a clock (the process port would panic on it): it is refused like an unreadable one.
+    Duration::try_from_secs_f64(seconds)
+        .ok()
+        .filter(|limit| !limit.is_zero() && *limit <= MAX_LIMIT)
 }
+
+/// The longest classifier limit the port accepts.
+const MAX_LIMIT: Duration = Duration::from_hours(24);
 
 /// What the checks are set up with.
 #[derive(Debug, Clone)]

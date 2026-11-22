@@ -1115,10 +1115,6 @@ fn heads(rig: &Rig, answers: Vec<Result<String, GhFailure>>) {
     rig.gh.script_head(Script::sequence(answers));
 }
 
-fn at(head: &str) -> Result<String, GhFailure> {
-    Ok(head.to_string())
-}
-
 fn moved() -> DepsRefusal {
     DepsRefusal::HeadMoved { pr: pr(), real_head_8: "fedcba98".into(), sha_8: "01234567".into() }
 }
@@ -1126,7 +1122,7 @@ fn moved() -> DepsRefusal {
 #[test]
 fn a_push_after_the_head_was_read_and_before_the_diff_was_classified_refuses() {
     let rig = Rig::new(&lockfile());
-    heads(&rig, vec![at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
     assert!(rig.classifier.calls().is_empty(), "nothing is classified at a head that moved");
 }
@@ -1134,7 +1130,7 @@ fn a_push_after_the_head_was_read_and_before_the_diff_was_classified_refuses() {
 #[test]
 fn a_push_during_the_last_check_of_a_bump_with_nothing_to_ask_refuses() {
     let rig = Rig::new(&lockfile());
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
 }
 
@@ -1143,7 +1139,7 @@ fn a_push_during_a_pin_check_refuses_and_says_nothing_more() {
     let rig =
         workflow_rig(&[pin("actions/checkout", "v4", false), pin("actions/cache", "v3", false)]);
     rig.net.script_tag_ref(Script::always(Ok(tag_ref("v4", "commit", PIN_SHA))));
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
     assert_eq!(rig.net.calls().len(), 1, "the second pin is not asked about at a moved head");
 }
@@ -1152,30 +1148,40 @@ fn a_push_during_a_pin_check_refuses_and_says_nothing_more() {
 fn a_push_during_an_image_check_refuses() {
     let rig = dockerfile_rig();
     rig.net.script_image_digest(Script::always(Ok(DIGEST.into())));
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
 }
 
 #[test]
 fn a_push_during_a_pip_check_refuses() {
     let rig = whole_rig();
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
     assert!(rig.whole.calls().is_empty());
 }
 
 #[test]
-fn a_push_while_a_requirements_file_is_read_whole_refuses() {
-    let rig = whole_rig();
-    heads(&rig, vec![at(HEAD), at(HEAD), at(HEAD), at(OTHER)]);
+fn a_push_after_the_first_of_two_requirements_files_stops_the_second_from_being_read() {
+    let rig = Rig::new(&bump(
+        &json!({"a/requirements.txt": "pip-requirements", "b/requirements.txt": "pip-requirements"}),
+        &[],
+        &[],
+        &[],
+    ));
+    rig.gh.script_base_ref(Script::always(Ok("main".into())));
+    rig.net.script_merge_base(Script::always(Ok(MERGE_BASE.into())));
+    rig.net.script_file_at(Script::always(Ok(b"x".to_vec())));
+    rig.whole.script(Script::always(Ok(json!({"changed": []}).to_string())));
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
+    assert_eq!(rig.whole.calls().len(), 1, "the second file is not read at a moved head");
 }
 
 #[test]
 fn a_head_that_cannot_be_read_again_is_a_head_that_was_not_confirmed() {
-    for answer in [Err(GhFailure { exit: 1, output: "x".into() }), at("\n")] {
+    for answer in [Err(GhFailure { exit: 1, output: "x".into() }), Ok("\n".to_string())] {
         let rig = Rig::new(&lockfile());
-        heads(&rig, vec![at(HEAD), answer]);
+        heads(&rig, vec![Ok(HEAD.to_string()), answer]);
         assert_eq!(rig.refusal(), DepsRefusal::HeadUnreadable { pr: pr() });
     }
 }
@@ -1197,7 +1203,7 @@ fn a_push_after_the_first_of_two_images_stops_the_second_from_being_asked() {
         &[],
     ));
     rig.net.script_image_digest(Script::always(Ok(DIGEST.into())));
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
     assert_eq!(rig.net.calls().len(), 1);
 }
@@ -1214,7 +1220,47 @@ fn a_push_after_the_first_of_two_pip_packages_stops_the_second_from_being_asked(
         ],
     ));
     rig.net.script_pypi_release(Script::always(Ok("1 of 1".into())));
-    heads(&rig, vec![at(HEAD), at(HEAD), at(OTHER)]);
+    heads(&rig, vec![Ok(HEAD.to_string()), Ok(HEAD.to_string()), Ok(OTHER.to_string())]);
     assert_eq!(rig.refusal(), moved());
     assert_eq!(rig.net.calls().len(), 1);
+}
+
+// ----- the verdict's own fields, and a limit too long to wait for -----
+
+#[test]
+fn an_unknown_field_in_a_pin_an_image_or_a_pip_package_refuses_the_verdict() {
+    let extra_pin =
+        json!([{"action": "a/b", "sha": PIN_SHA, "tag": "v1", "branch": false, "note": 1}]);
+    let image_extra =
+        json!([{"image": "i", "tag": "1", "digest": DIGEST, "same_tag": true, "note": 1}]);
+    let extra_package =
+        json!([{"path": "r.txt", "name": "n", "version": "1", "hashes": [], "note": 1}]);
+    let make = |pins: &Value, images: &Value, pip: &Value| {
+        json!({"verdict": "dependency-bump", "files": {}, "changed_lines": 1,
+               "pins": pins, "images": images, "pip": pip})
+        .to_string()
+    };
+    let empty = json!([]);
+    for text in [
+        make(&extra_pin, &empty, &empty),
+        make(&empty, &image_extra, &empty),
+        make(&empty, &empty, &extra_package),
+    ] {
+        let rig = Rig::new(&text);
+        assert!(matches!(rig.refusal(), DepsRefusal::PinsUnreadable), "{text}");
+        assert!(rig.net.calls().is_empty());
+    }
+}
+
+#[test]
+fn a_classify_limit_longer_than_a_day_is_no_limit_and_never_reaches_the_process_port() {
+    for text in ["1e19", "1e300", "99999999999", "2d", "86401", "1000000h"] {
+        assert_eq!(ClassifyLimit::parse(text).duration(), None, "{text}");
+        let mut rig = Rig::new(&lockfile());
+        rig.config.limit = ClassifyLimit::parse(text);
+        assert!(matches!(rig.refusal(), DepsRefusal::NotAPureBump { .. }), "{text}");
+        assert!(rig.classifier.calls().is_empty(), "{text}");
+    }
+    assert_eq!(ClassifyLimit::parse("1d").duration(), Some(Duration::from_hours(24)));
+    assert_eq!(ClassifyLimit::parse("86400").duration(), Some(Duration::from_hours(24)));
 }
