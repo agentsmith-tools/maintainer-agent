@@ -55,7 +55,7 @@ pub use pipeline::{
 };
 pub use proc::{FakeProc, Proc, ProcEffect, ProcError, ProcExit, ProcOutput, ProcSpec};
 pub use real_pipe::{LiveSet, RealPipe, kill_live_pipelines};
-pub use real_proc::RealProc;
+pub use real_proc::{RealProc, forward_signal_to_children, live_children, refuse_new_children};
 pub use reexec::exec_with_descriptor_closed;
 pub use script::Script;
 pub use secret::Secret;

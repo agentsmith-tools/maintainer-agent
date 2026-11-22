@@ -16,7 +16,10 @@
 # tree whose Rust build replaces it: `run` (lib/run.sh), `install` (install.sh),
 # `new-profile` (new-profile.sh), `install-cron` (platform/posix/install-cron.sh),
 # `install-launchd` (platform/macos/install-launchd.sh), `alert` (platform/linux/alert.sh)
-# and `run-instance` (platform/linux/run-instance.sh). With no PROGRAM every such program is built and swapped in; a named
+# `run-instance` (platform/linux/run-instance.sh) and the five repository checks: `check-claims`
+# (scripts/check_claims.sh), `shellcheck-sweep` (scripts/shellcheck-sweep.sh), `verify-action-pins`
+# (scripts/verify-action-pins.sh), `run-evals` (evals/run-evals.sh) and `containment-probe`
+# (tests/containment-probe.sh). With no PROGRAM every such program is built and swapped in; a named
 # program that has no Rust build is an error. With --plain no program is built or
 # swapped in and none may be named: DEST is the bash tree, made the same way, so a
 # suite run against it and one run against the Rust tree are comparable.
@@ -117,6 +120,12 @@ OUTSIDE_BIN = {
     "install-launchd": "platform/macos/install-launchd.sh",
     "alert": "platform/linux/alert.sh",
     "run-instance": "platform/linux/run-instance.sh",
+    # The five repository checks.
+    "check-claims": "scripts/check_claims.sh",
+    "shellcheck-sweep": "scripts/shellcheck-sweep.sh",
+    "verify-action-pins": "scripts/verify-action-pins.sh",
+    "run-evals": "evals/run-evals.sh",
+    "containment-probe": "tests/containment-probe.sh",
 }
 rows = []
 for pkg in meta["packages"]:
@@ -218,7 +227,7 @@ for rel in sys.stdin.buffer.read().split(b"\0"):
 ' "$root" < "$list" | sort -u | head -n 5)"; rc=$?
 [ "$rc" = 0 ] || die "could not scan the file list for symlinks"
 [ -z "$bad" ] || die "a tracked symlink stands where a directory is expected, so the copy would write through it: $(tr '\n' ' ' <<<"$bad")"
-for top in bin lib platform .rust-bin; do
+for top in bin lib platform scripts evals tests .rust-bin; do
     if [ -L "$root/$top" ]; then die "$top is a symlink in the source tree; refusing to copy it"; fi
 done
 tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$dest" -xf -
@@ -232,10 +241,10 @@ if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree fail
 if [ "${#names[@]}" -gt 0 ]; then
     mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
     real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
-    for sub in bin lib platform .rust-bin; do
-        # lib/ and platform/ hold a wrapper only when one of their programs is built.
+    for sub in bin lib platform scripts evals tests .rust-bin; do
+        # lib/, platform/, scripts/, evals/ and tests/ hold a wrapper only when one of their programs is built.
         case "$sub" in
-            lib|platform) if [ ! -e "$dest/$sub" ] && [ ! -L "$dest/$sub" ]; then continue; fi ;;
+            lib|platform|scripts|evals|tests) if [ ! -e "$dest/$sub" ] && [ ! -L "$dest/$sub" ]; then continue; fi ;;
         esac
         if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
         real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
@@ -258,7 +267,9 @@ for i in "${!names[@]}"; do
         printf '#!/usr/bin/env bash\n'
         printf '# Written by rust/scripts/assemble-tree.sh: the Rust build of %s.\n' "$name"
         printf '# argv[0] is this file, so the program finds lib/ and bin/maintainer beside it.\n'
-        if [ "$rel" != "lib/run.sh" ]; then
+        # `run` and the five repository checks pass their whole environment on, as the scripts do.
+        case "$rel" in lib/run.sh|scripts/check_claims.sh|scripts/shellcheck-sweep.sh|scripts/verify-action-pins.sh|evals/run-evals.sh|tests/containment-probe.sh) names_env=0 ;; *) names_env=1 ;; esac
+        if [ "$names_env" = 1 ]; then
             # The suites run the program under `env -i` with stubs that read variables of
             # their own (CZ_CASE_DIR, BASH_ENV, DOC_LOG, FX, ...). A child of the Rust program
             # gets an allowlisted environment, plus the names in MAINTAINER_CHILD_ENV; the
