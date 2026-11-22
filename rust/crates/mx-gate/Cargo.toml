@@ -1,0 +1,21 @@
+[package]
+name = "mx-gate"
+version = "0.1.0"
+description = "The merge gate as types: the pull request typestate, the gh-facing facts and port, every refusal of merge with its exact text, and the verify-deps types"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mx-core.workspace = true
+mx-ports.workspace = true
+mx-receipt.workspace = true
+mx-sandbox.workspace = true
+mx-suite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
