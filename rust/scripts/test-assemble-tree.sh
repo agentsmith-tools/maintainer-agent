@@ -432,7 +432,7 @@ checkfix check-wrapper
 commit_fixture check-wrapper
 run_helper check-wrapper check-claims
 check "check-wrapper: the helper finished (exit $RC: ${OUT: -120})" test "$RC" = 0
-check "check-wrapper: scripts/check_claims.sh is the wrapper" grep -q "dest/.rust-bin/check-claims" "$scratch/check-wrapper/dest/scripts/check_claims.sh"
+check "check-wrapper: scripts/check_claims.sh is the wrapper" test "$(wrapper_target "$scratch/check-wrapper/dest/scripts/check_claims.sh")" = "$scratch/check-wrapper/dest/.rust-bin/check-claims"
 check "check-wrapper: the wrapper sets no MAINTAINER_CHILD_ENV" test "$(grep -c MAINTAINER_CHILD_ENV "$scratch/check-wrapper/dest/scripts/check_claims.sh")" = 0
 check "check-wrapper: the binary is in the copy" test -x "$scratch/check-wrapper/dest/.rust-bin/check-claims"
 check "check-wrapper: bin/prog is untouched" grep -q "echo bash prog" "$scratch/check-wrapper/dest/bin/prog"
