@@ -8,7 +8,7 @@
 Each mutant is applied to a fresh copy of the workspace (the checkout is never edited): every
 file of the copy is touched, so cargo cannot reuse an older build; the old text must occur
 exactly once; the edit is read back and the file's hash must differ from the pristine one; then
-`cargo test -p mx-checks --no-fail-fast` runs in a private target directory. A mutant is KILLED
+`cargo test -p mx-checks -p mx-ports --no-fail-fast` runs in a private target directory. A mutant is KILLED
 when the crate builds, the run reports failed tests, and every failure is an assertion or a
 refused call (a panic), never a compile error. BUILD_ERR, TIMEOUT, NOT_REBUILT and SURVIVED are
 reported as such and are never counted as kills.
@@ -32,6 +32,8 @@ HERE = Path(__file__).resolve().parent
 RUST = HERE.parent.parent.parent  # rust/
 
 S = "crates/mx-checks/src/"
+RP = "crates/mx-ports/src/real_proc.rs"
+CU = S + "cleanup.rs"
 SH, CT, HO = S + "shell.rs", S + "ctx.rs", S + "host.rs"
 CL, PN, SW, EV, PR = S + "claims.rs", S + "pins.rs", S + "sweep.rs", S + "evals.rs", S + "probe.rs"
 
@@ -156,6 +158,16 @@ MUTANTS = [
     ("M110", PN, "matches!(byte, b'_' | b'.' | b'-')", "matches!(byte, b'_' | b'.' | b'-' | b'%')", "a % in a repository name is allowed"),
     ("M111", PN, 'const HEX: &[u8; 16] = b"0123456789ABCDEF";', 'const HEX: &[u8; 16] = b"0123456789abcdef";', "the hex digits of an encoded byte are lower case"),
     ("M112", PN, "b\"-._~!$&'()*+,;=:@/\".contains(byte)", "b\"-._~!$&'()*,;=:@/\".contains(byte)", "a + in a tag is percent-encoded"),
+    ("M113", PN, 'if tag.split(|byte| *byte == b\'/\').any(|segment| segment == b".") {', 'if tag == b"." {', "a . segment inside a tag is allowed"),
+    # --- the signal forward (F1, decision P4B-12): mx-ports and cleanup.rs ---
+    ("M114", RP, "signal_group(&tools, **pid, &name) == Ok(true)", 'signal_group(&tools, **pid, "KILL") == Ok(true)', "the forward sends SIGKILL instead of the signal"),
+    ("M115", RP, "            live.pids.push(child.id());\n", "", "a child is not registered as live"),
+    ("M116", RP, "        lock(&LIVE).pids.retain(|pid| *pid != self.0);", "        let _ = self.0;", "a reaped child stays registered"),
+    ("M117", RP, "            if live.stopping.is_some() {", "            if false {", "a spawn after the refusal is allowed"),
+    ("M118", RP, "            thread::sleep(hold);", "            let _ = hold;", "a call does not hold while the program is ending"),
+    ("M119", CU, "    if !FORWARDED.contains(&signal) {", "    if false {", "every signal is forwarded"),
+    ("M120", CU, "    let _ = mx_ports::forward_signal_to_children(signal);", "    let _ = signal;", "the signal is not forwarded"),
+    ("M121", CU, "    mx_ports::refuse_new_children(HOLD);\n", "", "a child may start while the program ends"),
 ]
 
 
@@ -191,7 +203,7 @@ def cargo_test(copy, target, timeout):
     env = dict(os.environ)
     env.update({"CARGO_TARGET_DIR": str(target), "CARGO_TERM_COLOR": "never", "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")})
     try:
-        cp = subprocess.run(["cargo", "test", "-p", "mx-checks", "--locked", "--offline", "--no-fail-fast"], cwd=copy / "rust", env=env,
+        cp = subprocess.run(["cargo", "test", "-p", "mx-checks", "-p", "mx-ports", "--locked", "--offline", "--no-fail-fast"], cwd=copy / "rust", env=env,
                             capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         return "TIMEOUT", [], 0, 0, (error.stdout or "")

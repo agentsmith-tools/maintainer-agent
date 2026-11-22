@@ -17,6 +17,52 @@ pub(crate) const KILL_TOOLS: [&str; 2] = ["/bin/kill", "/usr/bin/kill"];
 /// Reported when a status carries neither an exit code nor a signal.
 const UNKNOWN_EXIT: i32 = 255;
 
+/// The children [`RealProc`] has started and not yet reaped, process-wide.
+#[derive(Debug, Default)]
+struct Live {
+    pids: Vec<u32>,
+    /// Set when the program is ending on a signal: how long a call holds before it answers.
+    stopping: Option<Duration>,
+}
+
+static LIVE: Mutex<Live> = Mutex::new(Live { pids: Vec::new(), stopping: None });
+
+/// Takes a child out of the live set when the call that started it returns.
+struct Registered(u32);
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        lock(&LIVE).pids.retain(|pid| *pid != self.0);
+    }
+}
+
+/// How many children started by a [`RealProc`] have not been reaped.
+#[must_use]
+pub fn live_children() -> usize {
+    lock(&LIVE).pids.len()
+}
+
+/// Sends `signal` (a number) to the process group of every live child and returns how many groups
+/// the `kill` utility reached.
+///
+/// A terminal's Ctrl-C reaches a shell's children because the shell leaves them in its own group.
+/// Every child here leads a group of its own, so the signal handler of a program that runs children
+/// forwards the signal with this and then waits for [`live_children`] to reach zero. The lock is
+/// held while it signals, so a spawn that is under way registers before this looks.
+pub fn forward_signal_to_children(signal: i32) -> usize {
+    let tools: Vec<PathBuf> = KILL_TOOLS.iter().map(PathBuf::from).collect();
+    let name = signal.to_string();
+    lock(&LIVE).pids.iter().filter(|pid| signal_group(&tools, **pid, &name) == Ok(true)).count()
+}
+
+/// Marks the program as ending on a signal. A [`RealProc`] call that starts after this is refused
+/// with [`ProcError::Spawn`], and every call, refused or finished, holds for `hold` before it answers.
+/// The hold keeps the program from printing a verdict about a child that the forward killed, in the
+/// moments before the signal handler ends the process. Pass a hold longer than the handler waits.
+pub fn refuse_new_children(hold: Duration) {
+    lock(&LIVE).stopping = Some(hold);
+}
+
 /// Runs programs for real.
 ///
 /// - The program is an argument vector. No shell reads it.
@@ -78,6 +124,17 @@ impl RealProc {
 
 impl Proc for RealProc {
     fn run(&self, spec: &ProcSpec) -> Result<ProcOutput, ProcError> {
+        let answer = self.run_call(spec);
+        let hold = lock(&LIVE).stopping;
+        if let Some(hold) = hold {
+            thread::sleep(hold);
+        }
+        answer
+    }
+}
+
+impl RealProc {
+    fn run_call(&self, spec: &ProcSpec) -> Result<ProcOutput, ProcError> {
         let name = spec.argv.first();
         let program = resolve(&self.search_dirs, name)?;
 
@@ -99,10 +156,22 @@ impl Proc for RealProc {
             .stderr(Stdio::piped());
 
         let deadline = Instant::now() + spec.timeout;
-        let mut child = command.spawn().map_err(|error| ProcError::Spawn {
-            program: name.clone(),
-            reason: error.to_string(),
-        })?;
+        let (mut child, _registered) = {
+            let mut live = lock(&LIVE);
+            if live.stopping.is_some() {
+                return Err(ProcError::Spawn {
+                    program: name.clone(),
+                    reason: "the program is ending on a signal".to_string(),
+                });
+            }
+            let child = command.spawn().map_err(|error| ProcError::Spawn {
+                program: name.clone(),
+                reason: error.to_string(),
+            })?;
+            live.pids.push(child.id());
+            let id = child.id();
+            (child, Registered(id))
+        };
         let pid = child.id();
         let io_error =
             |reason: &str| ProcError::Io { program: name.clone(), reason: reason.to_string() };
@@ -205,12 +274,17 @@ pub(crate) fn new_command(program: &Path) -> Command {
 /// reported failure (the group may already be gone), and `Err` that it could not
 /// run at all.
 pub(crate) fn kill_group(tools: &[PathBuf], pid: u32) -> Result<bool, String> {
+    signal_group(tools, pid, "KILL")
+}
+
+/// The same utility with another signal (a name or a number).
+pub(crate) fn signal_group(tools: &[PathBuf], pid: u32, signal: &str) -> Result<bool, String> {
     let tool = tools
         .iter()
         .find(|tool| tool.is_file())
         .ok_or_else(|| format!("no kill utility found among {tools:?}"))?;
     let status = new_command(tool)
-        .args(["-s", "KILL", "--"])
+        .args(["-s", signal, "--"])
         .arg(format!("-{pid}"))
         .env_clear()
         .stdin(Stdio::null())

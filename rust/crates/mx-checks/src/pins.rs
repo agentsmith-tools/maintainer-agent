@@ -18,7 +18,7 @@
 //!   sends them as they are, so `../../orgs/x@SHA # v1` asks for `repos/../../git/ref/tags/v1` and a tag
 //!   of `v1?x=1` or `..%2f..%2fuser` changes the request. A pin whose repository is not `OWNER/NAME`
 //!   (letters, digits, `_`, `.`, `-`, neither part `.` or `..`) or whose tag holds `..`, `?`, `#`, `%`, a
-//!   control character or an empty path segment is refused without a call, with a named line and exit 1
+//!   control character, an empty path segment or a `.` path segment is refused without a call, with a named line and exit 1
 //!   ([`lookup_refusal`]). The tag is percent-encoded where it is not a URL path character
 //!   ([`encode_tag`]), and a tag object id that GitHub answers is asked about only when it is
 //!   hexadecimal ([`is_object_id`]).
@@ -142,6 +142,9 @@ pub fn lookup_refusal(repo: &[u8], tag: &[u8]) -> Option<&'static str> {
     }
     if tag.starts_with(b"/") || tag.ends_with(b"/") || shell::contains(tag, b"//") {
         return Some("the tag holds an empty path segment");
+    }
+    if tag.split(|byte| *byte == b'/').any(|segment| segment == b".") {
+        return Some("the tag holds a . path segment");
     }
     None
 }
@@ -903,9 +906,16 @@ mod tests {
     fn a_tag_that_could_steer_the_path_is_refused() {
         for tag in [
             "", "..", "v1..2", "../x", "x/..", "..%2f", "v1?x=1", "v1#f", "v1%2e", "/v1", "v1/",
-            "a//b", "v1\u{1}", "v1\u{7f}", "v1\n",
+            "a//b", "v1\u{1}", "v1\u{7f}", "v1\n", ".", "./x", "x/.", "a/./b",
         ] {
             assert!(lookup_refusal(b"a/b", tag.as_bytes()).is_some(), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn a_dot_inside_a_segment_is_not_a_dot_segment() {
+        for tag in ["v1.0", ".x", "x.", "a/.b/c.d", "v1.0.0-rc.1"] {
+            assert_eq!(lookup_refusal(b"a/b", tag.as_bytes()), None, "{tag:?}");
         }
     }
 
@@ -921,6 +931,7 @@ mod tests {
         assert_eq!(lookup_refusal(b"a/b", b"v1?"), Some("the tag holds ?, # or %"));
         assert_eq!(lookup_refusal(b"a/b", b"v1\x01"), Some("the tag holds a control character"));
         assert_eq!(lookup_refusal(b"a/b", b"/v1"), Some("the tag holds an empty path segment"));
+        assert_eq!(lookup_refusal(b"a/b", b"a/./b"), Some("the tag holds a . path segment"));
     }
 
     #[test]

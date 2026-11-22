@@ -34,7 +34,9 @@
 //! - `P4B-6`: names and lines sort by bytes, the order the scripts get under `LC_ALL=C`. A glob (`profiles/*`,
 //!   `evals/scenarios/*.md`) lists in byte order too, where the shell uses the locale's collation.
 //! - `P4B-12`: a SIGHUP, SIGINT or SIGTERM removes the temporary files, as the scripts' `EXIT` trap does, and
-//!   the program then dies of the signal ([`cleanup`]).
+//!   the program then dies of the signal ([`cleanup`]). On SIGHUP, SIGINT and SIGTERM it first forwards the signal to the
+//!   process group of every live child (each leads a group of its own, so a terminal's Ctrl-C would not reach it), waits
+//!   for them (five seconds, then `SIGKILL`) and starts no new one.
 //! - `P4B-13`: a temporary file or directory that cannot be made ends the program with one line and exit 1,
 //!   where the script goes on and fails in a cascade of shell messages.
 //!
@@ -44,8 +46,7 @@
 //! Not reproduced, and said so where it matters: a count with a leading zero is octal in the shell's
 //! arithmetic (here decimal); an argument that is not UTF-8 reaches a child with U+FFFD in its place; a child
 //! starts with an empty standard input where the shell's child inherits the caller's; a missing coreutil
-//! (`sort`, `grep`, `cp`) is not noticed because those steps run in the process; and a child keeps running
-//! when a signal names only this process, because the process port starts each child in a group of its own.
+//! (`sort`, `grep`, `cp`) is not noticed because those steps run in the process.
 //!
 //! # Layout
 //!

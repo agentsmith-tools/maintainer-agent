@@ -12,19 +12,32 @@
 //! system, because a signal handler has no port.
 //!
 //! A signal that the caller left ignored when the program started stays ignored, because bash does not
-//! trap what it inherited as ignored. A child process keeps running when the signal names this process
-//! alone: `RealProc` starts a child in its own process group, so a terminal's Ctrl-C does not reach it,
-//! where it reaches the bash's children. The five programs run short children except the suite that
-//! `check-claims` runs, which finishes on its own.
+//! trap what it inherited as ignored.
+//!
+//! `RealProc` starts every child in a process group of its own, so a terminal's Ctrl-C does not reach it,
+//! where it reaches the bash's children. On SIGHUP, SIGINT and SIGTERM the thread therefore forwards the
+//! signal to the group of every live child ([`mx_ports::forward_signal_to_children`]), waits for them to
+//! be reaped (five seconds, then `SIGKILL`), removes the files and dies of the signal. From the first
+//! moment the program starts no child, and a call holds before it answers, so the program prints no
+//! verdict about a child that the forward killed. The other signals the thread handles (SIGUSR1, SIGUSR2,
+//! SIGALRM) are not forwarded: bash's child does not get them either when they name the shell alone.
 
-use signal_hook::consts::signal::{SIGALRM, SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
+use signal_hook::consts::signal::{SIGALRM, SIGHUP, SIGINT, SIGKILL, SIGTERM, SIGUSR1, SIGUSR2};
 use signal_hook::iterator::Signals;
 use signal_hook::low_level::emulate_default_handler;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The signals the bash's `EXIT` trap runs for when they kill the script and that a caller can send.
 const FATAL: [i32; 6] = [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM];
+
+/// The signals forwarded to the children.
+const FORWARDED: [i32; 3] = [SIGHUP, SIGINT, SIGTERM];
+/// How long the children get to die before they receive `SIGKILL`.
+const CHILD_GRACE: Duration = Duration::from_secs(5);
+/// How long a call holds once the program is ending: longer than the thread waits for the children.
+const HOLD: Duration = Duration::from_secs(10);
 
 static ARMED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -78,6 +91,27 @@ fn ignored_at_start() -> u64 {
         .unwrap_or(0)
 }
 
+/// Forwards `signal` to the live children and waits for them to be reaped, with `SIGKILL` after the grace.
+/// Only SIGHUP, SIGINT and SIGTERM are forwarded; any other signal returns at once.
+pub fn stop_children(signal: i32) {
+    if !FORWARDED.contains(&signal) {
+        return;
+    }
+    mx_ports::refuse_new_children(HOLD);
+    let _ = mx_ports::forward_signal_to_children(signal);
+    let gone = |limit: Duration| {
+        let end = Instant::now() + limit;
+        while mx_ports::live_children() > 0 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        mx_ports::live_children() == 0
+    };
+    if !gone(CHILD_GRACE) {
+        let _ = mx_ports::forward_signal_to_children(SIGKILL);
+        let _ = gone(Duration::from_secs(2));
+    }
+}
+
 /// Starts the thread that removes the armed paths on a fatal signal and then dies of the signal. Call
 /// it once, at the start of `main`.
 pub fn install() {
@@ -95,6 +129,7 @@ pub fn install() {
     drop(std::thread::spawn(move || {
         // The first signal ends the program, so this waits for one value.
         if let Some(signal) = signals.forever().next() {
+            stop_children(signal);
             run_now();
             // The default action of the signal: the process ends by it, as the bash ends after its trap.
             drop(emulate_default_handler(signal));

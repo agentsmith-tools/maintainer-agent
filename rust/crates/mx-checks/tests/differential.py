@@ -836,6 +836,8 @@ def explained_cases(seed):
         ("tag-percent", b"o/r", b"v%41", ["repos/o/r/git/ref/tags/v%41"]),
         ("tag-dotdot-encoded", b"o/r", b"..%2f..%2fuser", ["repos/o/r/git/ref/tags/..%2f..%2fuser"]),
         ("tag-dotdot", b"o/r", b"a/../b", ["repos/o/r/git/ref/tags/a/../b"]),
+        ("tag-dot-segment", b"o/r", b"a/./b", ["repos/o/r/git/ref/tags/a/./b"]),
+        ("tag-dot", b"o/r", b".", ["repos/o/r/git/ref/tags/."]),
         ("tag-leading-slash", b"o/r", b"/v1", ["repos/o/r/git/ref/tags//v1"]),
         ("tag-control", b"o/r", b"v1\x01", ["repos/o/r/git/ref/tags/v1\x01"]),
     ]
