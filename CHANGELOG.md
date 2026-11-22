@@ -12,6 +12,15 @@ middle digit.
 
 ### Added
 
+- **The five repository checks are characterized.** `tests/characterization/checks-*.sh`
+  records what `scripts/check_claims.sh`, `scripts/verify-action-pins.sh`,
+  `scripts/shellcheck-sweep.sh`, `evals/run-evals.sh` and `tests/containment-probe.sh`
+  do today: every message, stream and exit code, the order and argument vector of every
+  tool call (`systemd-run`, `nice` and `shellcheck` for each linter run; the flags and the
+  eleven payloads of the containment probe), and the defects that stay (a missing `gh`
+  reads as "not a tag", a runtime that prints nothing reads as "stopped" for nine of
+  eleven attacks, file names with white space are never linted). 220 cases;
+  `mutants-checks.py` replays 205 mutants of the five scripts, each caught by a named case.
 - **CI runs the characterization cases, and the merge gate has a suite for
   them.** The `characterization` job runs `tests/run-characterization.sh`. The
   new `characterization` suite in `profiles/magent/verify.d/` takes one case file

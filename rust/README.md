@@ -39,6 +39,31 @@ The doctor writes each finding and each diagnostic the moment it is made, so a c
 
 The plan names the opencode key only when the backend read it from `~/.groq-staging-key`, and then only in the environment of the opencode stage. A key the run inherited is the executor's to pass on. No argument, export, log note or `Debug` print holds a key. A path that is not UTF-8 cannot be an argument or an environment value, so a plan that needs one refuses.
 
+## mx-install
+
+`crates/mx-install` is `install.sh`, `new-profile.sh` and the four platform scripts in Rust. The library separates deciding from doing: probes read the machine into facts, a pure function turns the facts into a `Plan` or a `Refusal`, and `apply` performs the plan through a sink. The live sink changes the machine. The dry sink answers each step with `would: ...` and changes nothing, so `--dry-run` runs the code of a real run up to the one place where a step touches the machine. A refusal comes before the first step, so a run that refuses has written nothing.
+
+The crate builds six binaries, each standing for a script: `install` (`install.sh`), `new-profile` (`new-profile.sh`), `install-cron` (`platform/posix/install-cron.sh`), `install-launchd` (`platform/macos/install-launchd.sh`), `alert` (`platform/linux/alert.sh`) and `run-instance` (`platform/linux/run-instance.sh`). `rust/scripts/assemble-tree.sh DEST install new-profile ...` swaps them into a copy of the tree.
+
+`cp`, `cp -r`, `rm`, `chmod +x`, `mkdir -p`, `touch` and `mv` run in this process (`coreutils.rs`) with the caller's umask, the way the tools treat links and existing files. The part of GNU sed that `new-profile.sh` hands user text to (a replacement, where `\n` is a newline and `\1` is an error) is reproduced in `sedsub.rs` with the positions sed reports.
+
+Two flags are new and off by default. `install --rust --rust-bin DIR` installs prebuilt Rust binaries from `DIR` over the bash programs, keeps each bash original beside it as `NAME.sh`, and writes `RUST_STAMP` with the sha256 of each installed binary in the format `sha256sum -c` reads. `install --rollback` puts every saved original back and removes the stamp. Its tests are in `tests/uninstall_flow.rs`.
+
+Tests in `crates/mx-install/tests/`:
+
+- `plan.rs`, `apply_fake.rs`: the decisions and the sinks, with no machine and with a machine that records every change (and panics on one when a test forbids them).
+- `install_flow.rs`, `uninstall_flow.rs`, `scaffold_flow.rs`, `scheduler_flow.rs`, `coreutils.rs`, `umask.rs`: each program against real files in a scratch directory, with every tool (`systemctl`, `flock`, `git`, `date`, `python3`, `crontab`, `notify-send`) scripted. `scaffold_flow.rs` compares its output with the golden files of the characterization suite.
+- `blackbox.sh`: the install characterization cases against an assembled tree, three runs, with the two pinned differences named in the script.
+- `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit status, the order of every external call and the state of HOME and of the tree.
+- `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
+## mx-suite, mx-sandbox, mx-gate
+
+The merge-gate port starts with its interface: types, traits, fakes and tests, and no behaviour the bash does not already have in one line. Three agents write against it in parallel, so a signature changes only in a pull request all three read. The pull request that added it carries the decision register (`P30-n`) and the bash functions each type replaces.
+
+- `crates/mx-suite`: the suite plugin interface. A suite is a bash file in `verify.d/`; the Rust gate asks it questions by starting `bash` through `Proc`, one question per process, and never sources one in its own address space. `SuiteName::parse` is plan decision F3: a name from the command line or from a receipt is validated, so it cannot reach outside `verify.d/`. `SuiteHost` and `Suite` are the ports; `FakeSuiteHost` and `FakeSuite` answer from a table and record every call. `ProdGlobs` holds the profile's production paths.
+- `crates/mx-sandbox`: the steps of `verify` that touch files and containers. `ContainerSpec` carries the exact `podman run` flag set of the verify run and of the networked prefetch as data, `Limits::resolve` the precedence of the resource figures, `ExtractedTree` then `ContainedTree` the proof that a tree arrived whole and holds no link that leaves it, and `Mutated` the proof that the sed mutation changed a file. `Sandbox` is the port and `FakeSandbox` records its calls. No process starts here.
+- `crates/mx-gate`: the pull request typestate `Pr<Unverified>`, `Pr<Verified>`, `Pr<Receipted>`, `Pr<Mergeable>`, with private fields and a `compile_fail` example for each illegal transition; `Merger::merge` takes a `Pr<Mergeable>` and exists only when the run posts. `GateDecision` is every refusal of `maintainer-merge merge` with its exact text, and a test reads `bin/maintainer-merge` to check each line of each message against a `die` there. `PrNumber::parse` is decision F2, `ProductionDiff::from_git` is F1 (a failed `git diff` is not an empty one). `GhPort`, `IdentityPort` and `Helper` are the ports `merge` reads through, each with a fake. `deps` holds the types of `verify-deps`: the classifier's verdict, the `Net` port, and `Checked`, the proof that every pin, image and package the classifier declared was inspected.
+
 ## Running the bash suites against a Rust program
 
 `rust/scripts/assemble-tree.sh [--plain] DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), and `run`, which stands for `lib/run.sh`, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program, and so does the whole oracle:
