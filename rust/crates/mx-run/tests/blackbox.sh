@@ -22,11 +22,13 @@
 #
 # --with-suite also runs the whole bash suite (tests/run-tests.sh) on a plain copy of
 # the bash tree and on the Rust tree and lists what fails only on the Rust tree. That
-# list is information, not a gate, because four kinds of case cannot pass against a
-# wrapper: source-coupled cases that grep the text of lib/run.sh (the wrapper is two
-# lines), cases whose stub token is under 16 characters (decision D15 refuses it), a
-# case that writes its own shell backend file (a backend is one of four names, decision
-# D18), and cases that read the path of the tree (the wrapper names the binary).
+# list is information, not a gate, because source-coupled cases cannot pass against a
+# wrapper: they grep the text of lib/run.sh (the wrapper is two lines), write a shell
+# backend file (a backend is one of four names, decision D18) or mutate shell text
+# inside a container that holds the tree. The suite skips them under
+# MX_SKIP_SOURCE_COUPLED=1, which this run does not set. Every `gh auth token` stub of
+# the suite prints 40 characters, so decision D15 does not fail the other cases, and
+# the one case that pins D15 holds both builds.
 #
 # Exit 0 when every check holds.
 set -uo pipefail

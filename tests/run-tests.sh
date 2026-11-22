@@ -3829,7 +3829,12 @@ MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
     && ok "a preview from inside a run is still allowed" \
     || bad "the nested guard also blocks --show-prompt"
 
-# What the backend actually receives, measured by running one.
+# What the backend actually receives, measured by running one. The backend is a file
+# the case writes next to a copy of run.sh, so this block depends on the shell program's
+# way of finding backends. A tree whose backends are compiled in knows four names (decision
+# D18) and refuses this one, so the block is source-coupled. The block after it makes the
+# same measurement through a shipped backend, and holds for any tree.
+if sc_case 4; then
 envh="$stub_dir/envrun"; mkdir -p "$envh/backends" "$envh/profiles/envp/prompts" "$envh/bin"
 cp "$root/lib/run.sh" "$envh/run.sh"; cp "$root/lib/profile.sh" "$envh/profile.sh"; cp "$root/lib/defaults.env" "$envh/defaults.env"
 cp "$root/lib/preamble-core.md" "$root/lib/prose-style.md" "$envh/"
@@ -3889,7 +3894,48 @@ if [ -f "$stub_dir/backend.env" ]; then
         || bad "MAINTAINER_POST is not exported"
 else
     bad "the env-dump backend never ran, so this block measured nothing"
+    bad "so MAINTAINER_FORCE was not measured"
+    bad "so MAINTAINER_IN_RUN was not measured"
+    bad "so MAINTAINER_POST was not measured"
 fi
+sc_end; fi
+
+# The same three facts through the shipped claude backend, which every tree has: a claude
+# stub that writes the environment it received where the case can read it.
+envc="$stub_dir/envclaude"; rm -rf "$envc"; mkdir -p "$envc/.local/bin" "$envc/state/state" "$envc/state/runs"
+envc_repo="$envc/repo"; git init -q -b main "$envc_repo"
+cat > "$envc/.local/bin/maintainer" <<'HELPER'
+#!/usr/bin/env bash
+case "$1" in
+  start)  echo "=== maintainer testrun-review ==="; echo "context";;
+  finish) exit 0;;
+esac
+HELPER
+chmod +x "$envc/.local/bin/maintainer"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *'api user'*) echo vladimirrott;; esac"
+make_stub claude "env | sort > $envc/claude.env; exit 0"
+PATH="$stub_dir:$PATH" HOME="$envc" MAINTAINER_FORCE=1 MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$envc/state" MAINTAINER_REPO_PATH="$envc_repo" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+if [ -f "$envc/claude.env" ]; then
+    ok "the agent ran, so its environment can be measured"
+    grep -q '^MAINTAINER_FORCE=' "$envc/claude.env" \
+        && bad "MAINTAINER_FORCE reached the agent; nested runs skip their cadence gate" \
+        || ok "MAINTAINER_FORCE does not reach the agent"
+    grep -q '^MAINTAINER_IN_RUN=sysknife/review$' "$envc/claude.env" \
+        && ok "the agent is told which run it is inside" \
+        || bad "MAINTAINER_IN_RUN is not set for the agent"
+    grep -q '^MAINTAINER_POST=' "$envc/claude.env" \
+        && ok "MAINTAINER_POST does reach the agent's tools (prune has to honour it)" \
+        || bad "MAINTAINER_POST is not exported to the agent"
+else
+    bad "the claude stub never ran, so this block measured nothing"
+    bad "so MAINTAINER_FORCE was not measured"
+    bad "so MAINTAINER_IN_RUN was not measured"
+    bad "so MAINTAINER_POST was not measured"
+fi
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 
 echo "== three guards that shipped without a test =="
 # All three were found by a run that mutated them and watched every gate stay
@@ -12154,6 +12200,12 @@ if [ -n "$chrt" ] && ( "$chrt" image inspect docker.io/library/python:3.12 >/dev
             PROD_GLOBS="bin/* lib/* lib/backends/* scripts/* profiles/*/*.json profiles/*/*.env .github/* install.sh new-profile.sh" \
             timeout 900 bash "$mg" verify 61 "$chead" "$2" "$3" characterization 2>&1
     }
+    # The mutation below is a sed over shell program text, lib/backends/opencode.sh,
+    # and the case file it must break sources that text. A tree whose `run` is the
+    # Rust build executes none of it, and its unmutated run-backends.sh is red on
+    # purpose for decision D18, so a tree that is not shell cannot give either
+    # verdict. The third case below does not depend on the program text.
+    if sc_case 2; then
     out="$(chverify pinned run-backends.sh "s/backend_name() { printf 'opencode'; }/backend_name() { printf 'opencodeX'; }/")"; rc=$?
     [ "$rc" = 0 ] && grep -q 'receipt recorded' <<<"$out" && grep -qE 'evidence of [1-9][0-9]* executed' <<<"$out" \
         && ok "verify through the characterization suite records a receipt for a change a case file pins" \
@@ -12162,6 +12214,7 @@ if [ -n "$chrt" ] && ( "$chrt" image inspect docker.io/library/python:3.12 >/dev
     [ "$rc" != 0 ] && grep -q 'THE GUARD DOES NOT BITE' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
         && ok "verify refuses a comment-only change no case pins as a guard that does not bite" \
         || bad "an unpinned mutation was not refused as not biting (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    sc_end; fi
     out="$(chverify badfilter '../x.sh' 's/a/b/')"; rc=$?
     [ "$rc" != 0 ] && grep -qF '^[a-z]+-[a-z0-9-]+' <<<"$out" && ! grep -q 'receipt recorded' <<<"$out" \
         && ok "verify refuses a path as the filter and the log names the filter rule" \
