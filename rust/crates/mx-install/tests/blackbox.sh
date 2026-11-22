@@ -61,7 +61,7 @@ for prog in install new-profile install-cron install-launchd alert run-instance;
     [ -x "$tree/.rust-bin/$prog" ] || die "$tree has no .rust-bin/$prog: not an assembled tree"
 done
 for rel in install.sh new-profile.sh platform/posix/install-cron.sh platform/macos/install-launchd.sh platform/linux/alert.sh platform/linux/run-instance.sh; do
-    grep -q '[.]rust-bin/' <<<"$(head -c 600 "$tree/$rel")" || die "$tree/$rel is not the wrapper of a Rust build"
+    grep -q 'exec -a' <<<"$(head -c 2000 "$tree/$rel")" || die "$tree/$rel is not the wrapper of a Rust build"
 done
 echo "tree under test: $tree  HEAD: $(git -C "$root" rev-parse --short HEAD)"
 
@@ -114,9 +114,7 @@ for row in "${PINNED[@]}"; do printf '  - %s\n      %s\n' "${row%%|*}" "${row#*|
 # The second pair skips the source-coupled blocks (MX_SKIP_SOURCE_COUPLED=1, the suite's own
 # switch), so what still fails only on the Rust tree is behaviour, and that list is a gate:
 # it may hold only the cases named in SUITE_PINNED.
-SUITE_PINNED=(
-"a home path leaked into the repository|the suite greps the whole tree for the author's home path, and the Rust binaries in .rust-bin carry the path they were built in"
-)
+SUITE_PINNED=()   # the assembled binaries carry no build path since main remaps them, so the leak case passes
 if [ "$with_suite" = 1 ]; then
     plain="$scratch/bb-plain"
     rm -rf "$plain"; mkdir -p "$plain"
