@@ -8,7 +8,7 @@ use crate::{
     HoldersFailure, IssueNumber, LeaseAnswer, MergeState, Posting, Review, UpdateFacts,
     UpdateRefusal, WhoAmI,
 };
-use mx_ports::{Fs, Script};
+use mx_ports::{Clock, Fs, Script};
 use mx_suite::CoverageFailure;
 
 fn is(exit: Result<(), Exit>, decision: &GateDecision) {
@@ -623,6 +623,7 @@ fn passes_and_skips_are_counted_apart_on_the_ready_line() {
 fn moved() -> World {
     let w = World::new();
     w.gh.script_head(Script::always(Ok(NEW_HEAD.into())));
+    w.git.script_rev_parse(Script::always(Ok(NEW_HEAD.into())));
     w.git.script_merge_base(Script::always(Some("base".into())));
     w.git.script_is_ancestor(Script::always(false));
     w.git.script_merge_tree(Script::always(Some("mergedtree".into())));
@@ -648,7 +649,7 @@ fn an_unmoved_head_runs_no_diff_and_removes_its_temporary_branch() {
     assert!(diffs(&w).is_empty());
     assert_eq!(
         w.git.calls().last(),
-        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7".into() })
+        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7-1".into() })
     );
     assert!(!w.stdout().contains("head moved"));
 }
@@ -672,7 +673,7 @@ fn a_moved_head_compares_the_clean_merge_tree_with_the_pull_request_over_the_pro
         diffs(&w),
         vec![(
             "mergedtree".to_string(),
-            "mm-7".to_string(),
+            NEW_HEAD.to_string(),
             vec!["bin/*".to_string(), "lib/*".to_string()]
         )]
     );
@@ -689,7 +690,7 @@ fn a_moved_head_falls_back_to_the_strict_range_when_the_merge_does_not_come_out_
     let w = moved();
     w.git.script_merge_tree(Script::always(None));
     w.merge().unwrap();
-    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..mm-7"));
+    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..{NEW_HEAD}"));
     assert_eq!(diffs(&w)[0].1, "");
     assert!(w.stdout().contains(", no production diff; receipt still applies"));
 }
@@ -699,7 +700,7 @@ fn a_verified_head_that_main_already_contains_is_compared_by_the_strict_range() 
     let w = moved();
     w.git.script_is_ancestor(Script::always(true));
     w.merge().unwrap();
-    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..mm-7"));
+    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..{NEW_HEAD}"));
     assert_eq!(w.git.calls().iter().filter(|c| matches!(c, GitCall::MergeTree { .. })).count(), 0);
 }
 
@@ -708,7 +709,7 @@ fn a_branch_with_no_merge_base_is_compared_by_the_strict_range() {
     let w = moved();
     w.git.script_merge_base(Script::always(None));
     w.merge().unwrap();
-    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..mm-7"));
+    assert_eq!(diffs(&w)[0].0, format!("{HEAD}..{NEW_HEAD}"));
 }
 
 #[test]
@@ -725,7 +726,7 @@ fn a_production_change_since_the_verified_head_refuses_and_names_the_paths_and_r
     );
     assert_eq!(
         w.git.calls().last(),
-        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7".into() })
+        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7-1".into() })
     );
     assert_eq!(w.calls_of("Merge {"), 0);
 }
@@ -747,7 +748,7 @@ fn a_failing_git_diff_refuses_instead_of_reading_as_no_production_change_f1() {
     assert_eq!(w.calls_of("Merge {"), 0);
     assert_eq!(
         w.git.calls().last(),
-        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7".into() })
+        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7-1".into() })
     );
 }
 
@@ -783,7 +784,7 @@ fn the_pull_request_ref_is_fetched_into_mm_n() {
     w.merge().unwrap();
     assert!(w.git.calls().contains(&GitCall::FetchRef {
         repo: "/repo".into(),
-        refspec: "refs/pull/7/head:mm-7".into()
+        refspec: "refs/pull/7/head:mm-7-1".into()
     }));
 }
 
@@ -1267,7 +1268,6 @@ fn the_readback_sleeps_the_configured_wait_between_reads_only() {
     let mut cfg = w.cfg.clone();
     cfg.readback_wait = Some("2".into());
     assert!(crate::Gate::new(&cfg, w.ports()).update(&pr("7")).is_err());
-    use mx_ports::Clock;
     assert_eq!(w.clock.now_unix(), 4, "two sleeps of 2 s between three reads");
 }
 
@@ -1291,4 +1291,61 @@ fn a_readback_that_shows_the_same_head_is_not_confirmed_even_when_the_state_is_c
             nstate: "CLEAN".into(),
         },
     );
+}
+
+#[test]
+fn a_ref_that_moved_between_the_head_read_and_the_fetch_refuses_and_diffs_nothing_p3b_11() {
+    let w = moved();
+    w.git.script_rev_parse(Script::always(Ok("a".repeat(40))));
+    let exit = w.merge().unwrap_err();
+    assert!(exit.stderr.contains("the head of #7 moved while I was reading it"), "{exit:?}");
+    assert!(exit.stderr.contains(&"a".repeat(40)));
+    assert!(diffs(&w).is_empty(), "no diff of a commit that is not the head");
+    assert_eq!(w.calls_of("Merge {"), 0);
+    assert_eq!(
+        w.git.calls().last(),
+        Some(&GitCall::DeleteBranch { repo: "/repo".into(), name: "mm-7-1".into() })
+    );
+}
+
+#[test]
+fn an_unreadable_fetched_ref_refuses_too_and_the_branch_is_still_removed() {
+    let w = World::new();
+    w.git.script_rev_parse(Script::always(Err(mx_ports::GitError {
+        command: "rev-parse".into(),
+        reason: "bad".into(),
+    })));
+    let exit = w.merge().unwrap_err();
+    assert!(exit.stderr.contains("unreadable"), "{exit:?}");
+    assert_eq!(w.calls_of("Merge {"), 0);
+}
+
+#[test]
+fn the_staleness_diff_names_commits_and_the_ref_is_private_to_the_run() {
+    let w = moved();
+    w.merge().unwrap();
+    for (_, to, _) in diffs(&w) {
+        assert_eq!(to, NEW_HEAD, "a commit id, not a movable name");
+    }
+    assert!(
+        w.git
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, GitCall::MergeBase { a, .. } if a.starts_with("mm-")))
+    );
+    assert!(w.git.calls().contains(&GitCall::FetchRef {
+        repo: "/repo".into(),
+        refspec: "refs/pull/7/head:mm-7-1".into()
+    }));
+}
+
+#[test]
+fn the_merge_is_pinned_to_the_head_that_was_checked_not_to_the_receipt_head() {
+    let w = moved();
+    w.merge().unwrap();
+    let pinned = w.gh.calls().into_iter().find_map(|c| match c {
+        GhCall::Merge { head, .. } => Some(head.to_string()),
+        _ => None,
+    });
+    assert_eq!(pinned, Some(NEW_HEAD.to_string()));
 }

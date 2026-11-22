@@ -188,7 +188,7 @@ impl Gate<'_> {
         }
 
         let repo = self.cfg.repo.as_path();
-        let branch = format!("v-{pr}");
+        let branch = format!("v-{pr}-{}", self.cfg.run_id);
         self.p
             .git
             .fetch_ref(repo, &format!("refs/pull/{pr}/head:{branch}"))

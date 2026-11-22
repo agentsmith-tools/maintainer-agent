@@ -129,6 +129,7 @@ impl World {
                 claim_label: String::new(),
                 receipt_key: "/k/receipt.key".into(),
                 in_run: false,
+                run_id: 1,
                 readback_reads: Some("3".into()),
                 readback_wait: Some("0".into()),
             },
@@ -170,6 +171,7 @@ impl World {
         world.gh.script_checks(Script::always(Ok(r#"[{"name":"ci","bucket":"pass"}]"#.into())));
         world.gh.script_merge(Script::always(Ok(())));
         world.git.script_fetch_ref(Script::always(Ok(())));
+        world.git.script_rev_parse(Script::always(Ok(HEAD.into())));
         world.receipt(&observed(7, HEAD, "rust", false));
         world
     }

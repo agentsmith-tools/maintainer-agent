@@ -35,9 +35,13 @@ fn world() -> World {
     w.git.script_rev_parse(Script::always(Ok(HEAD.into())));
     w.sandbox
         .script_scratch(Script::sequence([Ok(PathBuf::from(WORK)), Ok(PathBuf::from(SCRATCH))]));
-    w.sandbox.script_extract(Script::always(Ok(
-        ExtractedTree::counted(WORK.into(), "v-7", 1, 1).unwrap()
-    )));
+    w.sandbox.script_extract(Script::always(Ok(ExtractedTree::counted(
+        WORK.into(),
+        "v-7-1",
+        1,
+        1,
+    )
+    .unwrap())));
     w.sandbox.script_escapes(Script::always(Ok(Vec::new())));
     w.sandbox.script_seed(Script::always(Ok(())));
     w.sandbox.script_run(Script::sequence([Ok(ContainerExit(0)), Ok(ContainerExit(101))]));
@@ -267,7 +271,7 @@ fn a_head_that_is_not_the_one_named_refuses_and_removes_the_branch() {
     assert!(
         w.git
             .calls()
-            .contains(&crate::GitCall::DeleteBranch { repo: "/repo".into(), name: "v-7".into() })
+            .contains(&crate::GitCall::DeleteBranch { repo: "/repo".into(), name: "v-7-1".into() })
     );
     assert!(w.sandbox.calls().iter().all(|c| !matches!(c, SandboxCall::Extract { .. })));
 }
@@ -286,19 +290,19 @@ fn a_failed_fetch_of_the_pull_request_ref_refuses() {
 fn a_failed_extraction_prints_the_sandbox_line_then_the_die_and_removes_the_branch() {
     let w = world();
     w.sandbox.script_extract(Script::always(Err(SandboxError::PartialExtract {
-        rev: "v-7".into(),
+        rev: "v-7-1".into(),
         want: 5,
         got: 3,
     })));
     let exit = go(&w, false, None).unwrap_err();
     assert_eq!(
         exit.stderr,
-        "extracted 3 of the 5 files in v-7\nmaintainer-merge: cannot extract #7; nothing was verified\n"
+        "extracted 3 of the 5 files in v-7-1\nmaintainer-merge: cannot extract #7; nothing was verified\n"
     );
     assert!(
         w.git
             .calls()
-            .contains(&crate::GitCall::DeleteBranch { repo: "/repo".into(), name: "v-7".into() })
+            .contains(&crate::GitCall::DeleteBranch { repo: "/repo".into(), name: "v-7-1".into() })
     );
 }
 

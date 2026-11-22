@@ -219,6 +219,7 @@ fn run_inner(
         prod_globs: prod_value.and_then(|value| ProdGlobs::from_profile_value(value).ok()),
         claim_label: pick("CLAIM_LABEL").unwrap_or_default(),
         receipt_key: PathBuf::from(receipt_key),
+        run_id: std::process::id(),
         in_run: vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty()),
         readback_reads: pick("UPDATE_READBACK_READS"),
         readback_wait: pick("UPDATE_READBACK_WAIT"),

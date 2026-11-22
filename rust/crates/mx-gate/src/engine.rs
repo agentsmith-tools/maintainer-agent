@@ -68,6 +68,8 @@ pub struct GateConfig {
     pub receipt_key: PathBuf,
     /// `MAINTAINER_IN_RUN` is set and non-empty.
     pub in_run: bool,
+    /// Makes the temporary refs of this run its own, so two runs never share one.
+    pub run_id: u32,
     /// `UPDATE_READBACK_READS`.
     pub readback_reads: Option<String>,
     /// `UPDATE_READBACK_WAIT`.
@@ -294,17 +296,28 @@ impl<'a> Gate<'a> {
     ) -> R<Fresh> {
         let globs = self.prod_globs()?;
         let repo = self.cfg.repo.as_path();
-        let branch = format!("mm-{pr}");
+        let branch = format!("mm-{pr}-{}", self.cfg.run_id);
         self.p
             .git
             .fetch_ref(repo, &format!("refs/pull/{pr}/head:{branch}"))
             .map_err(|_| Exit::from(&GateDecision::CannotFetch { pr: pr.clone() }))?;
+        // The ref may have moved since `head` was read (a push, or another fetch). The freshness
+        // check must be about the commit the merge is pinned to, so the ref is resolved to an
+        // object id and everything below names that commit, never the ref (decision P3B-11).
+        let fetched = self.p.git.rev_parse(repo, &branch);
+        if fetched.as_deref().map(str::trim) != Ok(head.as_str()) {
+            self.p.git.delete_branch(repo, &branch);
+            let found = fetched.unwrap_or_else(|e| format!("unreadable ({e})"));
+            return Err(die(&format!(
+                "the head of #{pr} moved while I was reading it: GitHub said {head}, the fetch holds {found}.\n  Nothing was checked against a commit I did not read. Run it again."
+            )));
+        }
         let (how, diff): (Option<&'static str>, Result<String, DiffFailure>) =
             if head.as_str() == verified_head {
                 (None, Ok(String::new()))
             } else {
                 self.p.git.fetch_main(repo);
-                let base = self.p.git.merge_base(repo, &branch, "origin/main");
+                let base = self.p.git.merge_base(repo, head.as_str(), "origin/main");
                 let merged = base
                     .as_deref()
                     .filter(|base| !self.p.git.is_ancestor(repo, verified_head, base))
@@ -312,13 +325,13 @@ impl<'a> Gate<'a> {
                 match merged {
                     Some(tree) => (
                         Some("the tree is the clean merge of the verified head with main"),
-                        self.p.git.diff_names(repo, &tree, &branch, globs.pathspecs()),
+                        self.p.git.diff_names(repo, &tree, head.as_str(), globs.pathspecs()),
                     ),
                     None => (
                         Some("no production diff"),
                         self.p.git.diff_names(
                             repo,
-                            &format!("{verified_head}..{branch}"),
+                            &format!("{verified_head}..{head}"),
                             "",
                             globs.pathspecs(),
                         ),
