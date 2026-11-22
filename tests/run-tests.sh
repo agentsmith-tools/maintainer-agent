@@ -34,6 +34,12 @@ if [ ! -f "$root/bin/maintainer-merge" ] || [ ! -f "$root/lib/run.sh" ] || [ ! -
 fi
 printf 'tree under test: %s\n' "$root"
 
+# Plan decisions D10 to D22 changed behaviour on purpose in the Rust programs, so a
+# case that pins one of them holds both builds and picks its side by what the tree
+# is. rust/scripts/assemble-tree.sh puts the Rust `run` at .rust-bin/run, behind
+# the wrapper that replaces lib/run.sh. A tree without it runs the bash program.
+if [ -x "$root/.rust-bin/run" ]; then run_is_rust=1; else run_is_rust=0; fi
+
 # Clear anything a run exports before measuring anything.
 #
 # Invoked from inside a run, this suite reported 236 passed / 6 failed, and
@@ -170,6 +176,20 @@ for verb, c in m.COMMANDS.items():
 PYEOF
 }
 
+echo "== every stub token is one the exit scrub can remove =="
+# Every `gh auth token` stub in this file prints a token the exit scrub can remove.
+# A shorter one makes the Rust run stop at the pin (decision D15) and the case never
+# reaches what it is about, while the bash run carries on, so the two builds fail
+# in different places for a reason nobody reads. The count proves the scan looked.
+# The one stub that prints a short token on purpose is the D15 case, and it says `shorttoken`.
+stub_token_total="$(grep -E "auth token['\"]\*\) echo " "$suite_root/tests/run-tests.sh" | grep -vc 'shorttoken')"
+stub_token_short="$(grep -E "auth token['\"]\*\) echo [^;[:space:]'\"]{1,15};;" "$suite_root/tests/run-tests.sh" | grep -vc 'shorttoken')"
+if [ "${stub_token_total:-0}" -ge 10 ] && [ "${stub_token_short:-1}" = 0 ]; then
+    ok "every gh auth token stub prints a token of 16 characters or more ($stub_token_total stubs scanned)"
+else
+    bad "a gh auth token stub prints a token under 16 characters, or the scan found only ${stub_token_total:-0} stubs (short: ${stub_token_short:-?})"
+fi
+
 echo "== argument handling =="
 out=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" nosuchprofile review 2>&1); rc=$?
 check "unknown profile is rejected" "$rc" "64"
@@ -211,7 +231,7 @@ gate_test ""             75 "could not reach"
 # hold; this is the other direction.
 make_stub gh "case \"\$*\" in
   *'auth switch'*) exit 0;;
-  *'auth token'*) echo PINNEDTOKEN;;
+  *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;;
   *'api user'*) echo VladimirRott;;
 esac"
 pin_repo="$stub_dir/pin-repo-case"; rm -rf "$pin_repo"; git init -q -b main "$pin_repo"
@@ -237,7 +257,7 @@ fi
 # and proceeds past the gate.
 make_stub gh "case \"\$*\" in
   *'auth switch'*) exit 0;;
-  *'auth token'*) echo PINNEDTOKEN;;
+  *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;;
   *'api user'*) echo vladimirrott;;
 esac"
 # A checkout that already exists, so run.sh skips provisioning. Naming neither
@@ -279,8 +299,8 @@ out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_setting
 # the wrong-identity-mid-config case the whole guard exists for.
 make_stub gh "case \"\$*\" in
   *'auth switch'*) exit 0;;
-  *'auth token'*) echo SOMEONESTOKEN;;
-  *'api user'*) if [ \"\$GH_TOKEN\" = SOMEONESTOKEN ]; then echo someoneelse; else echo vladimirrott; fi;;
+  *'auth token'*) echo ghp_SomeoneElsesStubTokenBBBBBBBBBBBBBBB;;
+  *'api user'*) if [ \"\$GH_TOKEN\" = ghp_SomeoneElsesStubTokenBBBBBBBBBBBBBBB ]; then echo someoneelse; else echo vladimirrott; fi;;
 esac"
 out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
     MAINTAINER_STATE_DIR="$stub_dir/pin-state-3" \
@@ -289,6 +309,59 @@ out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_setting
 [ "$rc" != 0 ] && grep -q "resolves to 'someoneelse'" <<<"$out" \
     && ok "a pinned token that resolves to another account is refused" \
     || bad "a token for the wrong account was accepted (rc=$rc): $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
+
+echo "== a pinned token the exit scrub cannot remove stops the run (decision D15) =="
+# The exit scrub refuses a token under 16 characters, because a needle that short
+# would rewrite every file it walks. lib/run.sh ignored the refusal, ran on and left
+# the token in the state directory. Plan decision D15 stops the Rust run at the pin
+# instead, before the helper or the agent starts. The bash program keeps the old
+# behaviour until it is retired, so the case holds both builds: each side fails when
+# the build under test behaves like the other one. Every other stub in this file
+# prints a token of 16 characters or more, so a case reaches what it is about.
+d15_home="$stub_dir/d15home"; rm -rf "$d15_home"; mkdir -p "$d15_home/.local/bin" "$d15_home/state/state" "$d15_home/state/runs"
+d15_repo="$d15_home/repo"; git init -q -b main "$d15_repo"
+d15_calls="$d15_home/helper.calls"; d15_agent="$d15_home/agent.calls"; : > "$d15_calls"; : > "$d15_agent"
+cat > "$d15_home/.local/bin/maintainer" <<HELPERSTUB
+#!/bin/sh
+printf '%s\n' "\$1" >> "$d15_calls"
+case "\$1" in
+  start) echo "=== stub 2031-02-03T04-05-review ==="; echo "write the run report to \$MAINTAINER_STATE/runs/2031-02-03T04-05-review.md" ;;
+esac
+exit 0
+HELPERSTUB
+chmod +x "$d15_home/.local/bin/maintainer"
+make_stub claude "echo called >> $d15_agent; exit 0"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo shorttoken;; *'api user'*) echo vladimirrott;; esac"
+printf 'before shorttoken after\n' > "$d15_home/state/leak.txt"
+out=$(PATH="$stub_dir:$PATH" HOME="$d15_home" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$d15_home/state" MAINTAINER_REPO_PATH="$d15_repo" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+set -- "$d15_home"/state/logs/*-review.log; d15_log="$1"
+d15_msg="the token pinned for vladimirrott is shorter than 16 characters, so the exit scrub could not remove it from what this run leaves behind; refusing to run. See $d15_log"
+if [ "$run_is_rust" = 1 ]; then
+    [ "$rc" = 1 ] && [ -f "$d15_log" ] && grep -qF -- "$d15_msg" <<<"$out" \
+        && ok "a pinned token under 16 characters is refused with the scrub's own message (D15)" \
+        || bad "a short pinned token was not refused with the D15 message (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+    ! grep -qx 'start' "$d15_calls" && [ ! -s "$d15_agent" ] \
+        && ok "and the run stopped before the helper started a run or the agent ran (D15)" \
+        || bad "a refused short token still started a run or the agent: $(tr '\n' ' ' < "$d15_calls") $(tr '\n' ' ' < "$d15_agent")"
+else
+    ! grep -q 'shorter than 16 characters' <<<"$out" && grep -qx 'start' "$d15_calls" \
+        && ok "the bash run goes on past a pinned token under 16 characters (D15, fixed in the Rust build)" \
+        || bad "the bash run no longer ignores a short pinned token (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+    grep -q 'shorttoken' "$d15_home/state/leak.txt" \
+        && ok "and the short token stays in what the run left behind (D15)" \
+        || bad "the bash run scrubbed a token under 16 characters, which its scrubber refuses"
+fi
+if [ ! -f "$d15_log" ]; then
+    bad "the short-token run left no log to check for the token (D15)"
+elif grep -q 'shorttoken' <<<"$out" || grep -q 'shorttoken' "$d15_log"; then
+    bad "a run printed or logged the short pinned token (D15)"
+else
+    ok "and neither the output nor the log carries the token (D15)"
+fi
+make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 # A network outage and a wrong account are different emergencies with different
 # fixes, and the gate said the same sentence for both. Measured 2026-09-05: the
 # 09:15 sysknife review and the 09:20 magent review both died on
@@ -545,7 +618,7 @@ case "$1" in
 esac
 HELPERSTUB
 chmod +x "$lh/.local/bin/maintainer"
-make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *'api user'*) echo vladimirrott; exit 0;; esac"
 make_stub claude "exit 0"
 # Its OWN state dir, not the suite's shared one: other run.sh-driven tests write
 # real-timestamped review logs into the shared root, and this asserts an exact
@@ -583,7 +656,7 @@ cat > "$stub_dir/gh" <<'GHEOF'
 #!/usr/bin/env bash
 case "$*" in
   *'auth switch'*) exit 0;;
-  *'auth token'*) echo PINNEDTOKEN;;
+  *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;;
   *'api user'*)
       # Before the pin GH_TOKEN is unset and the answer is good; after it, the
       # call cannot be answered at all.
@@ -780,7 +853,7 @@ grep -q 'could not reach GitHub' "$tn/marker.log" \
     || bad "the marker does not carry the reason"
 # A valid first identity check followed by an unreadable pinned-token identity
 # is also transient. The GH_TOKEN check distinguishes the two API calls.
-make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *"api user"*) if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; else echo vladimirrott; fi;; esac'
 out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
       MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
       MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
@@ -809,7 +882,7 @@ case "$1" in
 esac
 MEOF
 chmod +x "$tn/.local/bin/maintainer"
-make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo pinned-token;; *"api user"*) echo vladimirrott;; esac'
+make_stub gh 'case "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *"api user"*) echo vladimirrott;; esac'
 make_stub claude 'printf "You\047ve hit your session limit; resets at 10:10pm\\n" >&2; exit 1'
 out=$(PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=off \
       MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
@@ -1417,7 +1490,7 @@ crits=$(grep -c 'u critical' "$tb/notify.log" 2>/dev/null || true)
 rm -f "$stub_dir/notify-send" "$stub_dir/claude" "$stub_dir/gh"
 make_stub notify-send 'exit 0'
 make_stub claude 'exit 0'
-make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *'api user'*) echo vladimirrott; exit 0;; esac"
 # And the OnFailure script must write to the failing profile's trail only. It
 # globbed every *-maint directory, so a magent failure appeared in sysknife's
 # alerts.log and an operator reading either one saw the other's incidents.
@@ -1446,7 +1519,7 @@ prov_seed="$stub_dir/seed"; rm -rf "$prov_seed"; mkdir -p "$prov_seed"
   && echo hi > f && git add f && git commit -qm init \
   && git branch -M main && git remote add origin "$prov_origin" && git push -q origin main ) >/dev/null 2>&1
 prov_checkout="$stub_dir/owned-checkout"; rm -rf "$prov_checkout"
-make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *'api user'*) echo vladimirrott; exit 0;; esac"
 make_stub claude "exit 0"
 out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
     MAINTAINER_STATE_DIR="$stub_dir/prov-state" \
@@ -3798,7 +3871,7 @@ mkdir -p "$envh/state/state" "$envh/state/runs" "$envh/repo"
 # run.sh now provisions a missing checkout; this test's repo is a plain dir, so
 # make it a real checkout to skip provisioning (there is no origin to clone).
 git init -q "$envh/repo"
-make_stub gh "case \"\$*\" in *'auth token'*) echo TOKEN;; *'api user'*) echo testuser;; esac; exit 0"
+make_stub gh "case \"\$*\" in *'auth token'*) echo ghp_OracleStubTokenAAAAAAAAAAAAAAAAAAAAA;; *'api user'*) echo testuser;; esac; exit 0"
 printf '# r\n' > "$envh/state/runs/testrun-review.md"
 ENVDUMP_OUT="$stub_dir/backend.env" PATH="$stub_dir:$envh/bin:$PATH" HOME="$envh" \
     MAINTAINER_FORCE=1 MAINTAINER_STATE_DIR="$envh/state" \
