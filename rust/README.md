@@ -59,9 +59,18 @@ Tests in `crates/mx-install/tests/`:
 
 ## Running the bash suites against a Rust program
 
-`rust/scripts/assemble-tree.sh DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), and `run`, which stands for `lib/run.sh`, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program:
+`rust/scripts/assemble-tree.sh [--plain] DEST [PROGRAM...]` copies the tree to `DEST`, builds each workspace binary whose name is also a file under `bin/` (`maintainer-repo`, `maintainer-doctor`), and `run`, which stands for `lib/run.sh`, and puts a wrapper in its place that execs the binary with the wrapper's own path as `argv[0]`. The characterization suite then drives the Rust program, and so does the whole oracle:
 
     rust/scripts/assemble-tree.sh /scratch/tree
     MX_TREE=/scratch/tree bash tests/run-characterization.sh repo-prune.sh repo-release.sh repo-fixup.sh
+    MX_SKIP_SOURCE_COUPLED=1 MX_TREE=/scratch/tree bash tests/run-tests.sh
 
-The helper never writes outside `DEST`: it refuses a tree in which a tracked symlink stands where a directory of the copy must be, and it removes a symlink before it writes in its place. `rust/scripts/test-assemble-tree.sh` builds three throwaway repositories with such symlinks and checks that the files outside stay byte for byte the same.
+`--plain` builds nothing and swaps nothing in: `DEST` is the bash tree, made the same way, so the oracle's result on it and on the Rust tree can be compared case by case.
+
+What `DEST` holds besides the copied files:
+
+- **A repository of its own.** A fresh one-commit git repository (`main`), made after the wrappers are written, so `git ls-files`, the shellcheck sweep and the gate cases have a work tree to ask. The source's `.git` is neither copied nor touched, even when the caller exports `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` as a git hook does, and the user's git configuration (hooks, signing, templates) does not reach the commit. `.rust-bin/` is ignored there, so both trees list the same tracked files.
+- **A wrapper that passes the caller's environment on.** The bash programs hand every variable to the programs they start, and the Rust ones hand on an allowlist plus the names in `MAINTAINER_CHILD_ENV`. The wrapper puts the name of every variable the caller exported in `MAINTAINER_CHILD_ENV` (after the names already there), so a stub that reads `FX`, `DOC_LOG` or `CZ_CASE_DIR` sees it. The allowlist itself stays covered by the crates' own tests. `run` passes its whole environment and needs no such line.
+- **No machine path.** The release builds run with `--remap-path-prefix` for the home directory, the cargo home and the toolchain, so a binary carries none of them, and the wrapper spells the binary's absolute path in hex. `tests/run-tests.sh` refuses a tree in which any file spells the user's name, and that name is usually part of `DEST`'s path. A build in another place needs the same flags: `path_free_flags` in the script is the one place that computes them.
+
+The helper never writes outside `DEST`: it refuses a tree in which a tracked symlink stands where a directory of the copy must be, and it removes a symlink before it writes in its place. `rust/scripts/test-assemble-tree.sh` builds throwaway repositories and checks all of the above: the symlink cases leave the files outside byte for byte the same, the repository has one commit and lists the source's files, the source repository is unchanged under a hostile `GIT_*` environment and git configuration, the wrapper names every exported variable, no file below `DEST` spells a directory name above it, and a binary built below a stand-in home and cargo home carries neither (an unflagged build of the same crate carries both).
