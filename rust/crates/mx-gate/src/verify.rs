@@ -119,6 +119,11 @@ pub enum VerifyRefusal {
     /// bash line 1658: `no receipt for #$1`
     #[error("no receipt for #{arg1}")]
     NoReceiptToShow { arg1: String },
+    /// bash line 1251 (PB-1): the filter is spliced into `sh -c`, so it is an allow-list
+    #[error(
+        "the test filter may hold only letters, digits and _ . : / - and spaces, and may not start with -: '{filter}'"
+    )]
+    TestFilterRefused { filter: String },
 }
 
 impl VerifyRefusal {
@@ -148,7 +153,8 @@ impl VerifyRefusal {
             | Self::GuardDoesNotBite { .. }
             | Self::MutatedRunKilled { .. }
             | Self::PriorReceiptNotTrusted { .. }
-            | Self::NoReceiptToShow { .. } => 1,
+            | Self::NoReceiptToShow { .. }
+            | Self::TestFilterRefused { .. } => 1,
         }
     }
 }
@@ -179,6 +185,7 @@ pub(crate) fn samples() -> Vec<(VerifyRefusal, String)> {
             (VerifyRefusal::MutatedRunKilled { mut_rc: "⟦mut_rc⟧".to_string() }, "the mutated run was KILLED (exit ⟦mut_rc⟧), so nothing was proved.\n\n  A killed container is not a guard biting. Raise MAINTAINER_VERIFY_MEMORY or\n  lower MAINTAINER_CARGO_JOBS and run it again. No receipt written.".to_string()),
             (VerifyRefusal::PriorReceiptNotTrusted { pr: PrNumber::parse("7").unwrap(), psig: "⟦psig⟧".to_string(), receipts: "⟦receipts⟧".to_string() }, "a receipt for #7 already exists at this head and its signature does\n  not check out (code ⟦psig⟧). Refusing to fold a new proof into it and re-seal\n  it, because the seal is the only reason merge believes what it says. Delete\n  ⟦receipts⟧/7.json and prove each part again.".to_string()),
             (VerifyRefusal::NoReceiptToShow { arg1: "⟦arg1⟧".to_string() }, "no receipt for #⟦arg1⟧".to_string()),
+            (VerifyRefusal::TestFilterRefused { filter: "⟦filter⟧".to_string() }, "the test filter may hold only letters, digits and _ . : / - and spaces, and may not start with -: '⟦filter⟧'".to_string()),
     ]
 }
 
@@ -213,13 +220,14 @@ mod tests {
             VerifyRefusal::MutatedRunKilled { .. } => 20,
             VerifyRefusal::PriorReceiptNotTrusted { .. } => 21,
             VerifyRefusal::NoReceiptToShow { .. } => 22,
+            VerifyRefusal::TestFilterRefused { .. } => 23,
         }
     }
 
     #[test]
     fn every_variant_has_exactly_one_sample() {
         let table = samples();
-        assert_eq!(table.len(), 23, "one row per variant");
+        assert_eq!(table.len(), 24, "one row per variant");
         for (at, (value, _)) in table.iter().enumerate() {
             assert_eq!(rank(value), at, "row {at} is out of order: {value:?}");
         }
