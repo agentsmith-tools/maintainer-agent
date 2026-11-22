@@ -84,7 +84,7 @@
 //! }
 //! ```
 //!
-//! ```compile_fail,E0603
+//! ```compile_fail,E0423
 //! fn forge() {
 //!     let _ = mx_gate::Unverified(());
 //! }
@@ -101,7 +101,7 @@
 //!
 //! ```compile_fail,E0624
 //! fn forge() {
-//!     let _ = mx_gate::ClaimsClear::new();
+//!     let _ = mx_gate::ClaimsClear::new(todo!());
 //! }
 //! ```
 
@@ -165,13 +165,21 @@ impl Evidence {
 /// request closes was read (closing issues, author, holders, label, assignees,
 /// commenters) and none of them takes somebody's work away. Only the code that
 /// asks those questions builds one, so it has no public constructor.
-#[derive(Debug, Clone)]
-pub struct ClaimsClear(());
+#[derive(Debug)]
+pub struct ClaimsClear {
+    pr: PrNumber,
+}
 
 impl ClaimsClear {
     #[cfg_attr(not(test), allow(dead_code, reason = "the claim checks of the gate agent build it"))]
-    pub(crate) fn new() -> Self {
-        Self(())
+    pub(crate) fn new(pr: PrNumber) -> Self {
+        Self { pr }
+    }
+
+    /// The pull request whose claims were checked.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
     }
 }
 
@@ -179,20 +187,114 @@ impl ClaimsClear {
 /// lease, the identity, the review decision, the claim checks, the merge state,
 /// the checks, the receipt's freshness, and the head they were all read at.
 ///
-/// A struct of witnesses and not a function of facts, so the code that gathers
-/// them keeps the bash's order of reads and refusals (a refusal stops the later
-/// `gh` calls), and so a `Conditions` cannot exist unless each witness does.
-#[derive(Debug, Clone)]
+/// Each witness names the pull request it was made for, and `Fresh` names the
+/// head it was computed against. [`Conditions::new`] refuses witnesses of
+/// different pull requests, or a freshness for a head other than the fence, and
+/// [`Pr::cleared`] refuses conditions of another pull request or a freshness for
+/// another receipt head. The fields are private and the type is not `Clone`, so
+/// the conditions of #7 cannot be kept and spent on #8 by a retry loop or a
+/// watcher. It is a struct of witnesses and not a function of facts, so the code
+/// that gathers them keeps the bash's order of reads and refusals.
+#[derive(Debug)]
 pub struct Conditions {
-    pub lease: LeaseFree,
-    pub identity: Confirmed,
-    pub approved: Approved,
-    pub claims: ClaimsClear,
-    pub state: StateClear,
-    pub board: GreenBoard,
-    pub fresh: Fresh,
-    /// The head `gh pr merge --match-head-commit` is pinned to.
-    pub head: CommitId,
+    pr: PrNumber,
+    lease: LeaseFree,
+    identity: Confirmed,
+    approved: Approved,
+    claims: ClaimsClear,
+    state: StateClear,
+    board: GreenBoard,
+    fresh: Fresh,
+    head: CommitId,
+}
+
+impl Conditions {
+    /// Collects the witnesses. Every one must be for the same pull request as the
+    /// lease, and the freshness must have been computed against `head`, the head
+    /// `gh pr merge --match-head-commit` is pinned to.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per witness of merge, in the bash order"
+    )]
+    pub fn new(
+        lease: LeaseFree,
+        identity: Confirmed,
+        approved: Approved,
+        claims: ClaimsClear,
+        state: StateClear,
+        board: GreenBoard,
+        fresh: Fresh,
+        head: CommitId,
+    ) -> Result<Self, GateDecision> {
+        let pr = lease.pr().clone();
+        for other in [identity.pr(), approved.pr(), claims.pr(), state.pr(), board.pr(), fresh.pr()]
+        {
+            if other != &pr {
+                return Err(GateDecision::ConditionsForOtherPr { pr, found: other.to_string() });
+            }
+        }
+        if fresh.acted_head() != &head {
+            return Err(GateDecision::ConditionsForOtherHead {
+                expected: head.to_string(),
+                found: fresh.acted_head().to_string(),
+            });
+        }
+        Ok(Self { pr, lease, identity, approved, claims, state, board, fresh, head })
+    }
+
+    /// The pull request every witness is for.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
+    }
+
+    /// The head the merge is pinned to.
+    #[must_use]
+    pub fn head(&self) -> &CommitId {
+        &self.head
+    }
+
+    /// The green board, for the success line.
+    #[must_use]
+    pub fn board(&self) -> &GreenBoard {
+        &self.board
+    }
+
+    /// The lease witness.
+    #[must_use]
+    pub fn lease(&self) -> &LeaseFree {
+        &self.lease
+    }
+
+    /// The confirmed account.
+    #[must_use]
+    pub fn identity(&self) -> &Confirmed {
+        &self.identity
+    }
+
+    /// The approval.
+    #[must_use]
+    pub fn approved(&self) -> &Approved {
+        &self.approved
+    }
+
+    /// The claim checks.
+    #[must_use]
+    pub fn claims(&self) -> &ClaimsClear {
+        &self.claims
+    }
+
+    /// The merge state.
+    #[must_use]
+    pub fn state(&self) -> &StateClear {
+        &self.state
+    }
+
+    /// The freshness of the receipt.
+    #[must_use]
+    pub fn fresh(&self) -> &Fresh {
+        &self.fresh
+    }
 }
 
 impl<S> Pr<S> {
@@ -255,17 +357,29 @@ impl Pr<Verified> {
 }
 
 impl Pr<Receipted> {
-    /// Every condition held. The only way to a `Pr<Mergeable>`.
-    #[must_use]
-    pub fn cleared(self, conditions: Conditions) -> Pr<Mergeable> {
-        Pr {
+    /// Every condition held, for this pull request and this receipt. The only way to
+    /// a `Pr<Mergeable>`.
+    pub fn cleared(self, conditions: Conditions) -> Result<Pr<Mergeable>, GateDecision> {
+        if conditions.pr != self.number {
+            return Err(GateDecision::ConditionsForOtherPr {
+                pr: self.number,
+                found: conditions.pr.to_string(),
+            });
+        }
+        if conditions.fresh.verified_head() != self.state.receipt.head() {
+            return Err(GateDecision::ConditionsForOtherHead {
+                expected: self.state.receipt.head().to_string(),
+                found: conditions.fresh.verified_head().to_string(),
+            });
+        }
+        Ok(Pr {
             number: self.number,
             state: Mergeable {
                 receipt: self.state.receipt,
                 head: conditions.head.clone(),
                 conditions,
             },
-        }
+        })
     }
 
     /// The signed receipt.
@@ -319,8 +433,22 @@ impl Posting {
 /// What a merge did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
-    pub number: PrNumber,
-    pub head: CommitId,
+    number: PrNumber,
+    head: CommitId,
+}
+
+impl Merged {
+    /// The pull request that was merged.
+    #[must_use]
+    pub fn number(&self) -> &PrNumber {
+        &self.number
+    }
+
+    /// The head it was pinned to.
+    #[must_use]
+    pub fn head(&self) -> &CommitId {
+        &self.head
+    }
 }
 
 /// The one thing that merges. It exists only when the run posts, and it takes a
@@ -344,7 +472,9 @@ impl<'a> Merger<'a> {
     /// [`GateDecision::MergeFailed`]; the adapter has already shown what `gh` said.
     pub fn merge(&self, pr: Pr<Mergeable>) -> Result<Merged, GateDecision> {
         let Pr { number, state } = pr;
-        self.gh.merge(&number, &state.head).map_err(|_| GateDecision::MergeFailed)?;
+        self.gh
+            .merge(&number, &state.head)
+            .map_err(|failure| GateDecision::MergeFailed { output: failure.output })?;
         Ok(Merged { number, head: state.head })
     }
 }
@@ -385,21 +515,34 @@ mod tests {
         Key::from_file_bytes(b"test key\n").unwrap()
     }
 
-    fn conditions(pr: &PrNumber) -> Conditions {
+    fn commit(text: &str) -> CommitId {
+        CommitId::parse(text).unwrap()
+    }
+
+    /// Conditions for `pr`, with the receipt's head `verified` and the merge's fence `acted`.
+    fn conditions_at(
+        pr: &PrNumber,
+        verified: &str,
+        acted: &str,
+    ) -> Result<Conditions, GateDecision> {
         let account = Account::new("vladimirrott").unwrap();
-        let diff = ProductionDiff::from_git(pr, HEAD, Ok(String::new())).unwrap();
-        Conditions {
-            lease: LeaseFree::from_answer(pr, crate::Action::Merge, Ok(LeaseAnswer::Free)).unwrap(),
-            identity: Confirmed::check(WhoAmI::Login("vladimirrott".into()), &account).unwrap(),
-            approved: Approved::from_decision(pr, "APPROVED").unwrap(),
-            claims: ClaimsClear::new(),
-            state: MergeState::Clean.clear(pr).unwrap(),
-            board: CheckBoard { pass: 3, skip: 1, fail: 0, pending: 0, cancel: 0, total: 4 }
+        let diff = ProductionDiff::from_git(pr, verified, Ok(String::new())).unwrap();
+        Conditions::new(
+            LeaseFree::from_answer(pr, crate::Action::Merge, Ok(LeaseAnswer::Free)).unwrap(),
+            Confirmed::check(pr, WhoAmI::Login("vladimirrott".into()), &account).unwrap(),
+            Approved::from_decision(pr, "APPROVED").unwrap(),
+            ClaimsClear::new(pr.clone()),
+            MergeState::Clean.clear(pr).unwrap(),
+            CheckBoard { pass: 3, skip: 1, fail: 0, pending: 0, cancel: 0, total: 4 }
                 .green(pr)
                 .unwrap(),
-            fresh: Fresh::from_diff(&diff, HEAD).unwrap(),
-            head: CommitId::parse(HEAD).unwrap(),
-        }
+            Fresh::from_diff(&diff, &commit(acted)).unwrap(),
+            commit(acted),
+        )
+    }
+
+    fn conditions(pr: &PrNumber) -> Conditions {
+        conditions_at(pr, HEAD, HEAD).unwrap()
     }
 
     fn mergeable(n: &str) -> Pr<Mergeable> {
@@ -410,6 +553,118 @@ mod tests {
             .unwrap()
             .sealed(&key())
             .cleared(conditions(&pr))
+            .unwrap()
+    }
+
+    fn receipted(n: u64) -> Pr<Receipted> {
+        Pr::open(number(&n.to_string()))
+            .verified(Evidence::new(unsigned(n)))
+            .unwrap()
+            .sealed(&key())
+    }
+
+    #[test]
+    fn the_conditions_of_seven_do_not_clear_the_receipt_of_eight() {
+        // rv264 B1: the witnesses of #7 cleared #8's receipt.
+        let refused = receipted(8).cleared(conditions(&number("7"))).unwrap_err();
+        assert_eq!(
+            refused,
+            GateDecision::ConditionsForOtherPr { pr: number("8"), found: "7".into() }
+        );
+    }
+
+    #[test]
+    fn a_witness_of_another_pull_request_cannot_join_the_conditions() {
+        let seven = number("7");
+        let eight = number("8");
+        let account = Account::new("vladimirrott").unwrap();
+        let diff = ProductionDiff::from_git(&seven, HEAD, Ok(String::new())).unwrap();
+        let refused = Conditions::new(
+            LeaseFree::from_answer(&seven, crate::Action::Merge, Ok(LeaseAnswer::Free)).unwrap(),
+            Confirmed::check(&seven, WhoAmI::Login("vladimirrott".into()), &account).unwrap(),
+            Approved::from_decision(&eight, "APPROVED").unwrap(),
+            ClaimsClear::new(seven.clone()),
+            MergeState::Clean.clear(&seven).unwrap(),
+            CheckBoard { pass: 1, skip: 0, fail: 0, pending: 0, cancel: 0, total: 1 }
+                .green(&seven)
+                .unwrap(),
+            Fresh::from_diff(&diff, &commit(HEAD)).unwrap(),
+            commit(HEAD),
+        )
+        .unwrap_err();
+        assert_eq!(refused, GateDecision::ConditionsForOtherPr { pr: seven, found: "8".into() });
+    }
+
+    #[test]
+    fn every_witness_is_checked_against_the_lease() {
+        // One witness at a time is for #8; each must refuse.
+        let seven = number("7");
+        let eight = number("8");
+        let account = Account::new("vladimirrott").unwrap();
+        let ok_diff = ProductionDiff::from_git(&seven, HEAD, Ok(String::new())).unwrap();
+        let bad_diff = ProductionDiff::from_git(&eight, HEAD, Ok(String::new())).unwrap();
+        let board = |p: &PrNumber| {
+            CheckBoard { pass: 1, skip: 0, fail: 0, pending: 0, cancel: 0, total: 1 }
+                .green(p)
+                .unwrap()
+        };
+        for which in 0..6 {
+            let pick = |i: usize| if i == which { &eight } else { &seven };
+            let refused = Conditions::new(
+                LeaseFree::from_answer(&seven, crate::Action::Merge, Ok(LeaseAnswer::Free))
+                    .unwrap(),
+                Confirmed::check(pick(0), WhoAmI::Login("vladimirrott".into()), &account).unwrap(),
+                Approved::from_decision(pick(1), "APPROVED").unwrap(),
+                ClaimsClear::new(pick(2).clone()),
+                MergeState::Clean.clear(pick(3)).unwrap(),
+                board(pick(4)),
+                Fresh::from_diff(if which == 5 { &bad_diff } else { &ok_diff }, &commit(HEAD))
+                    .unwrap(),
+                commit(HEAD),
+            );
+            assert_eq!(
+                refused.unwrap_err(),
+                GateDecision::ConditionsForOtherPr { pr: seven.clone(), found: "8".into() },
+                "witness {which}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_freshness_computed_for_another_head_than_the_fence_is_refused() {
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        let diff = ProductionDiff::from_git(&number("7"), HEAD, Ok(String::new())).unwrap();
+        let account = Account::new("vladimirrott").unwrap();
+        let pr = number("7");
+        let refused = Conditions::new(
+            LeaseFree::from_answer(&pr, crate::Action::Merge, Ok(LeaseAnswer::Free)).unwrap(),
+            Confirmed::check(&pr, WhoAmI::Login("vladimirrott".into()), &account).unwrap(),
+            Approved::from_decision(&pr, "APPROVED").unwrap(),
+            ClaimsClear::new(pr.clone()),
+            MergeState::Clean.clear(&pr).unwrap(),
+            CheckBoard { pass: 1, skip: 0, fail: 0, pending: 0, cancel: 0, total: 1 }
+                .green(&pr)
+                .unwrap(),
+            Fresh::from_diff(&diff, &commit(HEAD)).unwrap(),
+            commit(other),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            GateDecision::ConditionsForOtherHead { expected: other.into(), found: HEAD.into() }
+        );
+    }
+
+    #[test]
+    fn a_freshness_computed_against_another_receipt_head_does_not_clear() {
+        // The receipt says HEAD, the diff was taken from another verified head.
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        let refused =
+            receipted(7).cleared(conditions_at(&number("7"), other, HEAD).unwrap()).unwrap_err();
+        assert_eq!(
+            refused,
+            GateDecision::ConditionsForOtherHead { expected: HEAD.into(), found: other.into() }
+        );
     }
 
     #[test]
@@ -418,7 +673,7 @@ mod tests {
         assert_eq!(pr.number().as_arg(), "7");
         assert_eq!(pr.head().as_str(), HEAD);
         assert_eq!(pr.receipt().head(), HEAD);
-        assert_eq!(pr.conditions().board.pass(), 3);
+        assert_eq!(pr.conditions().board().pass(), 3);
     }
 
     #[test]
@@ -458,6 +713,25 @@ mod tests {
                 found: "1".into(),
                 pr: number("2")
             }
+        );
+    }
+
+    #[test]
+    fn an_asserted_receipt_replays_because_replay_only_asks_for_a_signed_one() {
+        // Found, not fixed (rv264 O4): the refusal of an asserted receipt during an
+        // unattended run lives in `mx_receipt::Stored::check`, and `replay` accepts
+        // any `Receipt<Signed>`, so a caller that skips `check` can spend one.
+        let asserted = Receipt::asserted(
+            7,
+            HEAD,
+            "claim",
+            &Stamp::new("2026-11-22T10:00:00+00:00", "human"),
+            false,
+        )
+        .unwrap()
+        .sign(&key());
+        assert!(
+            Pr::open(number("7")).replay(asserted, &PathBuf::from("/s/receipts/7.json")).is_ok()
         );
     }
 
@@ -503,7 +777,7 @@ mod tests {
         gh.script_merge(Script::always(Ok(())));
         let live = Merger::new(Posting::On, &gh).unwrap();
         let done = live.merge(mergeable("7")).unwrap();
-        assert_eq!(done, Merged { number: number("7"), head: CommitId::parse(HEAD).unwrap() });
+        assert_eq!((done.number(), done.head()), (&number("7"), &CommitId::parse(HEAD).unwrap()));
         assert_eq!(
             gh.calls(),
             vec![GhCall::Merge { pr: number("7"), head: CommitId::parse(HEAD).unwrap() }]
@@ -518,7 +792,10 @@ mod tests {
             output: "head branch was modified".into(),
         })));
         let refused = Merger::new(Posting::On, &gh).unwrap().merge(mergeable("7")).unwrap_err();
-        assert_eq!(refused, GateDecision::MergeFailed);
+        assert_eq!(
+            refused,
+            GateDecision::MergeFailed { output: "head branch was modified".into() }
+        );
         assert_eq!(refused.to_string(), "merge failed");
     }
 }

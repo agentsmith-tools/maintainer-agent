@@ -7,18 +7,19 @@ use mx_suite::MutateGlob;
 ///
 /// `--sandbox` makes GNU sed refuse the `e`, `w` and `r` commands, so the
 /// expression is a pure text transform and not host code execution. That is the
-/// only protection: an expression that BEGINS with `-` is read by sed as an
-/// option (`-n`, `-f<file>`, `--follow-symlinks`), because the bash gate puts it
-/// right after `-i` without `-e` or `--`. The pull request lists this under
-/// "Found, not fixed"; the type refuses only what bash refuses (an empty
-/// expression, `${4:?sed expression}`) and what no argument can hold (NUL).
+/// only protection in the bash: an expression that BEGINS with `-` is read by sed
+/// as an option (`-n`, `-f<file>`, `--follow-symlinks`), because the bash gate puts
+/// it right after `-i` without `-e` or `--`. This type refuses it (decision P30-11,
+/// rv264 O8), together with what bash refuses (an empty expression,
+/// `${4:?sed expression}`) and what no argument can hold (NUL). The adapter must
+/// still pass `-e <expression> --`, as the bash fix will.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SedExpression(String);
 
 impl SedExpression {
     /// Checks the expression.
     pub fn parse(text: &str) -> Result<Self, SandboxError> {
-        if text.is_empty() || text.contains('\0') {
+        if text.is_empty() || text.contains('\0') || text.starts_with('-') {
             return Err(SandboxError::BadSedExpression);
         }
         Ok(Self(text.to_string()))
@@ -107,10 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn an_expression_that_starts_with_a_hyphen_is_accepted_as_the_bash_accepts_it() {
-        // Found, not fixed (P30-11): sed reads it as an option.
-        assert!(SedExpression::parse("-n").is_ok());
-        assert!(SedExpression::parse("--follow-symlinks").is_ok());
+    fn an_expression_that_starts_with_a_hyphen_is_refused() {
+        // P30-11, rv264 O8: sed reads it as an option (`-f<script>` ran a host script).
+        for bad in ["-n", "--follow-symlinks", "-fscript", "-e s/a/b/"] {
+            assert_eq!(SedExpression::parse(bad), Err(SandboxError::BadSedExpression), "{bad}");
+        }
+        assert!(SedExpression::parse("s/-a/-b/").is_ok());
     }
 
     fn globs(list: &[&str]) -> Vec<MutateGlob> {

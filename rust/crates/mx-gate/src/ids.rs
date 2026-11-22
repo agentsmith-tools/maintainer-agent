@@ -1,8 +1,10 @@
 //! The identifiers the gate takes from the command line and from GitHub, checked once.
 
 use crate::GateDecision;
+use mx_ports::Fs;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::path::Path;
 use thiserror::Error;
 
 /// A pull request number, as the command line typed it.
@@ -53,6 +55,15 @@ impl PrNumber {
     pub fn value(&self) -> u64 {
         self.value.get()
     }
+}
+
+/// `show <pr>`: the bytes of one receipt. The number is a [`PrNumber`], so the text `show` builds a
+/// path from has passed [`PrNumber::parse`] before `mx_receipt::show_one` checks it again (decision
+/// P30-23: `show_one` takes text and has its own digits-only check, which accepts `0` and any
+/// length, so F2 is a runtime check there and the type here).
+pub fn show_receipt(fs: &dyn Fs, dir: &Path, pr: &PrNumber) -> Result<Vec<u8>, GateDecision> {
+    mx_receipt::show_one(fs, dir, pr.as_arg())
+        .map_err(|_| GateDecision::NoReceipt { pr: pr.clone() })
 }
 
 impl fmt::Display for PrNumber {
@@ -277,6 +288,21 @@ mod tests {
         assert_eq!(
             PrNumber::parse("../x").unwrap_err().to_string(),
             "pull request must be a positive integer, not '../x'"
+        );
+    }
+
+    #[test]
+    fn show_reads_one_receipt_by_a_checked_number() {
+        use mx_ports::{EffectLog, FakeFs};
+        let log = EffectLog::new();
+        let fs = FakeFs::new(&log);
+        fs.put("/s/receipts/7.json", b"{}".to_vec(), 0);
+        let seven = PrNumber::parse("7").unwrap();
+        assert_eq!(show_receipt(&fs, Path::new("/s/receipts"), &seven).unwrap(), b"{}");
+        let eight = PrNumber::parse("8").unwrap();
+        assert_eq!(
+            show_receipt(&fs, Path::new("/s/receipts"), &eight),
+            Err(GateDecision::NoReceipt { pr: eight })
         );
     }
 

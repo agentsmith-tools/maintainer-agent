@@ -1,7 +1,8 @@
 //! The sandbox port and its fake.
 
 use crate::{
-    ContainedTree, ContainerSpec, Escape, ExtractedTree, LogMode, SandboxError, SedExpression,
+    ContainedTree, ContainerSpec, Escape, ExtractedTree, LogMode, Mutated, SandboxError,
+    SedExpression,
 };
 use mx_core::NonEmpty;
 use mx_ports::Script;
@@ -64,7 +65,17 @@ pub trait Sandbox {
         tree: &ContainedTree,
         globs: &NonEmpty<MutateGlob>,
         expression: &SedExpression,
-    ) -> Result<Vec<String>, SandboxError>;
+    ) -> Result<Mutated, SandboxError>;
+
+    /// A new private directory under `parent` (`scratch_dir`): `mkdir -p`, mode 700, then
+    /// `mktemp -d <parent>/XXXXXXXX`. The adapter removes every directory it made when the
+    /// gate ends, on every exit and not only on success (the bash does it from one `EXIT` trap).
+    fn scratch_dir(&self, parent: &Path) -> Result<PathBuf, SandboxError>;
+
+    /// `git init -q` and `git add -A -f` inside the extracted tree, under
+    /// `-c core.hooksPath=/dev/null -c init.templateDir=`, so `git ls-files` answers what the
+    /// archive held. `Err` is a note and not a refusal: the gate says so and goes on.
+    fn seed_index(&self, tree: &ContainedTree) -> Result<(), SandboxError>;
 
     /// Runs the container, its output going to `log` as the spec's
     /// [`ContainerSpec::log_mode`] says (`>>` or `>`, with standard error on
@@ -82,6 +93,8 @@ pub trait Sandbox {
 pub enum SandboxCall {
     Extract { repo: PathBuf, rev: String, dest: PathBuf },
     Escapes { root: PathBuf },
+    Scratch { parent: PathBuf },
+    SeedIndex { root: PathBuf },
     Mutate { root: PathBuf, globs: Vec<String>, expression: String },
     Run { argv: Vec<String>, log: PathBuf, mode: LogMode },
 }
@@ -97,6 +110,8 @@ pub struct FakeSandbox {
     escapes: Mutex<Script<Result<Vec<Escape>, SandboxError>>>,
     mutate: Mutex<Script<Result<Vec<String>, SandboxError>>>,
     run: Mutex<Script<Result<ContainerExit, SandboxError>>>,
+    scratch: Mutex<Script<Result<PathBuf, SandboxError>>>,
+    seed: Mutex<Script<Result<(), SandboxError>>>,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -128,6 +143,16 @@ impl FakeSandbox {
     /// The answers to `run_container`.
     pub fn script_run(&self, script: Script<Result<ContainerExit, SandboxError>>) {
         *locked(&self.run) = script;
+    }
+
+    /// The answers to `scratch_dir`.
+    pub fn script_scratch(&self, script: Script<Result<PathBuf, SandboxError>>) {
+        *locked(&self.scratch) = script;
+    }
+
+    /// The answers to `seed_index`.
+    pub fn script_seed(&self, script: Script<Result<(), SandboxError>>) {
+        *locked(&self.seed) = script;
     }
 
     /// Every call so far, in order.
@@ -162,13 +187,26 @@ impl Sandbox for FakeSandbox {
         tree: &ContainedTree,
         globs: &NonEmpty<MutateGlob>,
         expression: &SedExpression,
-    ) -> Result<Vec<String>, SandboxError> {
+    ) -> Result<Mutated, SandboxError> {
         self.calls.push(SandboxCall::Mutate {
             root: tree.root().to_path_buf(),
             globs: globs.iter().map(|g| g.as_str().to_string()).collect(),
             expression: expression.as_str().to_string(),
         });
-        locked(&self.mutate).next("Sandbox::apply_mutation")
+        let paths = locked(&self.mutate).next("Sandbox::apply_mutation")?;
+        let globs: Vec<MutateGlob> = globs.iter().cloned().collect();
+        Mutated::new(paths, &globs)
+            .map_err(|nothing| SandboxError::NothingChanged { globs: nothing.globs })
+    }
+
+    fn scratch_dir(&self, parent: &Path) -> Result<PathBuf, SandboxError> {
+        self.calls.push(SandboxCall::Scratch { parent: parent.to_path_buf() });
+        locked(&self.scratch).next("Sandbox::scratch_dir")
+    }
+
+    fn seed_index(&self, tree: &ContainedTree) -> Result<(), SandboxError> {
+        self.calls.push(SandboxCall::SeedIndex { root: tree.root().to_path_buf() });
+        locked(&self.seed).next("Sandbox::seed_index")
     }
 
     fn run_container(
@@ -260,7 +298,7 @@ mod tests {
         let changed = fake
             .apply_mutation(&contained, &globs, &SedExpression::parse("s/a/b/").unwrap())
             .unwrap();
-        assert_eq!(changed, ["src/a.rs"]);
+        assert_eq!(changed.paths(), ["src/a.rs"]);
         assert_eq!(
             fake.calls(),
             vec![SandboxCall::Mutate {
@@ -268,6 +306,18 @@ mod tests {
                 globs: vec!["*.rs".into(), "Makefile".into()],
                 expression: "s/a/b/".into()
             }]
+        );
+    }
+
+    #[test]
+    fn a_mutation_that_changed_nothing_cannot_be_used_unchecked() {
+        let fake = FakeSandbox::new();
+        fake.script_mutation(Script::always(Ok(Vec::new())));
+        let contained = ContainedTree::check(tree(), Vec::new()).unwrap();
+        let globs = NonEmpty::new(MutateGlob::parse("*.rs").unwrap(), []);
+        assert_eq!(
+            fake.apply_mutation(&contained, &globs, &SedExpression::parse("s/a/b/").unwrap()),
+            Err(SandboxError::NothingChanged { globs: vec!["*.rs".into()] })
         );
     }
 
@@ -305,6 +355,8 @@ mod tests {
             .map(|c| match c {
                 SandboxCall::Extract { .. } => "extract",
                 SandboxCall::Escapes { .. } => "escapes",
+                SandboxCall::Scratch { .. } => "scratch",
+                SandboxCall::SeedIndex { .. } => "seed",
                 SandboxCall::Mutate { .. } => "mutate",
                 SandboxCall::Run { .. } => "run",
             })
@@ -334,6 +386,25 @@ mod tests {
         }));
         assert!(caught.is_err());
         assert_eq!(fake.calls().len(), 1);
+    }
+
+    #[test]
+    fn scratch_and_index_seeding_are_scripted_and_recorded() {
+        let fake = FakeSandbox::new();
+        fake.script_scratch(Script::always(Ok(PathBuf::from("/s/verify-work/ab12"))));
+        fake.script_seed(Script::sequence([Ok(()), Err(SandboxError::IndexNotSeeded)]));
+        let contained = ContainedTree::check(tree(), Vec::new()).unwrap();
+        assert_eq!(
+            fake.scratch_dir(Path::new("/s/verify-work")),
+            Ok(PathBuf::from("/s/verify-work/ab12"))
+        );
+        assert_eq!(fake.seed_index(&contained), Ok(()));
+        assert_eq!(fake.seed_index(&contained), Err(SandboxError::IndexNotSeeded));
+        assert_eq!(
+            fake.calls()[0],
+            SandboxCall::Scratch { parent: PathBuf::from("/s/verify-work") }
+        );
+        assert_eq!(fake.calls().len(), 3);
     }
 
     #[test]

@@ -455,8 +455,12 @@ pub enum GateDecision {
 
     // ----- the merge -----
     /// bash `cmd_merge`: `gh pr merge ... || die "merge failed"`
+    ///
+    /// `output` is what `gh` printed on its own ("Pull request is not mergeable:
+    /// ..."), which the bash lets through on standard error before this line. The
+    /// binary prints it first; it is not part of this text.
     #[error("merge failed")]
-    MergeFailed,
+    MergeFailed { output: String },
 
     // ----- the typestate -----
     /// **new.** Evidence built for one pull request was offered for another.
@@ -465,6 +469,15 @@ pub enum GateDecision {
     /// the number and checks it at the transition.
     #[error("the verification evidence was earned for #{found}, not #{pr}")]
     EvidenceForOtherPr { pr: PrNumber, found: u64 },
+
+    /// **new.** Conditions gathered for one pull request were offered for another.
+    #[error("the conditions were gathered for #{found}, not #{pr}")]
+    ConditionsForOtherPr { pr: PrNumber, found: String },
+
+    /// **new.** The freshness of the receipt was computed against another head
+    /// than the one the merge is pinned to, or for another receipt head.
+    #[error("the conditions were gathered for head {found}, not {expected}")]
+    ConditionsForOtherHead { expected: String, found: String },
 }
 
 /// What a step was about to do when it asked whether the pull request was leased.
@@ -543,8 +556,10 @@ impl GateDecision {
             | Self::CannotFetch { .. }
             | Self::ProductionChanged { .. }
             | Self::StalenessUnreadable { .. }
-            | Self::MergeFailed
-            | Self::EvidenceForOtherPr { .. } => 1,
+            | Self::MergeFailed { .. }
+            | Self::EvidenceForOtherPr { .. }
+            | Self::ConditionsForOtherPr { .. }
+            | Self::ConditionsForOtherHead { .. } => 1,
         }
     }
 
@@ -556,7 +571,7 @@ impl GateDecision {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn pr() -> PrNumber {
@@ -626,8 +641,10 @@ mod tests {
             GateDecision::CannotFetch { .. } => 47,
             GateDecision::ProductionChanged { .. } => 48,
             GateDecision::StalenessUnreadable { .. } => 49,
-            GateDecision::MergeFailed => 50,
+            GateDecision::MergeFailed { .. } => 50,
             GateDecision::EvidenceForOtherPr { .. } => 51,
+            GateDecision::ConditionsForOtherPr { .. } => 52,
+            GateDecision::ConditionsForOtherHead { .. } => 53,
         }
     }
 
@@ -635,7 +652,7 @@ mod tests {
     /// it. Each text is copied from the `die` line quoted in the variant's own
     /// comment, with `$var` replaced by the sample's value.
     #[allow(clippy::too_many_lines, reason = "the table is data: one row per refusal")]
-    fn samples() -> Vec<(GateDecision, String)> {
+    pub(crate) fn samples() -> Vec<(GateDecision, String)> {
         let verified = "0123456789abcdef0123456789abcdef01234567";
         vec![
             // die "pull request must be a positive integer, not '$1'"
@@ -868,11 +885,21 @@ mod tests {
                 format!("could not tell whether production code changed since the verified head {verified} of #7: git diff failed (fatal: bad revision).\n  An error is not an empty diff, so the receipt is not treated as still applying. Re-verify and record a new one."),
             ),
             // gh pr merge ... || die "merge failed"
-            (GateDecision::MergeFailed, "merge failed".into()),
+            (GateDecision::MergeFailed { output: "gh said no".into() }, "merge failed".into()),
             // new: evidence for another pull request
             (
                 GateDecision::EvidenceForOtherPr { pr: pr(), found: 8 },
                 "the verification evidence was earned for #8, not #7".into(),
+            ),
+            // new: conditions for another pull request
+            (
+                GateDecision::ConditionsForOtherPr { pr: pr(), found: "8".into() },
+                "the conditions were gathered for #8, not #7".into(),
+            ),
+            // new: conditions for another head
+            (
+                GateDecision::ConditionsForOtherHead { expected: "aaa".into(), found: "bbb".into() },
+                "the conditions were gathered for head bbb, not aaa".into(),
             ),
         ]
     }
@@ -880,7 +907,7 @@ mod tests {
     #[test]
     fn every_variant_has_exactly_one_sample() {
         let table = samples();
-        assert_eq!(table.len(), 52, "one row per variant");
+        assert_eq!(table.len(), 54, "one row per variant");
         for (at, (decision, _)) in table.iter().enumerate() {
             assert_eq!(rank(decision), at, "row {at} is out of order: {decision:?}");
         }
@@ -893,7 +920,7 @@ mod tests {
             assert_eq!(decision.to_string(), bash, "{decision:?}");
             checked += 1;
         }
-        assert_eq!(checked, 52);
+        assert_eq!(checked, 54);
     }
 
     #[test]
@@ -905,7 +932,7 @@ mod tests {
 
     #[test]
     fn the_stderr_line_is_the_program_name_a_colon_the_message_and_a_newline() {
-        let line = GateDecision::MergeFailed.stderr_line();
+        let line = GateDecision::MergeFailed { output: String::new() }.stderr_line();
         assert_eq!(line, "maintainer-merge: merge failed\n");
         let line = GateDecision::Dirty { pr: pr() }.stderr_line();
         assert_eq!(line, "maintainer-merge: #7 has conflicts (mergeStateStatus DIRTY)\n");
@@ -967,97 +994,6 @@ mod tests {
         assert!(refused.to_string().contains("#007"));
     }
 
-    /// Every `die "..."` literal of `bin/maintainer-merge`, with each expansion
-    /// (`$x`, `${x}`, `$(...)`) turned into a NUL, split into lines.
-    fn bash_die_lines(source: &str) -> Vec<String> {
-        let bytes: Vec<char> = source.chars().collect();
-        let mut lines = Vec::new();
-        let mut from = 0;
-        while let Some(at) = source[from..].find("die \"") {
-            let start_byte = from + at;
-            let prev = source[..start_byte].chars().next_back();
-            from = start_byte + 5;
-            if prev.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
-            let start = source[..from].chars().count();
-            let mut text = String::new();
-            let mut depth = 0_usize;
-            let mut i = start;
-            while i < bytes.len() {
-                let c = bytes[i];
-                if c == '\\' && depth == 0 {
-                    // \` \" \$ and \\ stand for the character after the backslash.
-                    if let Some(next) = bytes.get(i + 1) {
-                        text.push(*next);
-                    }
-                    i += 2;
-                    continue;
-                }
-                if depth == 0 && c == '"' {
-                    break;
-                }
-                if c == '$' && bytes.get(i + 1) == Some(&'(') {
-                    if depth == 0 {
-                        text.push('\0');
-                    }
-                    depth += 1;
-                    i += 2;
-                    continue;
-                }
-                if depth > 0 {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => depth -= 1,
-                        _ => {}
-                    }
-                    i += 1;
-                    continue;
-                }
-                if c == '$' && bytes.get(i + 1) == Some(&'{') {
-                    while i < bytes.len() && bytes[i] != '}' {
-                        i += 1;
-                    }
-                    text.push('\0');
-                    i += 1;
-                    continue;
-                }
-                if c == '$'
-                    && bytes
-                        .get(i + 1)
-                        .is_some_and(|n| n.is_ascii_alphanumeric() || *n == '_' || *n == '#')
-                {
-                    i += 1;
-                    while bytes.get(i).is_some_and(|n| n.is_ascii_alphanumeric() || *n == '_') {
-                        i += 1;
-                    }
-                    text.push('\0');
-                    continue;
-                }
-                text.push(c);
-                i += 1;
-            }
-            lines.extend(text.split('\n').map(str::to_string));
-        }
-        lines
-    }
-
-    /// Does `text` match a bash line whose expansions are wildcards?
-    fn matches_bash_line(bash: &str, text: &str) -> bool {
-        let pieces: Vec<&str> = bash.split('\0').collect();
-        let (first, rest) = pieces.split_first().expect("split yields one piece");
-        let Some(mut remaining) = text.strip_prefix(first) else { return false };
-        if rest.is_empty() {
-            return remaining.is_empty();
-        }
-        let (last, middle) = rest.split_last().expect("rest is not empty");
-        for piece in middle {
-            let Some(at) = remaining.find(piece) else { return false };
-            remaining = &remaining[at + piece.len()..];
-        }
-        remaining.ends_with(last)
-    }
-
     /// The lines of a sample that are only an interpolated value, which no `die`
     /// literal can quote.
     fn interpolated_lines(rank: usize) -> &'static [&'static str] {
@@ -1076,20 +1012,17 @@ mod tests {
     fn every_static_line_of_every_message_is_a_line_of_a_die_in_the_bash_gate() {
         // The table above and the enum were both written from one reading of the
         // bash, so a slip in that reading would pass both. This test reads the
-        // bash file itself. Lines whose bash literal is only an interpolation
-        // (fewer than eight characters of text) are left out, because they match
-        // anything. The new refusals (F1 and the typestate's) have no bash line.
-        const NEW: [usize; 2] = [49, 51];
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../bin/maintainer-merge"
-        ))
-        .expect("bin/maintainer-merge is two directories above rust/crates/mx-gate");
-        let strong: Vec<String> = bash_die_lines(&source)
+        // bash file itself. Lines that are only an interpolation match anything and are
+        // left out. The new refusals (F1 and the typestate's) have no bash line.
+        const NEW: [usize; 4] = [49, 51, 52, 53];
+        let texts: Vec<String> = samples()
             .into_iter()
-            .filter(|line| line.replace('\0', "").trim().len() >= 8)
+            .enumerate()
+            .filter(|(at, _)| !NEW.contains(at))
+            .map(|(_, (_, text))| text)
+            // the sample values of this table are real text, not marked values
             .collect();
-        assert!(strong.len() > 100, "the scanner found {} lines; it read nothing", strong.len());
+        let strong = crate::anchor::strong_lines();
         let mut checked_lines = 0;
         for (at, (decision, text)) in samples().iter().enumerate() {
             if NEW.contains(&at) {
@@ -1100,36 +1033,119 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    strong.iter().any(|bash| matches_bash_line(bash, line)),
+                    strong.iter().any(|bash| crate::anchor::matches_bash_line(bash, line)),
                     "{decision:?}: no die line of bin/maintainer-merge matches {line:?}"
                 );
                 checked_lines += 1;
             }
         }
+        assert!(!texts.is_empty());
         assert!(checked_lines >= 90, "only {checked_lines} lines were compared");
     }
 
     #[test]
     fn the_bash_anchor_refuses_a_line_that_is_in_no_die() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../bin/maintainer-merge"
-        ))
-        .unwrap();
-        let strong: Vec<String> = bash_die_lines(&source)
-            .into_iter()
-            .filter(|line| line.replace('\0', "").trim().len() >= 8)
-            .collect();
+        let strong = crate::anchor::strong_lines();
         for invented in [
             "this sentence is in no bash die",
             "#7 is BLOCKD: a required review or check is missing",
             "",
         ] {
-            assert!(!strong.iter().any(|bash| matches_bash_line(bash, invented)), "{invented:?}");
+            assert!(
+                !strong.iter().any(|bash| crate::anchor::matches_bash_line(bash, invented)),
+                "{invented:?}"
+            );
         }
-        assert!(strong.iter().any(|bash| matches_bash_line(
+        assert!(strong.iter().any(|bash| crate::anchor::matches_bash_line(
             bash,
             "#7 is BLOCKED: a required review or check is missing"
         )));
+    }
+
+    /// Every sample text of every typed refusal and progress line of the gate.
+    fn all_texts() -> Vec<String> {
+        let mut all: Vec<String> = samples().into_iter().map(|(_, text)| text).collect();
+        all.extend(crate::update::samples().into_iter().map(|(_, text)| text));
+        all.extend(crate::verify::samples().into_iter().map(|(_, text)| text));
+        all.extend(crate::progress::samples().into_iter().map(|(_, text)| text));
+        all.extend(crate::deps::refusal_texts());
+        all.extend(mx_sandbox_texts());
+        all
+    }
+
+    /// The `die` messages that live in other crates, as their types print them.
+    fn mx_sandbox_texts() -> Vec<String> {
+        use mx_sandbox::{EscapingTree, NothingChanged, SandboxError};
+        use mx_suite::SuiteError;
+        vec![
+            EscapingTree {
+                escapes: vec![mx_sandbox::Escape { link: "a".into(), target: "b".into() }],
+            }
+            .message("7"),
+            NothingChanged { globs: vec!["*.rs".into()] }.message("7"),
+            SandboxError::MutationFailed.to_string(),
+            SuiteError::NoSuiteDir.to_string(),
+            SuiteError::NotOnDisk {
+                name: mx_suite::SuiteName::parse("x").unwrap(),
+                dir: "/d".into(),
+            }
+            .to_string(),
+            SuiteError::NeedsOtherRuntime {
+                suite: mx_suite::SuiteName::parse("x").unwrap(),
+                needs: "podman".into(),
+                runtime: mx_suite::Runtime::Docker,
+            }
+            .to_string(),
+            SuiteError::PrefetchRefused { output: "o".into() }.to_string(),
+            mx_suite::NoProdGlobs.to_string(),
+            mx_suite::PickRefusal::NamedDoesNotCover {
+                named: mx_suite::SuiteName::parse("x").unwrap(),
+                map: "m".into(),
+            }
+            .to_string(),
+            mx_suite::PickRefusal::NoSingleSuite {
+                dir: "d".into(),
+                map: "m".into(),
+                suites: "s".into(),
+                orphans: 1,
+            }
+            .to_string(),
+        ]
+    }
+
+    #[test]
+    fn every_die_of_the_bash_gate_has_a_typed_twin() {
+        // The reverse direction (rv264): a die added to the bash must get a variant. Each
+        // bash literal, with its expansions as wildcards, must match some sample text.
+        // Left out, and why: receipt writing and signing live in mx-receipt with their own
+        // text; the check counts "not a number" cannot happen in Rust; the `looks_environmental`
+        // pattern list is not a die.
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bin/maintainer-merge"
+        ))
+        .unwrap();
+        let literals = crate::anchor::bash_whole_literals(&source, "die \"");
+        assert!(literals.len() > 100, "found {} die literals", literals.len());
+        let texts = all_texts();
+        let exempt = [
+            "an unattended run may not assert a receipt",
+            "could not record the receipt",
+            "no receipt key at",
+            "is not a number",
+            "a bash 4 array",
+        ];
+        let mut missing = Vec::new();
+        for literal in &literals {
+            if literal.replace('\0', "").trim().len() < 8
+                || exempt.iter().any(|e| literal.contains(e))
+            {
+                continue;
+            }
+            if !texts.iter().any(|text| crate::anchor::matches_bash_line(literal, text)) {
+                missing.push(literal.clone());
+            }
+        }
+        assert!(missing.is_empty(), "bash dies with no typed twin: {missing:#?}");
     }
 }

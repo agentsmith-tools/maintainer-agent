@@ -48,6 +48,12 @@ pub struct ContainerInputs {
 }
 
 /// One container run: a purpose and its inputs, checked.
+///
+/// The run line takes the finished command string of the suite and never a filter, so a filter
+/// is never put into a shell string here (P30-9). `work` is a HOST path mounted at `/repo`, and the
+/// container runs a copy of the tree: a command that names a binary by an absolute host path (the
+/// Rust gate under test) cannot find it inside, so the suite agent must put what the run needs
+/// in the tree or in a mount of `extra_args` (decision P30-22, from the p5a finding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     purpose: Purpose,
@@ -56,6 +62,9 @@ pub struct ContainerSpec {
 }
 
 fn check(inputs: &ContainerInputs) -> Result<String, SandboxError> {
+    if inputs.runtime == Runtime::Docker {
+        return Err(SandboxError::RuntimeHasNoRunTimeout);
+    }
     let work = inputs.work.to_str().ok_or(SandboxError::WorkNotText)?;
     if !work.starts_with('/') {
         return Err(SandboxError::WorkNotAbsolute { path: work.to_string() });
@@ -172,7 +181,7 @@ mod tests {
             work: PathBuf::from("/state/verify-work/ab12cd34"),
             image: ImageRef::parse("docker.io/library/rust:1-slim").unwrap(),
             command: "cargo test --offline --workspace guard".to_string(),
-            extra_args: ExtraArgs::split("-v\n/home/u/.cargo:/cargo:O\n-e CARGO_HOME=/cargo"),
+            extra_args: ExtraArgs::split("-v\n/home/u/.cargo:/cargo:O\n-e\nCARGO_HOME=/cargo"),
             timeout: Timeout::from_secs(1800).unwrap(),
             limits: Limits {
                 tmpfs: crate::Limit::parse(mx_suite::LimitKey::Tmpfs, "256m").unwrap(),
@@ -316,14 +325,15 @@ mod tests {
     }
 
     #[test]
-    fn docker_replaces_the_program_and_nothing_else() {
+    fn docker_is_refused_because_it_has_no_run_timeout() {
+        // rv264 O3, found-not-fixed 6.
         let mut docker = inputs();
         docker.runtime = Runtime::Docker;
-        let spec = ContainerSpec::verify(docker).unwrap();
-        let mut want = words(&ContainerSpec::verify(inputs()).unwrap());
-        want[0] = "docker".to_string();
-        assert_eq!(words(&spec), want);
-        assert_eq!(spec.runtime(), Runtime::Docker);
+        assert_eq!(
+            ContainerSpec::verify(docker.clone()),
+            Err(SandboxError::RuntimeHasNoRunTimeout)
+        );
+        assert_eq!(ContainerSpec::prefetch(docker), Err(SandboxError::RuntimeHasNoRunTimeout));
     }
 
     #[test]

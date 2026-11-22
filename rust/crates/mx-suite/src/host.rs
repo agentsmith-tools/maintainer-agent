@@ -65,7 +65,10 @@ pub trait Suite {
     /// "$p" ) && ...`): the refusal that follows is the safe direction.
     fn covers(&self, path: &str) -> Result<bool, SuiteError>;
 
-    /// `suite_command <filter>`: the text the container runs as `sh -c`.
+    /// `suite_command <filter>`: the text the container runs as `sh -c`, with every trailing
+    /// newline removed as `$(...)` removes it (the shell suite prints `bash %s\n`), so the
+    /// container is never handed a command that ends in a newline. The filter is a
+    /// [`TestFilter`], which cannot hold shell syntax (decision P30-9).
     fn command(&self, filter: &TestFilter) -> Result<String, SuiteError>;
 
     /// `suite_ran <log>`: how many test units the log shows. Output that is not

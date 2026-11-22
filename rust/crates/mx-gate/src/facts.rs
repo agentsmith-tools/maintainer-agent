@@ -55,7 +55,17 @@ pub enum MergeState {
 
 /// The witness that a pull request's `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateClear(());
+pub struct StateClear {
+    pr: PrNumber,
+}
+
+impl StateClear {
+    /// The pull request whose state was read.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
+    }
+}
 
 impl MergeState {
     /// Reads `mergeStateStatus`. Total, and exact: `clean` is not `CLEAN`.
@@ -100,7 +110,7 @@ impl MergeState {
     pub fn clear(&self, pr: &PrNumber) -> Result<StateClear, GateDecision> {
         let pr = pr.clone();
         match self {
-            Self::Clean | Self::HasHooks => Ok(StateClear(())),
+            Self::Clean | Self::HasHooks => Ok(StateClear { pr }),
             Self::Behind => Err(GateDecision::Behind { pr }),
             Self::Dirty => Err(GateDecision::Dirty { pr }),
             Self::Blocked => Err(GateDecision::Blocked { pr }),
@@ -115,14 +125,24 @@ impl MergeState {
 
 /// The witness that the head is approved: `reviewDecision` is exactly `APPROVED`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Approved(());
+pub struct Approved {
+    pr: PrNumber,
+}
+
+impl Approved {
+    /// The pull request whose decision was read.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
+    }
+}
 
 impl Approved {
     /// bash `[ "$review" = "APPROVED" ] || die "#$pr reviewDecision is '$review', not APPROVED"`.
     /// An empty read is not approval, and neither is `approved`.
     pub fn from_decision(pr: &PrNumber, review: &str) -> Result<Self, GateDecision> {
         if review == "APPROVED" {
-            Ok(Self(()))
+            Ok(Self { pr: pr.clone() })
         } else {
             Err(GateDecision::NotApproved { pr: pr.clone(), review: review.to_string() })
         }
@@ -153,22 +173,29 @@ pub struct CheckBoard {
 
 /// The witness that the board is green: nothing failed, pending or cancelled,
 /// every check is pass or skipping, and at least one passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GreenBoard {
+    pr: PrNumber,
     pass: u64,
     skip: u64,
 }
 
 impl GreenBoard {
+    /// The pull request whose checks were counted.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
+    }
+
     /// Checks that passed.
     #[must_use]
-    pub fn pass(self) -> u64 {
+    pub fn pass(&self) -> u64 {
         self.pass
     }
 
     /// Checks that were skipped.
     #[must_use]
-    pub fn skip(self) -> u64 {
+    pub fn skip(&self) -> u64 {
         self.skip
     }
 }
@@ -240,7 +267,7 @@ impl CheckBoard {
         if self.pass == 0 {
             return Err(GateDecision::AllChecksSkipped { pr, total: self.total });
         }
-        Ok(GreenBoard { pass: self.pass, skip: self.skip })
+        Ok(GreenBoard { pr, pass: self.pass, skip: self.skip })
     }
 }
 
@@ -308,8 +335,8 @@ mod tests {
 
     #[test]
     fn clean_and_has_hooks_may_merge() {
-        assert_eq!(MergeState::Clean.clear(&pr()), Ok(StateClear(())));
-        assert_eq!(MergeState::HasHooks.clear(&pr()), Ok(StateClear(())));
+        assert_eq!(MergeState::Clean.clear(&pr()), Ok(StateClear { pr: pr() }));
+        assert_eq!(MergeState::HasHooks.clear(&pr()), Ok(StateClear { pr: pr() }));
     }
 
     #[test]
@@ -369,7 +396,7 @@ mod tests {
 
     #[test]
     fn only_the_exact_word_approved_is_approval() {
-        assert_eq!(Approved::from_decision(&pr(), "APPROVED"), Ok(Approved(())));
+        assert_eq!(Approved::from_decision(&pr(), "APPROVED"), Ok(Approved { pr: pr() }));
         for review in ["", "approved", "APPROVED ", "REVIEW_REQUIRED", "CHANGES_REQUESTED", "null"]
         {
             assert_eq!(

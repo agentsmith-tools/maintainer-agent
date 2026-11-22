@@ -1,58 +1,7 @@
 //! The proof that the registry checks inspected everything the classifier declared.
 
-use crate::PrNumber;
-use crate::deps::Bump;
+use crate::deps::{Bump, DepsRefusal};
 use mx_receipt::DependencyFacts;
-use thiserror::Error;
-
-/// A refusal of `verify-deps` that the types of this module can make.
-///
-/// The other refusals of `verify-deps` (a tag that is not the SHA, a base image
-/// that is not its tag's digest, a hash `PyPI` does not publish) belong to the code
-/// that makes the checks.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum DepsRefusal {
-    /// bash: the loop over the pins checked fewer than the classifier declared.
-    // die "the classifier declared $declared_pins action pin(s) and $checked
-    //   were verified. A receipt is a claim about all of them, so this one is not
-    //   written. Nothing here says the bump is bad; it says the check did not run."
-    #[error(
-        "the classifier declared {declared} action pin(s) and {checked}\n  were verified. A receipt is a claim about all of them, so this one is not\n  written. Nothing here says the bump is bad; it says the check did not run."
-    )]
-    PinsUnchecked { declared: u64, checked: u64 },
-
-    /// bash: the loop over the base images checked fewer than declared.
-    // die "the classifier declared $declared_images base image(s) and
-    //   $images_checked were verified. No receipt written: the check did not run."
-    #[error(
-        "the classifier declared {declared} base image(s) and\n  {checked} were verified. No receipt written: the check did not run."
-    )]
-    ImagesUnchecked { declared: u64, checked: u64 },
-
-    /// bash: the loop over the pip packages checked fewer than declared.
-    // die "the classifier declared $declared_pip pip package(s) and
-    //   $pip_checked were verified. No receipt written: the check did not run."
-    #[error(
-        "the classifier declared {declared} pip package(s) and\n  {checked} were verified. No receipt written: the check did not run."
-    )]
-    PipUnchecked { declared: u64, checked: u64 },
-
-    /// bash: die "the requirements path '$pf' is not a plain path, so it is not put in an API URL"
-    #[error("the requirements path '{path}' is not a plain path, so it is not put in an API URL")]
-    NotAPlainPath { path: String },
-
-    /// **new.** An action path with no plain `owner/repo` in front. The bash takes
-    /// `checkout` for the repository `checkout/checkout`.
-    #[error(
-        "the action '{action}' is not owner/repo[/dir] with plain segments, so it is not put in an API URL"
-    )]
-    ActionNotOwnerRepo { action: String },
-
-    /// bash: die "GitHub gave no merge base for #$pr: '${merge_base:0:40}'"
-    #[allow(clippy::doc_markdown, reason = "quotes the bash die line")]
-    #[error("GitHub gave no merge base for #{pr}: '{got}'")]
-    NoMergeBase { pr: PrNumber, got: String },
-}
 
 /// How many pins, base images and pip packages the checks verified, proved equal
 /// to how many the classifier declared.
@@ -237,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_merge_base_that_is_not_a_commit_names_the_first_40_characters() {
-        let pr = PrNumber::parse("7").unwrap();
+        let pr = crate::PrNumber::parse("7").unwrap();
         let refused = DepsRefusal::NoMergeBase { pr, got: "x".repeat(40) };
         assert_eq!(
             refused.to_string(),

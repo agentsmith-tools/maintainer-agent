@@ -52,6 +52,9 @@
 //! and F3 (a suite name is validated, in `mx-suite`) are the plan's. `P30-n` are
 //! this pull request's, each listed in its body.
 
+#[cfg(test)]
+mod anchor;
+mod cli;
 mod decision;
 pub mod deps;
 mod facts;
@@ -59,9 +62,15 @@ mod gh;
 mod helper;
 mod identity;
 mod ids;
+mod logs;
+mod ports;
 mod pr;
+mod progress;
 mod staleness;
+mod update;
+mod verify;
 
+pub use cli::{Command, CommandError, Exit, USAGE, parse_command};
 pub use decision::{Action, GateDecision, PROGRAM};
 pub use facts::{
     Approved, Check, CheckBoard, GreenBoard, MergeState, PrFacts, PrState, StateClear,
@@ -71,9 +80,19 @@ pub use helper::{
     FakeHelper, Helper, HelperCall, HelperMissing, HoldersFailure, LeaseAnswer, LeaseFree,
 };
 pub use identity::{Confirmed, FakeIdentity, IdentityCall, IdentityPort, WhoAmI};
-pub use ids::{Account, CommitId, HeadArg, IssueNumber, NoAccount, NotACommitId, PrNumber};
+pub use ids::{
+    Account, CommitId, HeadArg, IssueNumber, NoAccount, NotACommitId, PrNumber, show_receipt,
+};
+pub use logs::{first_failure_line, looks_environmental, looks_killed};
+pub use ports::{
+    FakeGateGit, FakeLockPort, FakeSay, GateGit, GitCall, LockError, LockGuard, LockKind, LockPort,
+    Say,
+};
 pub use pr::{
     ClaimsClear, Conditions, Evidence, Mergeable, Merged, Merger, Posting, Pr, Receipted,
     Unverified, Verified,
 };
+pub use progress::Progress;
 pub use staleness::{DiffFailure, Fresh, ProductionDiff};
+pub use update::UpdateRefusal;
+pub use verify::VerifyRefusal;

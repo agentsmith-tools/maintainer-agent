@@ -33,6 +33,18 @@ pub enum SandboxError {
     /// The path is not valid UTF-8, so it cannot be one argument. P30-5.
     #[error("the container's work directory is not valid UTF-8")]
     WorkNotText,
+    /// `docker run` has no `--timeout` (docker 29.10.0 lists only `--stop-timeout`),
+    /// and the flag set of the bash passes it. Refused at construction (P30-20,
+    /// rv264 O3), so the failure names itself and is not read as "the test does not
+    /// pass unmutated".
+    #[error(
+        "docker run has no --timeout, so the verify container cannot be bounded under docker; use podman"
+    )]
+    RuntimeHasNoRunTimeout,
+    /// An unvalidated filter or other text is not allowed in a shell string. The
+    /// mutation changed no file (bash: `cmd_verify`, "the mutation changed nothing").
+    #[error("the mutation changed nothing, so this run says nothing about the guard")]
+    NothingChanged { globs: Vec<String> },
     /// `sh -c ''` runs nothing and exits 0. P30-5.
     #[error("the container would run an empty command")]
     EmptyCommand,
@@ -60,6 +72,10 @@ pub enum SandboxError {
     // bash: die "cannot create $VERIFY_WORK" / "cannot create a scratch directory in $VERIFY_WORK"
     #[error("cannot create a scratch directory in {}", dir.display())]
     ScratchDir { dir: PathBuf },
+    /// `git init` or `git add -A -f` failed in the extracted tree, so a test that asks git
+    /// what is tracked will fail for that reason (the gate prints a note and goes on).
+    #[error("could not seed a git index in the extracted tree")]
+    IndexNotSeeded,
     /// `find` or `sed --sandbox` failed, or the expression used `e`, `w` or `r`.
     // bash: die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
     #[error("mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)")]

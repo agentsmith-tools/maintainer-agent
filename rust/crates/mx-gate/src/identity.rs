@@ -1,6 +1,6 @@
 //! The identity pin: `gh api user` must name the profile's account.
 
-use crate::{Account, GateDecision};
+use crate::{Account, GateDecision, PrNumber};
 use mx_ports::Script;
 use mx_suite::Recorder;
 use std::sync::{Mutex, PoisonError};
@@ -32,24 +32,33 @@ pub trait IdentityPort {
 /// The witness that `gh` is signed in as the profile's account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmed {
+    pr: PrNumber,
     account: Account,
 }
 
 impl Confirmed {
     /// The pin of `identity`: the call must have succeeded, and the login must be
     /// the account in any case. An empty login reads as `unknown`.
-    pub fn check(who: WhoAmI, account: &Account) -> Result<Self, GateDecision> {
+    pub fn check(pr: &PrNumber, who: WhoAmI, account: &Account) -> Result<Self, GateDecision> {
         match who {
             WhoAmI::Failed { exit } => Err(GateDecision::IdentityUnconfirmed {
                 account: account.as_str().to_string(),
                 exit,
             }),
-            WhoAmI::Login(login) if account.is(&login) => Ok(Self { account: account.clone() }),
+            WhoAmI::Login(login) if account.is(&login) => {
+                Ok(Self { pr: pr.clone(), account: account.clone() })
+            }
             WhoAmI::Login(login) => Err(GateDecision::IdentityMismatch {
                 who: if login.is_empty() { "unknown".to_string() } else { login },
                 account: account.as_str().to_string(),
             }),
         }
+    }
+
+    /// The pull request this confirmation was made for.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
     }
 
     /// The account that was confirmed.
@@ -116,20 +125,36 @@ mod tests {
 
     #[test]
     fn the_account_itself_is_confirmed() {
-        let confirmed = Confirmed::check(WhoAmI::Login("vladimirrott".into()), &account()).unwrap();
+        let confirmed = Confirmed::check(
+            &PrNumber::parse("7").unwrap(),
+            WhoAmI::Login("vladimirrott".into()),
+            &account(),
+        )
+        .unwrap();
         assert_eq!(confirmed.account().as_str(), "vladimirrott");
     }
 
     #[test]
     fn the_same_login_in_another_case_is_the_same_account() {
         // bash: [ "${who,,}" = "${ACCOUNT,,}" ]
-        assert!(Confirmed::check(WhoAmI::Login("VladimirRott".into()), &account()).is_ok());
+        assert!(
+            Confirmed::check(
+                &PrNumber::parse("7").unwrap(),
+                WhoAmI::Login("VladimirRott".into()),
+                &account()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn another_account_is_refused_with_both_names() {
-        let refused =
-            Confirmed::check(WhoAmI::Login("someone-else".into()), &account()).unwrap_err();
+        let refused = Confirmed::check(
+            &PrNumber::parse("7").unwrap(),
+            WhoAmI::Login("someone-else".into()),
+            &account(),
+        )
+        .unwrap_err();
         assert_eq!(
             refused,
             GateDecision::IdentityMismatch {
@@ -143,13 +168,23 @@ mod tests {
 
     #[test]
     fn an_empty_login_reads_as_unknown() {
-        let refused = Confirmed::check(WhoAmI::Login(String::new()), &account()).unwrap_err();
+        let refused = Confirmed::check(
+            &PrNumber::parse("7").unwrap(),
+            WhoAmI::Login(String::new()),
+            &account(),
+        )
+        .unwrap_err();
         assert_eq!(refused.to_string(), "gh is authenticated as 'unknown', not vladimirrott");
     }
 
     #[test]
     fn a_failed_call_is_not_a_login_and_names_the_exit_status() {
-        let refused = Confirmed::check(WhoAmI::Failed { exit: 1 }, &account()).unwrap_err();
+        let refused = Confirmed::check(
+            &PrNumber::parse("7").unwrap(),
+            WhoAmI::Failed { exit: 1 },
+            &account(),
+        )
+        .unwrap_err();
         assert_eq!(
             refused,
             GateDecision::IdentityUnconfirmed { account: "vladimirrott".into(), exit: 1 }
@@ -163,7 +198,14 @@ mod tests {
 
     #[test]
     fn a_failed_call_is_refused_even_when_the_account_is_the_one_asked_for() {
-        assert!(Confirmed::check(WhoAmI::Failed { exit: 4 }, &account()).is_err());
+        assert!(
+            Confirmed::check(
+                &PrNumber::parse("7").unwrap(),
+                WhoAmI::Failed { exit: 4 },
+                &account()
+            )
+            .is_err()
+        );
     }
 
     #[test]

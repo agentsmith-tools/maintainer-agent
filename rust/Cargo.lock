@@ -238,6 +238,7 @@ name = "mx-suite"
 version = "0.1.0"
 dependencies = [
  "mx-core",
+ "mx-ports",
  "thiserror",
 ]
 

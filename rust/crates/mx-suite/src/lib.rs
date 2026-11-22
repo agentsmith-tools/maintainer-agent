@@ -48,6 +48,7 @@ mod image;
 mod name;
 mod prod;
 mod record;
+mod selector;
 mod spec;
 pub mod text;
 
@@ -58,4 +59,7 @@ pub use image::{ImageRef, ImageRefError};
 pub use name::{SuiteName, SuiteNameError};
 pub use prod::{NoProdGlobs, ProdGlobs};
 pub use record::Recorder;
+pub use selector::{
+    CoverageFailure, CoverageRow, FakeSelector, PickRefusal, Picked, SuiteSelector,
+};
 pub use spec::{LimitKey, NoMutateGlob, Prefetch, Runtime, SuiteSpec};

@@ -1,6 +1,6 @@
 //! Has production code moved since the verified head? (`receipt_fresh`)
 
-use crate::{GateDecision, PrNumber};
+use crate::{CommitId, GateDecision, PrNumber};
 
 /// `git diff --name-only` failed. `reason` is what git said, for the refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,8 @@ pub struct DiffFailure {
 /// call, so a failure cannot be turned into an empty list on the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionDiff {
+    pr: PrNumber,
+    verified_head: String,
     paths: Vec<String>,
 }
 
@@ -41,6 +43,8 @@ impl ProductionDiff {
     ) -> Result<Self, GateDecision> {
         match result {
             Ok(stdout) => Ok(Self {
+                pr: pr.clone(),
+                verified_head: verified_head.to_string(),
                 paths: stdout
                     .split('\n')
                     .filter(|path| !path.is_empty())
@@ -63,18 +67,49 @@ impl ProductionDiff {
 }
 
 /// The witness that production code did not move since the verified head: the
-/// receipt still describes the tree being merged.
+/// receipt still describes the tree being merged. It names the pull request, the
+/// receipt's head and the head the diff was taken against, so `Pr::cleared`
+/// refuses a witness computed for another pull request, for another receipt or
+/// for a head other than the merge's fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fresh(());
+pub struct Fresh {
+    pr: PrNumber,
+    verified_head: String,
+    acted_head: CommitId,
+}
+
+impl Fresh {
+    /// The pull request.
+    #[must_use]
+    pub fn pr(&self) -> &PrNumber {
+        &self.pr
+    }
+
+    /// The head the receipt was earned at.
+    #[must_use]
+    pub fn verified_head(&self) -> &str {
+        &self.verified_head
+    }
+
+    /// The head being acted on, that the diff was taken against.
+    #[must_use]
+    pub fn acted_head(&self) -> &CommitId {
+        &self.acted_head
+    }
+}
 
 impl Fresh {
     /// bash `[ -n "$diff" ] && die "production code changed since the verified head ..."`.
-    pub fn from_diff(diff: &ProductionDiff, verified_head: &str) -> Result<Self, GateDecision> {
+    pub fn from_diff(diff: &ProductionDiff, acted_head: &CommitId) -> Result<Self, GateDecision> {
         if diff.paths.is_empty() {
-            Ok(Self(()))
+            Ok(Self {
+                pr: diff.pr.clone(),
+                verified_head: diff.verified_head.clone(),
+                acted_head: acted_head.clone(),
+            })
         } else {
             Err(GateDecision::ProductionChanged {
-                verified_head: verified_head.to_string(),
+                verified_head: diff.verified_head.clone(),
                 paths: diff.paths.clone(),
             })
         }
@@ -89,13 +124,21 @@ mod tests {
         PrNumber::parse("7").unwrap()
     }
 
+    fn acted() -> CommitId {
+        CommitId::parse("fedcba9876543210fedcba9876543210fedcba98").unwrap()
+    }
+
     const VERIFIED: &str = "0123456789abcdef0123456789abcdef01234567";
 
     #[test]
     fn a_successful_diff_with_no_output_means_nothing_moved() {
         let diff = ProductionDiff::from_git(&pr(), VERIFIED, Ok(String::new())).unwrap();
         assert!(diff.paths().is_empty());
-        assert_eq!(Fresh::from_diff(&diff, VERIFIED), Ok(Fresh(())));
+        let fresh = Fresh::from_diff(&diff, &acted()).unwrap();
+        assert_eq!(
+            (fresh.pr(), fresh.verified_head(), fresh.acted_head()),
+            (&pr(), VERIFIED, &acted())
+        );
     }
 
     #[test]
@@ -107,6 +150,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(diff.paths(), ["crates/x/src/lib.rs", "crates/y/src/new.rs"]);
+    }
+
+    #[test]
+    fn a_path_with_a_space_stays_one_path() {
+        // rv264 O1: a split on whitespace turned `a b.rs` into two paths.
+        let diff = ProductionDiff::from_git(
+            &pr(),
+            VERIFIED,
+            Ok("a b.rs\ndocs/a b.md\n\u{1f600}.rs".to_string()),
+        )
+        .unwrap();
+        assert_eq!(diff.paths(), ["a b.rs", "docs/a b.md", "\u{1f600}.rs"]);
     }
 
     #[test]
@@ -150,7 +205,7 @@ mod tests {
             Ok("crates/x/src/lib.rs\ncrates/y/src/new.rs".into()),
         )
         .unwrap();
-        let refused = Fresh::from_diff(&diff, VERIFIED).unwrap_err();
+        let refused = Fresh::from_diff(&diff, &acted()).unwrap_err();
         // bash receipt_fresh:
         //   die "production code changed since the verified head $verified_head:
         //   $(printf '%s' "$diff" | sed 's/^/    /')
@@ -167,7 +222,7 @@ mod tests {
     fn a_single_changed_path_is_enough() {
         let diff = ProductionDiff::from_git(&pr(), VERIFIED, Ok("bin/x".into())).unwrap();
         assert!(matches!(
-            Fresh::from_diff(&diff, VERIFIED),
+            Fresh::from_diff(&diff, &acted()),
             Err(GateDecision::ProductionChanged { .. })
         ));
     }

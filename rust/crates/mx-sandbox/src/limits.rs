@@ -156,13 +156,14 @@ impl Limits {
     }
 }
 
-/// The words of `suite_podman_args`, as the bash splits them: unquoted, on
-/// blanks, tabs and newlines.
+/// The arguments `suite_podman_args` printed, one per line.
 ///
 /// `$(suite_extra_args "$rt" "$scratch")` sits unquoted on the `podman run` line,
-/// so a path with a space in it (`$HOME` is one) becomes two arguments, and a
-/// word with `*` could also be expanded against the working directory. This port
-/// splits and does not expand. Both are listed under "Found, not fixed".
+/// so the bash splits on blanks and tabs too: a `$HOME` with a space became two
+/// arguments, and a word with `*` could be expanded against the working directory.
+/// Every shipped suite prints one argument per line (`printf '%s\n'`), so this port
+/// splits on newlines only and never expands (decision P30-10, rv264 O7). It
+/// differs from the bash only where the bash was already broken.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtraArgs(Vec<String>);
 
@@ -170,13 +171,7 @@ impl ExtraArgs {
     /// Splits what the suite printed.
     #[must_use]
     pub fn split(printed: &str) -> Self {
-        Self(
-            printed
-                .split([' ', '\t', '\n'])
-                .filter(|word| !word.is_empty())
-                .map(str::to_string)
-                .collect(),
-        )
+        Self(printed.split('\n').filter(|word| !word.is_empty()).map(str::to_string).collect())
     }
 
     /// The words, in order.
@@ -385,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn extra_args_split_on_blanks_tabs_and_newlines() {
+    fn extra_args_split_on_newlines_only() {
         let printed =
-            "-v\n/home/u/.cargo:/cargo:O,upperdir=/s/.cargo-upper\n-e CARGO_HOME=/cargo\t-e\nX=1\n";
+            "-v\n/home/u/.cargo:/cargo:O,upperdir=/s/.cargo-upper\n-e\nCARGO_HOME=/cargo\nX=1\n";
         assert_eq!(
             ExtraArgs::split(printed).as_slice(),
             [
@@ -395,18 +390,17 @@ mod tests {
                 "/home/u/.cargo:/cargo:O,upperdir=/s/.cargo-upper",
                 "-e",
                 "CARGO_HOME=/cargo",
-                "-e",
                 "X=1"
             ]
         );
     }
 
     #[test]
-    fn a_word_with_a_space_in_it_becomes_two_words_as_in_the_bash() {
-        // Found, not fixed (P30-10): $HOME with a space splits the overlay argument.
+    fn a_word_with_a_space_in_it_stays_one_argument() {
+        // P30-10, rv264 O7: the bash split a `$HOME` with a space into two.
         assert_eq!(
-            ExtraArgs::split("-v\n/home/a b/.cargo:/cargo:O").as_slice(),
-            ["-v", "/home/a", "b/.cargo:/cargo:O"]
+            ExtraArgs::split("-v\n/home/a b/.cargo:/cargo:O\n-e\tX").as_slice(),
+            ["-v", "/home/a b/.cargo:/cargo:O", "-e\tX"]
         );
     }
 
@@ -418,6 +412,6 @@ mod tests {
     #[test]
     fn nothing_printed_gives_no_words() {
         assert!(ExtraArgs::split("").as_slice().is_empty());
-        assert!(ExtraArgs::split(" \n\t \n").as_slice().is_empty());
+        assert!(ExtraArgs::split("\n\n").as_slice().is_empty());
     }
 }

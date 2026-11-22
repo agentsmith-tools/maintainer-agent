@@ -35,9 +35,21 @@
 mod checked;
 mod net;
 mod paths;
+mod ports;
+mod refusal;
 mod verdict;
 
-pub use checked::{Checked, DepsRefusal};
+pub use checked::Checked;
+pub use refusal::DepsRefusal;
+
+#[cfg(test)]
+pub(crate) fn refusal_texts() -> Vec<String> {
+    refusal::samples().into_iter().map(|(_, text)| text).collect()
+}
 pub use net::{FakeNet, GitObject, Net, NetCall, NetFailure, TagRef};
 pub use paths::{ActionRepo, PlainPath};
+pub use ports::{
+    Classifier, ClassifierCall, ClassifierExit, ClassifierRun, FakeClassifier, FakeWholeFile,
+    HelperScript, WholeFile,
+};
 pub use verdict::{Bump, Image, LineRef, Pin, PipPackage, Refused, Verdict, VerdictError};
