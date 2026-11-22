@@ -7,7 +7,8 @@ use crate::real::{
     StdDirs, StdFs, StdoutSay, SystemClock,
 };
 use crate::{
-    Account, Exit, Gate, GateConfig, Ports, Posting, USAGE, VerifySettings, parse_command,
+    Account, Command, Exit, Gate, GateConfig, Ports, Posting, StampSource, USAGE, VerifySettings,
+    parse_command,
 };
 use mx_ports::{Proc, RealProc};
 use mx_profile::{LoadEnv, load_profile};
@@ -29,6 +30,9 @@ const CHILD_ENV_NAMES: &[&str] = &[
     "LANGUAGE",
     "TERM",
     "SSH_AUTH_SOCK",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -304,6 +308,45 @@ fn run_inner(
     let identity = RealIdentity::new(&runner);
     let stamps = RealStamps { runner: &runner, vars };
     let runtime = PathRuntime { search_path: search_path.to_string() };
+    if let Command::VerifyDeps { pr, sha } = &command {
+        // `verify-deps` is the p3c module: its own adapters over a `Proc` that also hands the
+        // credentials to the registry scripts and `gh`, as the bash does.
+        let mut env_map = vars.clone();
+        for (name, value) in profile.vars() {
+            if let Ok(text) = std::str::from_utf8(value) {
+                env_map.insert(name.to_string(), text.to_string());
+            }
+        }
+        let mut deps_env = child_env(vars);
+        deps_env.extend(
+            TOKENS.iter().filter_map(|n| vars.get(*n).map(|v| ((*n).to_string(), v.clone()))),
+        );
+        let deps_proc = RealProc::new(search_path, deps_env);
+        let scripts = crate::deps::ScriptPaths::from_env(|name| env_map.get(name).cloned());
+        let dgh = crate::deps::ProcGh::new(&deps_proc, &cfg.slug);
+        let net = crate::deps::RealNet::new(
+            &deps_proc,
+            scripts.image_resolver.clone(),
+            scripts.pypi_verifier.clone(),
+        );
+        let classifier = crate::deps::RealClassifier::new(&deps_proc, scripts.classifier.clone());
+        let whole = crate::deps::RealWholeFile::new(&deps_proc, scripts.pip_files.clone());
+        let now = || stamps.stamp();
+        let wiring = crate::deps::Wiring {
+            ports: crate::deps::DepsPorts {
+                gh: &dgh,
+                net: &net,
+                classifier: &classifier,
+                whole_file: &whole,
+                fs: &StdFs,
+                say: &StdoutSay,
+            },
+            helper: &helper,
+            stamp: &now,
+        };
+        let exit = crate::deps::run(&env_map, pr, sha, &wiring);
+        return if exit.code == 0 { Ok(0) } else { Err(exit) };
+    }
     let pending = crate::pending::Pending;
     let gate = Gate::new(
         &cfg,

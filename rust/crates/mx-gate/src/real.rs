@@ -662,6 +662,10 @@ impl Fs for StdFs {
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<(), FsError> {
+        // `mkdir -p "$RECEIPTS"` comes first in the bash, and verify-deps writes through this port.
+        if let Some(dir) = path.parent() {
+            drop(std::fs::create_dir_all(dir));
+        }
         std::fs::write(path, contents)
             .map_err(|error| FsError { path: path.to_path_buf(), reason: error.to_string() })
     }

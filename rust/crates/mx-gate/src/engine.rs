@@ -173,9 +173,9 @@ impl<'a> Gate<'a> {
             Command::Merge { pr } => self.merge(&pr).map(|()| Printed::default()),
             Command::Update { pr } => self.update(&pr).map(|()| Printed::default()),
             Command::Show { pr } => self.show(pr.as_ref()),
-            Command::VerifyDeps { .. } => Err(die(
-                "verify-deps is not part of this build of the Rust gate yet; run bin/maintainer-merge",
-            )),
+            Command::VerifyDeps { .. } => {
+                Err(die("verify-deps runs through crate::deps::run, wired in app::run"))
+            }
         }
     }
 
