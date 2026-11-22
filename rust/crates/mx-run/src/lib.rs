@@ -32,6 +32,10 @@
 //!   ([`exec`]).
 //! - `P2A-fd9`: descriptor 9 already in use is a refusal ([`lock`]).
 //! - `P2A-x1`: a `GH_TRIES` or `GH_BACKOFF` that is not a whole number refuses.
+//! - `P5B-1`: a helper, tool or agent that is a text file with no `#!` line runs as a
+//!   shell script, as bash starts it. The fix is in the process adapters of `mx-ports`,
+//!   so every program that starts one gets it; `helper-without-interpreter-line` in
+//!   `tests/differential.py` pins it for this crate.
 
 pub mod cadence;
 pub mod env;

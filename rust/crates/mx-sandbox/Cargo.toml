@@ -1,0 +1,17 @@
+[package]
+name = "mx-sandbox"
+version = "0.1.0"
+description = "The sandbox interface of the merge gate: tree extraction, the symlink-escape check, the sed mutation and the container run with its exact flag set as data"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mx-core.workspace = true
+mx-ports.workspace = true
+mx-suite.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

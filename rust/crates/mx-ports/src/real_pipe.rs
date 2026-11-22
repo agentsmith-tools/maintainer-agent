@@ -1,6 +1,6 @@
 use crate::real_proc::{
-    KILL_TOOLS, absolute_entries, exit_code, kill_group, new_command, plain_locale, resolve,
-    wait_until,
+    KILL_TOOLS, absolute_entries, exit_code, kill_group, launch, new_command, plain_locale,
+    resolve, wait_until,
 };
 use crate::{Pipe, PipelineOutcome, PipelineSpec, ProcError, ProcExit, Sink, Source, StageSpec};
 use std::ffi::OsString;
@@ -273,8 +273,13 @@ impl RealPipe {
                 .map_err(|error| io_error(format!("could not duplicate stdout: {error}")))?,
         };
 
-        let mut command = new_command(&program);
-        command.arg0(name).args(&stage.argv.as_slice()[1..]).env_clear();
+        let launch = launch(&self.search_dirs, &program, name)?;
+        let mut command = new_command(&launch.program);
+        command
+            .arg0(&launch.arg0)
+            .args(&launch.leading)
+            .args(&stage.argv.as_slice()[1..])
+            .env_clear();
         for (key, value) in &stage.env {
             command.env(key, value);
         }
@@ -499,6 +504,23 @@ mod tests {
                 .and_then(|(_, rest)| rest.trim_start().chars().next())
                 .is_some_and(|state| state != 'Z' && state != 'X'),
         }
+    }
+
+    // Decision P5B-1, as in `RealProc`: a stage that is a text file naming no
+    // interpreter runs as a shell script, as it does when bash starts it.
+    #[test]
+    fn a_stage_that_is_a_text_file_without_an_interpreter_line_runs_as_a_shell_script() {
+        let dir = TempDir::new("stage-noshebang");
+        let tool = dir.path("mx-stage");
+        std::fs::write(&tool, "printf 'stage %s\\n' \"$1\"\n").unwrap();
+        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let log = dir.path("log");
+        let mut stage = program(tool.to_str().unwrap(), &["one"]);
+        stage.stdout = Sink::AppendFile(log.clone());
+        let outcome = run_bounded(pipe(), spec(vec![stage], LONG)).unwrap();
+        assert_eq!(exits(&outcome), vec![ProcExit::Code(0)]);
+        assert_eq!(read(&log), "stage one\n");
     }
 
     #[test]

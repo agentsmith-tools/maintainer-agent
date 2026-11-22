@@ -93,10 +93,12 @@ if [ "$skip_cases" = 0 ]; then
 fi
 
 if [ "$with_suite" = 1 ]; then
-    # The assembled tree holds no .git, and the sweep cases and the PROD_GLOBS checks of the suite need the
-    # tree to be a git checkout, so it becomes one (the wrappers and binaries are what it tracks).
-    ( cd "$tree" && git init -q -b main && git add -A && git -c user.name=blackbox -c user.email=blackbox@example.invalid commit -q -m tree ) \
-        || { echo "blackbox: could not make the Rust tree a git checkout" >&2; exit 2; }
+    # assemble-tree.sh makes DEST a repository of its own. A tree that was assembled some other way and has
+    # no .git becomes one, because the sweep cases and the PROD_GLOBS checks of the suite need a git checkout.
+    if [ ! -e "$tree/.git" ]; then
+        ( cd "$tree" && git init -q -b main && git add -A && git -c user.name=blackbox -c user.email=blackbox@example.invalid commit -q -m tree ) \
+            || { echo "blackbox: could not make the Rust tree a git checkout" >&2; exit 2; }
+    fi
     bashlog="$scratch/suite-bash.log"; rustlog="$scratch/suite-rust.log"
     suite="${BLACKBOX_SUITE:-$root/tests/run-tests.sh}"
     MX_TREE="$root" bash "$suite" > "$bashlog" 2>&1; brc=$?

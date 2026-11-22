@@ -34,6 +34,9 @@ mx-core = { path = "crates/mx-core" }
 mx-ports = { path = "crates/mx-ports" }
 mx-profile = { path = "crates/mx-profile" }
 mx-backends = { path = "crates/mx-backends" }
+mx-receipt = { path = "crates/mx-receipt" }
+mx-suite = { path = "crates/mx-suite" }
+mx-sandbox = { path = "crates/mx-sandbox" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

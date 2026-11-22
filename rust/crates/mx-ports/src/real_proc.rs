@@ -138,8 +138,13 @@ impl RealProc {
         let name = spec.argv.first();
         let program = resolve(&self.search_dirs, name)?;
 
-        let mut command = new_command(&program);
-        command.arg0(name).args(&spec.argv.as_slice()[1..]).env_clear();
+        let launch = launch(&self.search_dirs, &program, name)?;
+        let mut command = new_command(&launch.program);
+        command
+            .arg0(&launch.arg0)
+            .args(&launch.leading)
+            .args(&spec.argv.as_slice()[1..])
+            .env_clear();
         for (key, value) in self.base_env.iter().chain(&spec.env) {
             command.env(key, value);
         }
@@ -257,6 +262,69 @@ pub(crate) fn plain_locale(name: Option<&str>) -> &str {
         }
         _ => "C",
     }
+}
+
+/// How many leading bytes of a file say whether it names an interpreter.
+const SNIFF_BYTES: u64 = 128;
+
+/// What `execve` is asked to run for a resolved program.
+///
+/// Decision P5B-1. The kernel answers ENOEXEC for a text file that names no
+/// interpreter, and a shell answers that by running the file as a shell script. The
+/// bash orchestrator started its helper, its tools and its stubs that way, so a
+/// file that does not start with `#!` and holds no NUL byte in its first bytes runs
+/// as `bash FILE ARGS`, with `bash` found on the adapter's search path. An empty
+/// file is such a file, and exits 0 as it does under bash. A file that holds a NUL
+/// byte is not text: it goes to `execve` unchanged, and the kernel's refusal comes
+/// back as a spawn error, where bash would have said "cannot execute binary file".
+pub(crate) struct Launch {
+    /// The file handed to `execve`.
+    pub(crate) program: PathBuf,
+    /// The name the child sees as its argv[0].
+    pub(crate) arg0: String,
+    /// Arguments that come before the call's own.
+    pub(crate) leading: Vec<OsString>,
+}
+
+/// Decides how `program`, the resolution of `name`, is started.
+pub(crate) fn launch(
+    search_dirs: &[PathBuf],
+    program: &Path,
+    name: &str,
+) -> Result<Launch, ProcError> {
+    if !is_script_without_interpreter(program) {
+        return Ok(Launch {
+            program: program.to_path_buf(),
+            arg0: name.to_string(),
+            leading: Vec::new(),
+        });
+    }
+    match resolve(search_dirs, "bash") {
+        Ok(bash) => Ok(Launch {
+            program: bash,
+            arg0: "bash".to_string(),
+            leading: vec![program.as_os_str().to_os_string()],
+        }),
+        Err(_) => Err(ProcError::Spawn {
+            program: name.to_string(),
+            reason: "the file names no interpreter, and bash is not on the search path to run it as a script".to_string(),
+        }),
+    }
+}
+
+/// True for a file `execve` refuses with ENOEXEC that a shell would run: no `#!` and
+/// no NUL byte in the first bytes. Every ELF and Mach-O header holds NUL bytes, so a
+/// compiled program is never taken for a script. A file that cannot be read is not
+/// one: `execve` reports why.
+fn is_script_without_interpreter(program: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(program) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    if file.take(SNIFF_BYTES).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    !(head.starts_with(b"#!") || head.contains(&0))
 }
 
 /// The only place in the workspace that constructs a `Command`.
@@ -772,6 +840,101 @@ mod tests {
         let absolute = system_binary("true");
         let out = proc().run(&call(absolute.to_str().unwrap(), &[])).unwrap();
         assert_eq!(out.exit, ProcExit::Code(0));
+    }
+
+    /// A mode 755 file `name` in `dir` holding exactly `bytes`.
+    fn executable(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `run`, retried while the kernel says "Text file busy". A test that writes an
+    /// executable and starts it at once can meet another test's child between its
+    /// fork and its exec, which still holds the write descriptor.
+    fn run_text_file_busy_retried(
+        proc: &RealProc,
+        spec: &ProcSpec,
+    ) -> Result<ProcOutput, ProcError> {
+        for _ in 0..100 {
+            match proc.run(spec) {
+                Err(ProcError::Spawn { reason, .. }) if reason.contains("Text file busy") => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        proc.run(spec)
+    }
+
+    /// A search path of `dir` and the system directories.
+    fn search_with(dir: &TempDir) -> RealProc {
+        let dirs =
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(SEARCH_PATH));
+        RealProc::new(std::env::join_paths(dirs).unwrap(), Vec::new())
+    }
+
+    // Decision P5B-1. `execve` answers ENOEXEC for a text file that names no
+    // interpreter, and a shell then runs the file as a shell script. The bash
+    // orchestrator started its helper that way, so the port does too.
+    #[test]
+    fn a_text_file_without_an_interpreter_line_runs_as_a_shell_script_as_bash_runs_it() {
+        let dir = TempDir::new("noshebang");
+        // `BASH_VERSION` is set by bash alone, so a stand-in shell would not print `bash`.
+        executable(
+            &dir,
+            "mx-tool",
+            b"printf 'ran %s %s %s\n' \"$1\" \"$0\" \"${BASH_VERSION:+bash}\"\nexit 3\n",
+        );
+        let out = search_with(&dir).run(&call("mx-tool", &["one"])).unwrap();
+        let script = dir.path().join("mx-tool");
+        assert_eq!(text(&out.stdout), format!("ran one {} bash\n", script.display()));
+        assert_eq!(out.exit, ProcExit::Code(3));
+    }
+
+    #[test]
+    fn an_empty_executable_file_runs_and_exits_zero_as_it_does_under_bash() {
+        let dir = TempDir::new("empty");
+        executable(&dir, "mx-tool", b"");
+        let out = search_with(&dir).run(&call("mx-tool", &[])).unwrap();
+        assert_eq!(out.exit, ProcExit::Code(0));
+        assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_an_interpreter_line_is_started_by_that_interpreter_not_by_bash() {
+        // `cat` prints the file it is given. Bash would read `#!/bin/cat` as a
+        // comment and print nothing.
+        let dir = TempDir::new("shebang");
+        executable(&dir, "mx-tool", b"#!/bin/cat\nhello\n");
+        let out = run_text_file_busy_retried(&search_with(&dir), &call("mx-tool", &[])).unwrap();
+        assert_eq!(text(&out.stdout), "#!/bin/cat\nhello\n");
+    }
+
+    #[test]
+    fn a_file_the_kernel_refuses_that_is_not_text_is_not_handed_to_bash() {
+        let dir = TempDir::new("binary");
+        executable(&dir, "mx-tool", b"\x00\x01\x02 not a program\necho ran\n");
+        let error =
+            run_text_file_busy_retried(&search_with(&dir), &call("mx-tool", &[])).unwrap_err();
+        let ProcError::Spawn { program, reason } = error else {
+            panic!("expected a spawn error, got {error:?}");
+        };
+        assert_eq!(program, "mx-tool");
+        assert!(reason.contains("Exec format error"), "{reason}");
+    }
+
+    #[test]
+    fn a_script_without_an_interpreter_line_and_no_bash_to_run_it_is_named() {
+        let dir = TempDir::new("nobash");
+        executable(&dir, "mx-tool", b"echo ran\n");
+        let error = RealProc::new(dir.path(), Vec::new()).run(&call("mx-tool", &[])).unwrap_err();
+        let ProcError::Spawn { program, reason } = error else {
+            panic!("expected a spawn error, got {error:?}");
+        };
+        assert_eq!(program, "mx-tool");
+        assert!(reason.contains("bash"), "{reason}");
     }
 
     #[test]
