@@ -12,15 +12,18 @@
 #
 # DEST must not exist, or must be an empty directory. A PROGRAM is the name of a
 # file under bin/ whose Rust build is a [[bin]] of the workspace under rust/
-# (maintainer-repo, maintainer-doctor, ...), or `run`, whose Rust build replaces
-# lib/run.sh. With no PROGRAM every such program is built and swapped in; a named
-# program that has no Rust build is an error.
+# (maintainer-repo, maintainer-doctor, ...), or the name of a script elsewhere in the
+# tree whose Rust build replaces it: `run` (lib/run.sh), `install` (install.sh),
+# `new-profile` (new-profile.sh), `install-cron` (platform/posix/install-cron.sh),
+# `install-launchd` (platform/macos/install-launchd.sh), `alert` (platform/linux/alert.sh)
+# and `run-instance` (platform/linux/run-instance.sh). With no PROGRAM every such program
+# is built and swapped in; a named program that has no Rust build is an error.
 #
 # For each program the script
 #   1. builds it with `cargo build --release --locked --offline`, in the cargo
 #      target directory the caller chose (CARGO_TARGET_DIR, CARGO_BUILD_JOBS),
 #   2. copies the binary to DEST/.rust-bin/NAME, and
-#   3. replaces DEST/bin/NAME (DEST/lib/run.sh for `run`) with a short wrapper that execs that binary
+#   3. replaces DEST/bin/NAME (the script it stands for, for the programs above) with a short wrapper that execs that binary
 #      and hands it the wrapper's own path as argv[0], after naming the two
 #      variables the suites' stubs read (CZ_CASE_DIR, BASH_ENV) in
 #      MAINTAINER_CHILD_ENV so the program passes them to its children (`run` passes its whole
@@ -70,14 +73,25 @@ esac
 if [ -n "$(ls -A -- "$dest")" ]; then die "$dest is not empty"; fi
 
 # Which programs have a Rust build: the [[bin]] targets of the workspace whose
-# name is also a file under bin/, and `run`, which stands for lib/run.sh. One line
-# each: `package name path`, where path is the file the wrapper replaces.
+# name is also a file under bin/, and the programs that stand for a script outside bin/
+# (OUTSIDE_BIN below). One line each: `package name path`, where path is the file the
+# wrapper replaces.
 meta="$(cd "$ws" && cargo metadata --no-deps --format-version 1 --locked --offline 2>&1)"; rc=$?
 [ "$rc" = 0 ] || die "cargo metadata exited $rc: $(tr '\n' ' ' <<<"$meta" | cut -c1-300)"
 listing="$(python3 -I -c '
 import json, os, sys
 root = sys.argv[1]
 meta = json.loads(sys.stdin.read())
+# The programs that stand for a script outside bin/: name and the file the wrapper replaces.
+OUTSIDE_BIN = {
+    "run": "lib/run.sh",
+    "install": "install.sh",
+    "new-profile": "new-profile.sh",
+    "install-cron": "platform/posix/install-cron.sh",
+    "install-launchd": "platform/macos/install-launchd.sh",
+    "alert": "platform/linux/alert.sh",
+    "run-instance": "platform/linux/run-instance.sh",
+}
 rows = []
 for pkg in meta["packages"]:
     for target in pkg["targets"]:
@@ -86,8 +100,8 @@ for pkg in meta["packages"]:
         name = target["name"]
         if os.path.isfile(os.path.join(root, "bin", name)):
             rows.append((pkg["name"], name, "bin/" + name))
-        elif name == "run" and os.path.isfile(os.path.join(root, "lib", "run.sh")):
-            rows.append((pkg["name"], name, "lib/run.sh"))
+        elif name in OUTSIDE_BIN and os.path.isfile(os.path.join(root, OUTSIDE_BIN[name])):
+            rows.append((pkg["name"], name, OUTSIDE_BIN[name]))
 for pkg, name, rel in sorted(rows):
     print(pkg, name, rel)
 ' "$root" <<<"$meta")"; rc=$?
@@ -143,7 +157,7 @@ for rel in sys.stdin.buffer.read().split(b"\0"):
 ' "$root" < "$list" | sort -u | head -n 5)"; rc=$?
 [ "$rc" = 0 ] || die "could not scan the file list for symlinks"
 [ -z "$bad" ] || die "a tracked symlink stands where a directory is expected, so the copy would write through it: $(tr '\n' ' ' <<<"$bad")"
-for top in bin lib .rust-bin; do
+for top in bin lib platform .rust-bin; do
     if [ -L "$root/$top" ]; then die "$top is a symlink in the source tree; refusing to copy it"; fi
 done
 tar -C "$root" --null --ignore-failed-read -T "$list" -cf - | tar -C "$dest" -xf -
@@ -156,9 +170,12 @@ if [ "${rcs[0]}" != 0 ] || [ "${rcs[1]}" != 0 ]; then die "copying the tree fail
 # never followed) before the new one is created with noclobber.
 mkdir -p "$dest/.rust-bin" || die "cannot make $dest/.rust-bin"
 real_dest="$(cd "$dest" && pwd -P)" || die "cannot resolve $dest"
-for sub in bin lib .rust-bin; do
-    # lib/ holds a wrapper only when `run` is built, so a tree with no lib/ is fine for the others.
-    if [ "$sub" = lib ] && [ ! -e "$dest/lib" ] && [ ! -L "$dest/lib" ]; then continue; fi
+for sub in bin lib platform .rust-bin; do
+    # lib/ and platform/ hold a wrapper only when one of their programs is built, so a tree
+    # without them is fine for the others.
+    case "$sub" in
+        lib|platform) if [ ! -e "$dest/$sub" ] && [ ! -L "$dest/$sub" ]; then continue; fi ;;
+    esac
     if [ -L "$dest/$sub" ]; then die "$dest/$sub is a symlink; refusing to write through it"; fi
     real_sub="$(cd "$dest/$sub" && pwd -P)" || die "cannot resolve $dest/$sub"
     case "$real_sub/" in "$real_dest"/*) ;; *) die "$dest/$sub resolves outside $dest" ;; esac

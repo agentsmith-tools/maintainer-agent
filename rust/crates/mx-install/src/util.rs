@@ -62,6 +62,17 @@ pub fn words(text: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
+/// Lower-case hex of some bytes.
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+        // Writing to a String cannot fail.
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 /// `$(...)` drops the newlines at the end of what a command printed.
 #[must_use]
 pub fn strip_trailing_newlines(mut bytes: Vec<u8>) -> Vec<u8> {

@@ -29,7 +29,7 @@ pub enum Refusal {
     /// This many maintainer timers are enabled, and nobody said yes. Exit 3.
     LiveTimers { count: usize },
     /// `HOME` is not set. Exit 1, as bash's `set -u` ends the script.
-    HomeUnset { program: &'static str, line: u32 },
+    HomeUnset { script: OsString, line: u32 },
     /// The directory given to `--rust-bin` is unusable. Exit 1.
     RustBinUnusable { detail: OsString },
     /// `--rollback` with no stamp to roll back. Exit 1.
@@ -101,8 +101,11 @@ impl Refusal {
                 line(b"            Re-run with MAINTAINER_UNINSTALL_YES=1 to go ahead, or");
                 line(b"            --dry-run to see what would be removed.");
             }
-            Self::HomeUnset { program, line: at } => {
-                line(format!("{program}: line {at}: HOME: unbound variable").as_bytes());
+            Self::HomeUnset { script, line: at } => {
+                line(&cat(&[
+                    script.as_bytes(),
+                    format!(": line {at}: HOME: unbound variable").as_bytes(),
+                ]));
             }
             Self::RustBinUnusable { detail } => {
                 line(&cat(&[b"install.sh: --rust-bin: ", detail.as_bytes()]));

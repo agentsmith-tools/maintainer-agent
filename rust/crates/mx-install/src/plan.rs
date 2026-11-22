@@ -260,6 +260,10 @@ pub struct InstallFacts {
     pub timers: Vec<Timer>,
     /// The Rust builds `--rust-bin` holds.
     pub rust: Vec<RustProgram>,
+    /// `$share/RUST_STAMP`, when an earlier `--rust` install left one.
+    pub rust_stamp: Option<PathBuf>,
+    /// The saved bash originals (`NAME.sh`) an earlier `--rust` install left.
+    pub rust_leftovers: Vec<PathBuf>,
 }
 
 fn say(text: &str) -> Step {
@@ -294,6 +298,7 @@ pub fn decide_install(f: &InstallFacts) -> Decision {
     }
     let mut steps = deploy_steps(f);
     let timers = platform_steps(f, &mut steps);
+    leftover_steps(f, &mut steps);
     if f.opts.rust {
         rust_steps(f, &mut steps);
     }
@@ -414,6 +419,21 @@ fn timer_steps(f: &InstallFacts, steps: &mut Vec<Step>) {
     }
     if enabled == 0 {
         steps.push(Step::NoTimersEnabled);
+    }
+}
+
+/// A bash install has just copied the bash programs over every Rust build, so what an
+/// earlier `--rust` install recorded is no longer true: the stamp goes, and so does each
+/// saved original that this run does not save again (decision P4A-add-3).
+fn leftover_steps(f: &InstallFacts, steps: &mut Vec<Step>) {
+    let kept: Vec<&PathBuf> = f.rust.iter().map(|program| &program.backup).collect();
+    for leftover in &f.rust_leftovers {
+        if !kept.contains(&leftover) {
+            steps.push(run(Cmd::RmF(leftover.clone())));
+        }
+    }
+    if let Some(stamp) = f.rust_stamp.as_ref().filter(|_| !f.opts.rust) {
+        steps.push(run(Cmd::RmF(stamp.clone())));
     }
 }
 

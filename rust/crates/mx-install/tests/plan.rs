@@ -37,6 +37,8 @@ fn facts() -> InstallFacts {
         ],
         timers: vec![timer("maintainer@sk-ci.timer", true)],
         rust: Vec::new(),
+        rust_stamp: None,
+        rust_leftovers: Vec::new(),
     }
 }
 
@@ -323,6 +325,41 @@ fn a_rust_install_swaps_after_the_platform_files_and_writes_its_stamp_last() {
 }
 
 #[test]
+fn a_bash_install_after_a_rust_install_removes_the_stamp_and_the_saved_originals() {
+    let mut f = facts();
+    f.rust_stamp = Some(PathBuf::from("/h/.local/share/maintainer/RUST_STAMP"));
+    f.rust_leftovers = vec![PathBuf::from("/h/.local/bin/maintainer-doctor.sh")];
+    let lines = texts(&proceed(decide_install(&f)));
+    let linux = position(&lines, "say platform: Linux");
+    let copy = position(&lines, "rm -f /h/.local/bin/maintainer-doctor.sh");
+    let stamp = position(&lines, "rm -f /h/.local/share/maintainer/RUST_STAMP");
+    assert!(linux < copy && copy < stamp);
+}
+
+#[test]
+fn a_rust_install_keeps_the_originals_it_saves_again_and_removes_the_others() {
+    let program = |build: &'static str, installed: &str| RustProgram {
+        build,
+        installed: PathBuf::from(installed),
+        backup: PathBuf::from(format!("{installed}.sh")),
+        source: PathBuf::from("/b").join(build),
+        linux_only: false,
+    };
+    let mut f = facts();
+    f.opts.rust = true;
+    f.rust = vec![program("maintainer-doctor", "/h/.local/bin/maintainer-doctor")];
+    f.rust_stamp = Some(PathBuf::from("/h/.local/share/maintainer/RUST_STAMP"));
+    f.rust_leftovers = vec![
+        PathBuf::from("/h/.local/bin/maintainer-doctor.sh"),
+        PathBuf::from("/h/.local/bin/maintainer-repo.sh"),
+    ];
+    let lines = texts(&proceed(decide_install(&f)));
+    assert!(lines.contains(&"run rm -f /h/.local/bin/maintainer-repo.sh".to_string()));
+    assert!(!lines.iter().any(|l| l.contains("rm -f /h/.local/bin/maintainer-doctor.sh")));
+    assert!(!lines.iter().any(|l| l.contains("rm -f /h/.local/share/maintainer/RUST_STAMP")));
+}
+
+#[test]
 fn a_rust_build_for_a_linux_only_file_is_skipped_elsewhere_and_said() {
     let mut f = facts();
     f.uname = "Darwin".into();
@@ -603,7 +640,7 @@ fn every_refusal_keeps_the_status_the_bash_gives() {
         (Refusal::FlockMissing, 1),
         (Refusal::RunInFlight { share: "s".into(), profiles: vec![] }, 69),
         (Refusal::LiveTimers { count: 1 }, 3),
-        (Refusal::HomeUnset { program: "install.sh", line: 13 }, 1),
+        (Refusal::HomeUnset { script: "install.sh".into(), line: 13 }, 1),
         (Refusal::RustBinUnusable { detail: "d".into() }, 1),
         (Refusal::NothingToRollBack { stamp: "s".into() }, 1),
         (Refusal::RollbackBlocked { detail: "d".into() }, 1),

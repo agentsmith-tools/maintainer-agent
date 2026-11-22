@@ -19,12 +19,23 @@
 //! Each is a numbered decision (`P4A-n`) in the pull request that added this crate.
 
 pub mod alert;
+pub mod apply;
 pub mod args;
 pub mod console;
+pub mod coreutils;
 pub mod cron;
+pub mod env;
+pub mod install;
 pub mod launchd;
+pub mod machine;
 pub mod newprofile;
 pub mod plan;
+pub mod probe;
 pub mod refusal;
+pub mod scaffold;
+pub mod schedulers;
 pub mod sedsub;
+pub mod sourced;
+pub mod tools;
+pub mod units;
 pub mod util;

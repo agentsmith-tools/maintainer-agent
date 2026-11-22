@@ -14,6 +14,9 @@
 #   run-wrapper the crate is called `run`: its wrapper replaces lib/run.sh, carries
 #               no MAINTAINER_CHILD_ENV line, and the binary is in the copy.
 #   run-lib     lib is a symlink to an outside directory. Building `run` refuses.
+#   install-wrapper the crate is called `install`: its wrapper replaces install.sh at the
+#               root of the tree and carries the MAINTAINER_CHILD_ENV line.
+#   platform-link platform is a symlink to an outside directory. Building `alert` refuses.
 #
 # Prints `assemble-tree test: N checks, F failed`; exit 0 only with N > 0 and F = 0.
 # MX_SCRATCH moves the scratch directory; CARGO_TARGET_DIR is shared with the caller.
@@ -127,6 +130,38 @@ run_helper run-lib run
 check "run-lib: the helper refused (exit $RC)" test "$RC" != 0
 check "run-lib: it says why" grep -q "symlink" <<<"$OUT"
 check "run-lib: the outside directory is unchanged" test "$(digest "$scratch/run-lib/outside")" = "$before"
+
+# 6. install-wrapper: the crate is called `install`, which stands for install.sh at the root of
+# the tree. The wrapper replaces it, names the two variables the suites' stubs read, and
+# leaves bin/prog alone.
+progfix() {  # progfix NAME CRATE: the fixture with its crate renamed
+    fixture "$1"
+    sed -i "s/prog/$2/g" "$scratch/$1/repo/rust/crates/prog/Cargo.toml"
+    (cd "$scratch/$1/repo/rust" && cargo generate-lockfile --offline -q) || exit 2
+}
+progfix install-wrapper install
+printf '#!/usr/bin/env bash\necho bash install\n' > "$scratch/install-wrapper/repo/install.sh"
+commit_fixture install-wrapper
+run_helper install-wrapper install
+check "install-wrapper: the helper finished (exit $RC: ${OUT: -120})" test "$RC" = 0
+check "install-wrapper: install.sh is the wrapper" grep -q "dest/.rust-bin/install" "$scratch/install-wrapper/dest/install.sh"
+check "install-wrapper: the wrapper names the two variables for the children" grep -q "MAINTAINER_CHILD_ENV" "$scratch/install-wrapper/dest/install.sh"
+check "install-wrapper: the binary is in the copy" test -x "$scratch/install-wrapper/dest/.rust-bin/install"
+check "install-wrapper: bin/prog is untouched" grep -q "echo bash prog" "$scratch/install-wrapper/dest/bin/prog"
+
+# 7. platform-link: the crate is called `alert`, which stands for platform/linux/alert.sh, and
+# platform is a symlink to an outside directory. The helper refuses and writes nothing there.
+progfix platform-link alert
+rm -rf "$scratch/platform-link/repo/platform"
+mkdir -p "$scratch/platform-link/outside/platdir/linux"
+printf '#!/usr/bin/env bash\n' > "$scratch/platform-link/outside/platdir/linux/alert.sh"
+ln -s "$scratch/platform-link/outside/platdir" "$scratch/platform-link/repo/platform"
+commit_fixture platform-link
+before="$(digest "$scratch/platform-link/outside")"
+run_helper platform-link alert
+check "platform-link: the helper refused (exit $RC)" test "$RC" != 0
+check "platform-link: it says why" grep -q "symlink" <<<"$OUT"
+check "platform-link: the outside directory is unchanged" test "$(digest "$scratch/platform-link/outside")" = "$before"
 
 printf 'assemble-tree test: %d checks, %d failed\n' "$N" "$F"
 [ "$N" -gt 0 ] && [ "$F" -eq 0 ]
