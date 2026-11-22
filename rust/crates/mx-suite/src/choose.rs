@@ -499,6 +499,15 @@ mod tests {
     }
 
     #[test]
+    fn a_no_production_diff_with_a_path_no_suite_runs_is_refused_for_a_named_suite() {
+        let host = host(vec![rust(), docs()]);
+        let refused = HostSelector::new(&host)
+            .pick_suite(&globs(), Some(&name("rust")), &changed(&["tests/t.rs", "x.py"]))
+            .unwrap_err();
+        assert!(matches!(refused, PickRefusal::NamedDoesNotCover { .. }), "{refused:?}");
+    }
+
+    #[test]
     fn the_coverage_map_names_the_first_inferable_suite_of_each_path() {
         let only = FakeSuite::new("aaa", "img").covering(&["README.md"]).named_only();
         let host = host(vec![only, docs(), rust()]);
