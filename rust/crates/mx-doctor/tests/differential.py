@@ -218,7 +218,7 @@ def healthy(fx, rng):
     fx.put(fx.home + "/.config/systemd/user/podman-userns-warmup.service", "[Service]\n")
     fx.mkdir(fx.state)
     for t in ("gh", "git", "claude", "podman", "systemctl", "loginctl", "systemd-run", "uname", "id",
-              "maintainer-merge"):
+              "maintainer-merge", "flock"):
         fx.tools.add(t)
     fx.answer("api-user", "testuser\n")
     fx.answer("auth-token", TOKEN + "\n")
@@ -353,6 +353,10 @@ def d_wall(fx, rng):
 def d_backend(fx, rng):
     b = rng.choice(["claude"] * 3 + ["codex", "cursor", "opencode", "weird", "env-codex"])
     fx.notes.append("backend=" + b)
+    # bash PR #243: the `flock on PATH` check, present on most hosts and absent on some.
+    if rng.random() < 0.2:
+        fx.tools.discard("flock")
+        fx.notes.append("no-flock")
     present = rng.random() < 0.7
     if b == "env-codex":
         fx.extra_env["BACKEND"] = "codex"
