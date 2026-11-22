@@ -358,11 +358,11 @@ impl Sink for LiveSink<'_> {
     }
 
     fn write_rust_stamp(&mut self, programs: &[RustProgram], con: &mut Console) -> Flow {
-        // One line per program, in the format `sha256sum -c` reads. Each hash is read from
-        // the installed file, so the stamp records what is there and not what was meant.
+        // One line per program, in the format `sha256sum -c` reads. The stamp is written
+        // before any swap, so the hash is that of the build about to be installed.
         let mut text = Vec::new();
         for program in programs {
-            let hash = match self.machine.sha256(&program.installed) {
+            let hash = match self.machine.sha256(&program.source) {
                 Ok(hash) => hash,
                 Err(error) => return self.redirect_failed(con, 0, &program.installed, &error),
             };

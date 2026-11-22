@@ -448,10 +448,14 @@ fn rust_steps(f: &InstallFacts, steps: &mut Vec<Step>) {
             ])));
             continue;
         }
-        steps.push(Step::Swap(program.clone()));
         swapped.push(program.clone());
     }
-    steps.push(Step::WriteRustStamp(swapped));
+    // The stamp comes first and lists every program, so a swap that fails part way can be
+    // rolled back: rollback skips a program whose swap never happened (decision P4A-add-2).
+    steps.push(Step::WriteRustStamp(swapped.clone()));
+    for program in swapped {
+        steps.push(Step::Swap(program));
+    }
 }
 
 /// Everything an uninstall decision reads.
@@ -564,6 +568,16 @@ pub fn decide_uninstall(f: &UninstallFacts) -> Decision {
     Decision::Proceed(Plan { steps, exit: 0 })
 }
 
+/// One program the stamp lists, with what is on disk for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackItem {
+    pub installed: PathBuf,
+    pub backup: PathBuf,
+    pub stamp_hash: String,
+    pub installed_hash: Option<String>,
+    pub backup_hash: Option<String>,
+}
+
 /// What `--rollback` reads.
 #[derive(Debug, Clone)]
 pub struct RollbackFacts {
@@ -572,7 +586,7 @@ pub struct RollbackFacts {
     pub flock_on_path: bool,
     pub busy: Vec<OsString>,
     /// The programs the stamp lists, as `(installed, backup, backup_exists)`.
-    pub stamped: Option<Vec<(PathBuf, PathBuf, bool)>>,
+    pub stamped: Option<Vec<RollbackItem>>,
 }
 
 /// Decides what `--rollback` does: every saved bash original goes back and the stamp goes.
@@ -591,22 +605,37 @@ pub fn decide_rollback(f: &RollbackFacts) -> Decision {
     let Some(stamped) = &f.stamped else {
         return Decision::Refuse(Refusal::NothingToRollBack { stamp: stamp.into_os_string() });
     };
-    // Every backup is checked before the first is moved: a half-restored deployment runs
-    // some programs from each build.
-    for (_, backup, present) in stamped {
-        if !present {
-            let mut detail = backup.as_os_str().to_os_string();
-            detail.push(" is missing");
-            return Decision::Refuse(Refusal::RollbackBlocked { detail });
-        }
-    }
+    // Every program is judged before the first is moved. One that still holds the stamped
+    // build is restored from its saved original. One that does not and has no saved original
+    // was restored already (a rollback that failed part way can run again). One whose saved
+    // original is the very file installed never started its swap, and the copy is dropped.
+    // Anything else is a file this installer did not write, and the run refuses.
+    let refuse = |detail: String| {
+        Decision::Refuse(Refusal::RollbackBlocked { detail: OsString::from(detail) })
+    };
     let mut steps = vec![Step::Say(cat(&[b"rolling back from ", raw(f.layout.share.as_os_str())]))];
-    for (installed, backup, _) in stamped {
-        steps.push(run(Cmd::Mv { src: backup.clone(), dst: installed.clone() }));
+    let mut restored = 0;
+    for item in stamped {
+        if item.installed_hash.as_deref() == Some(item.stamp_hash.as_str()) {
+            if item.backup_hash.is_none() {
+                return refuse(format!("{} is missing", item.backup.display()));
+            }
+            steps.push(run(Cmd::Mv { src: item.backup.clone(), dst: item.installed.clone() }));
+            restored += 1;
+        } else if item.backup_hash.is_none() {
+            // Restored already: nothing to do for this program.
+        } else if item.backup_hash == item.installed_hash {
+            steps.push(run(Cmd::RmF(item.backup.clone())));
+        } else {
+            return refuse(format!(
+                "{} no longer matches the stamp, so it is not the build this installer wrote",
+                item.installed.display()
+            ));
+        }
     }
     steps.push(run(Cmd::RmF(stamp)));
     steps.push(Step::Say(
-        format!("rolled back {} program(s) to the bash originals", stamped.len()).into_bytes(),
+        format!("rolled back {restored} program(s) to the bash originals").into_bytes(),
     ));
     Decision::Proceed(Plan { steps, exit: 0 })
 }

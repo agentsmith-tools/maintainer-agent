@@ -27,6 +27,8 @@ pub trait Machine {
     fn exists(&self, path: &Path) -> bool;
     /// Whether the path is there at all, a dangling link included.
     fn lexists(&self, path: &Path) -> bool;
+    /// Whether the path is a symbolic link (followed or not, dangling or not).
+    fn is_symlink(&self, path: &Path) -> bool;
     /// `[ -f path ]`.
     fn is_file(&self, path: &Path) -> bool;
     /// `[ -d path ]`.
@@ -103,6 +105,10 @@ impl Machine for RealMachine {
 
     fn lexists(&self, path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok()
+    }
+
+    fn is_symlink(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
     }
 
     fn is_file(&self, path: &Path) -> bool {
@@ -346,6 +352,10 @@ impl Machine for FakeMachine {
 
     fn lexists(&self, path: &Path) -> bool {
         self.exists(path)
+    }
+
+    fn is_symlink(&self, _path: &Path) -> bool {
+        false
     }
 
     fn is_file(&self, path: &Path) -> bool {

@@ -569,3 +569,95 @@ fn a_plain_install_after_a_rust_install_puts_the_bash_programs_back() {
         "a saved original is not kept beside a bash program"
     );
 }
+
+fn rust_run(sb: &Sandbox, dir: &Path, extra: &[&str]) -> common::Run {
+    let mut args = vec!["--rust", "--rust-bin"];
+    let d = dir.to_string_lossy().into_owned();
+    args.push(&d);
+    args.extend_from_slice(extra);
+    run(sb, &ScriptedProc::new(), &args, &[])
+}
+
+#[test]
+fn a_rust_install_that_fails_part_way_can_be_rolled_back_to_the_bash_install() {
+    let sb = Sandbox::new("midfail");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "run", "alert"]);
+    // A directory where the staging file of the last program goes makes its install fail.
+    run(&sb, &ScriptedProc::new(), &[], &[]);
+    fs::create_dir_all(sb.share().join("alert.sh.new/x")).unwrap();
+    let out = rust_run(&sb, &dir, &[]);
+    assert_eq!(out.code, 1, "{}", out.out);
+    assert!(sb.share().join("RUST_STAMP").exists(), "the stamp exists before the first swap");
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    assert_eq!(
+        fs::read(sb.share().join("run.sh")).unwrap(),
+        fs::read(sb.co.join("lib/run.sh")).unwrap()
+    );
+    assert_eq!(
+        fs::read(sb.bin().join("maintainer-doctor")).unwrap(),
+        fs::read(sb.co.join("bin/maintainer-doctor")).unwrap()
+    );
+    assert!(!sb.share().join("RUST_STAMP").exists());
+}
+
+#[test]
+fn a_rollback_that_failed_part_way_runs_again_and_finishes() {
+    let sb = Sandbox::new("rbretry");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "alert"]);
+    rust_run(&sb, &dir, &[]);
+    let alert = sb.share().join("alert.sh");
+    let rust_alert = fs::read(&alert).unwrap();
+    fs::remove_file(&alert).unwrap();
+    fs::create_dir_all(alert.join("d")).unwrap();
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    fs::remove_dir_all(&alert).unwrap();
+    fs::write(&alert, &rust_alert).unwrap();
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 0, "{}", out.err);
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1, "a finished rollback has no stamp: {}", out.err);
+}
+
+#[test]
+fn a_rust_install_refuses_a_backup_name_that_is_a_link_or_a_file_of_the_user() {
+    let sb = Sandbox::new("backupname");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "maintainer-merge"]);
+    fs::create_dir_all(sb.bin()).unwrap();
+    fs::write(sb.dir.join("precious"), "keep").unwrap();
+    std::os::unix::fs::symlink(sb.dir.join("precious"), sb.bin().join("maintainer-merge.sh"))
+        .unwrap();
+    fs::write(sb.bin().join("maintainer-doctor.sh"), "mine").unwrap();
+    let before = sb.listing(&sb.home);
+    let out = rust_run(&sb, &dir, &[]);
+    assert_eq!(out.code, 1);
+    assert!(out.err.contains("is not a saved original of this installer"), "{}", out.err);
+    assert_eq!(fs::read(sb.dir.join("precious")).unwrap(), b"keep");
+    assert_eq!(sb.listing(&sb.home), before, "nothing was written");
+}
+
+#[test]
+fn a_symlinked_backup_name_left_by_a_stamped_install_is_still_refused_and_not_followed() {
+    let sb = Sandbox::new("backuplink");
+    let dir = rust_dir(&sb, &["maintainer-doctor"]);
+    rust_run(&sb, &dir, &[]);
+    let backup = sb.bin().join("maintainer-doctor.sh");
+    fs::remove_file(&backup).unwrap();
+    fs::write(sb.dir.join("precious"), "keep").unwrap();
+    std::os::unix::fs::symlink(sb.dir.join("precious"), &backup).unwrap();
+    assert_eq!(rust_run(&sb, &dir, &[]).code, 1);
+    assert_eq!(fs::read(sb.dir.join("precious")).unwrap(), b"keep");
+}
+
+#[test]
+fn a_rollback_refuses_when_a_newer_bash_install_replaced_the_stamped_build() {
+    let sb = Sandbox::new("stale");
+    let dir = rust_dir(&sb, &["run"]);
+    rust_run(&sb, &dir, &[]);
+    fs::write(sb.share().join("run.sh"), "# newer bash\n").unwrap();
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert!(out.err.contains("no longer matches the stamp"), "{}", out.err);
+    assert_eq!(fs::read(sb.share().join("run.sh")).unwrap(), b"# newer bash\n");
+}

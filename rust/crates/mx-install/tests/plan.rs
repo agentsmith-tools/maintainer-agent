@@ -2,8 +2,9 @@
 
 use mx_install::args::Opts;
 use mx_install::plan::{
-    Cmd, Decision, InstallFacts, Layout, OnFail, Plan, RollbackFacts, RustProgram, Step, Timer,
-    UninstallFacts, decide_install, decide_rollback, decide_uninstall, kept_line, timer_profile,
+    Cmd, Decision, InstallFacts, Layout, OnFail, Plan, RollbackFacts, RollbackItem, RustProgram,
+    Step, Timer, UninstallFacts, decide_install, decide_rollback, decide_uninstall, kept_line,
+    timer_profile,
 };
 use mx_install::refusal::Refusal;
 use std::ffi::{OsStr, OsString};
@@ -299,7 +300,7 @@ fn the_profile_of_a_timer_is_cut_at_its_last_hyphen() {
 }
 
 #[test]
-fn a_rust_install_swaps_after_the_platform_files_and_writes_its_stamp_last() {
+fn a_rust_install_writes_its_stamp_first_then_swaps_after_the_platform_files() {
     let program = |build: &'static str, installed: &str, linux_only: bool| RustProgram {
         build,
         installed: PathBuf::from(installed),
@@ -320,7 +321,7 @@ fn a_rust_install_swaps_after_the_platform_files_and_writes_its_stamp_last() {
     let swap = lines.iter().position(|l| l == "Swap").unwrap();
     let stamp = lines.iter().position(|l| l == "WriteRustStamp").unwrap();
     let reload = position(&lines, "daemon-reload");
-    assert!(alert_copy < swap && swap < stamp && stamp < reload);
+    assert!(alert_copy < stamp && stamp < swap && swap < reload);
     assert_eq!(lines.iter().filter(|l| *l == "Swap").count(), 2);
 }
 
@@ -573,17 +574,19 @@ fn rfacts() -> RollbackFacts {
         flock_on_path: true,
         busy: Vec::new(),
         stamped: Some(vec![
-            (
-                PathBuf::from("/h/.local/bin/maintainer-doctor"),
-                PathBuf::from("/h/.local/bin/maintainer-doctor.sh"),
-                true,
-            ),
-            (
-                PathBuf::from("/h/.local/share/maintainer/run.sh"),
-                PathBuf::from("/h/.local/share/maintainer/run.sh.sh"),
-                true,
-            ),
+            item("/h/.local/bin/maintainer-doctor"),
+            item("/h/.local/share/maintainer/run.sh"),
         ]),
+    }
+}
+
+fn item(installed: &str) -> RollbackItem {
+    RollbackItem {
+        installed: PathBuf::from(installed),
+        backup: PathBuf::from(format!("{installed}.sh")),
+        stamp_hash: "a".repeat(64),
+        installed_hash: Some("a".repeat(64)),
+        backup_hash: Some("b".repeat(64)),
     }
 }
 
@@ -617,7 +620,7 @@ fn a_rollback_with_no_stamp_refuses_with_1() {
 #[test]
 fn a_rollback_whose_saved_original_is_missing_refuses_before_it_moves_anything() {
     let mut f = rfacts();
-    f.stamped.as_mut().unwrap()[1].2 = false;
+    f.stamped.as_mut().unwrap()[1].backup_hash = None;
     let refusal = refusal(decide_rollback(&f));
     assert_eq!(refusal.exit_code(), 1);
     assert!(String::from_utf8(refusal.stderr()).unwrap().contains("run.sh.sh is missing"));
@@ -656,4 +659,35 @@ fn every_refusal_keeps_the_status_the_bash_gives() {
         assert_eq!(refusal.exit_code(), code, "{refusal:?}");
         assert!(refusal.stderr().ends_with(b"\n"));
     }
+}
+
+#[test]
+fn a_rollback_that_failed_part_way_can_run_again_and_skips_what_is_restored() {
+    // First program restored (installed is the bash file, no saved original), second not yet.
+    let mut f = rfacts();
+    let first = &mut f.stamped.as_mut().unwrap()[0];
+    first.installed_hash = Some("c".repeat(64));
+    first.backup_hash = None;
+    let lines = texts(&proceed(decide_rollback(&f)));
+    assert_eq!(lines.iter().filter(|l| l.starts_with("run mv")).count(), 1);
+    assert!(lines.contains(&"say rolled back 1 program(s) to the bash originals".to_string()));
+}
+
+#[test]
+fn a_swap_that_never_started_leaves_a_copy_identical_to_the_installed_file_and_it_is_dropped() {
+    let mut f = rfacts();
+    let first = &mut f.stamped.as_mut().unwrap()[0];
+    first.installed_hash = Some("c".repeat(64));
+    first.backup_hash = Some("c".repeat(64));
+    let lines = texts(&proceed(decide_rollback(&f)));
+    assert!(lines.contains(&"run rm -f /h/.local/bin/maintainer-doctor.sh".to_string()));
+}
+
+#[test]
+fn a_rollback_refuses_an_installed_file_that_no_longer_matches_the_stamp() {
+    let mut f = rfacts();
+    f.stamped.as_mut().unwrap()[0].installed_hash = Some("d".repeat(64));
+    let refusal = refusal(decide_rollback(&f));
+    assert_eq!(refusal.exit_code(), 1);
+    assert!(String::from_utf8(refusal.stderr()).unwrap().contains("no longer matches the stamp"));
 }

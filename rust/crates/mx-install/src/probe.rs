@@ -4,8 +4,8 @@ use crate::args::Opts;
 use crate::env::Env;
 use crate::machine::{Machine, glob_affixes, glob_children};
 use crate::plan::{
-    COMMANDS, InstallFacts, Layout, RollbackFacts, RustProgram, Timer, UninstallFacts, kept_line,
-    timer_profile,
+    COMMANDS, InstallFacts, Layout, RollbackFacts, RollbackItem, RustProgram, Timer,
+    UninstallFacts, kept_line, timer_profile,
 };
 use crate::refusal::Refusal;
 use crate::tools::{self, QUICK};
@@ -179,11 +179,26 @@ pub fn install_facts(
         rust_candidates(&layout, Path::new(""))
             .into_iter()
             .map(|program| program.backup)
-            .filter(|backup| machine.lexists(backup))
+            .filter(|backup| machine.lexists(backup) && !machine.is_symlink(backup))
             .collect()
     } else {
         Vec::new()
     };
+    // The saved original goes to a name this installer invents. It must not be a link, which
+    // `cp` would write through, nor a file of the user's: only a regular file an earlier
+    // `--rust` install left (the stamp says there was one) may be replaced.
+    for program in &rust {
+        let backup = &program.backup;
+        let ours = rust_stamp.is_some() && machine.is_file(backup) && !machine.is_symlink(backup);
+        if machine.lexists(backup) && !ours {
+            return Err(Refusal::RustBinUnusable {
+                detail: OsString::from(format!(
+                    "{} exists and is not a saved original of this installer; move it away first",
+                    backup.display()
+                )),
+            });
+        }
+    }
     Ok(InstallFacts {
         rust_stamp,
         rust_leftovers,
@@ -274,7 +289,7 @@ pub fn uninstall_facts(
             .into_iter()
             .filter(|program| program.installed.starts_with(&layout.bin))
             .map(|program| program.backup)
-            .filter(|path| machine.lexists(path))
+            .filter(|path| machine.lexists(path) && !machine.is_symlink(path))
             .collect()
     } else {
         Vec::new()
@@ -338,9 +353,12 @@ pub fn rollback_facts(
     Ok(RollbackFacts {
         stamped: stamped.map(|rows| {
             rows.into_iter()
-                .map(|(installed, backup)| {
-                    let present = machine.lexists(&backup);
-                    (installed, backup, present)
+                .map(|(installed, backup, stamp_hash)| RollbackItem {
+                    installed_hash: machine.sha256(&installed).ok(),
+                    backup_hash: machine.sha256(&backup).ok(),
+                    installed,
+                    backup,
+                    stamp_hash,
                 })
                 .collect()
         }),
@@ -352,7 +370,10 @@ pub fn rollback_facts(
 }
 
 /// The `(installed, backup)` pairs a stamp lists: lines of `<64 hex>  <path>`.
-pub fn parse_rust_stamp(text: &[u8], layout: &Layout) -> Result<Vec<(PathBuf, PathBuf)>, Refusal> {
+pub fn parse_rust_stamp(
+    text: &[u8],
+    layout: &Layout,
+) -> Result<Vec<(PathBuf, PathBuf, String)>, Refusal> {
     let known = rust_candidates(layout, Path::new(""));
     let blocked = |detail: String| Refusal::RollbackBlocked { detail: OsString::from(detail) };
     let mut pairs = Vec::new();
@@ -373,7 +394,11 @@ pub fn parse_rust_stamp(text: &[u8], layout: &Layout) -> Result<Vec<(PathBuf, Pa
                 path.display()
             )));
         };
-        pairs.push((program.installed.clone(), program.backup.clone()));
+        pairs.push((
+            program.installed.clone(),
+            program.backup.clone(),
+            String::from_utf8_lossy(&line[..64]).to_ascii_lowercase(),
+        ));
     }
     if pairs.is_empty() {
         return Err(blocked("RUST_STAMP lists no program".to_string()));

@@ -339,7 +339,8 @@ fn an_unreadable_profile_step_in_a_kept_line_prints_sed_s_error_then_an_empty_li
 }
 
 #[test]
-fn the_rust_stamp_records_the_hash_of_the_file_that_is_installed_and_not_of_the_one_it_came_from() {
+fn the_rust_stamp_is_written_before_the_swap_so_it_records_the_hash_of_the_build_about_to_be_installed()
+ {
     use mx_install::plan::RustProgram;
     let program = RustProgram {
         build: "maintainer-doctor",
@@ -356,7 +357,7 @@ fn the_rust_stamp_records_the_hash_of_the_file_that_is_installed_and_not_of_the_
     assert_eq!(ran.result, Ok(0));
     let want = format!(
         "{}  /h/.local/bin/maintainer-doctor\n",
-        mx_install::util::hex(&sha2::Sha256::digest(b"what is installed"))
+        mx_install::util::hex(&sha2::Sha256::digest(b"what the directory holds"))
     );
     assert_eq!(
         machine.peek(std::path::Path::new("/h/.local/share/maintainer/RUST_STAMP")),
