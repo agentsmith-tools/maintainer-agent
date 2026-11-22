@@ -107,6 +107,41 @@ fn locate(argv0: &str, exe: &Path, vars: &BTreeMap<String, String>) -> Result<Tr
     }
 }
 
+/// Every whitespace character as a blank, so a value of several lines reads as one list.
+fn one_line(value: &str) -> String {
+    value.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).collect()
+}
+
+/// `printf %q`: the word as bash quotes it for reuse as input.
+fn shell_quote(word: &str) -> String {
+    if word.chars().any(char::is_control) {
+        let mut out = String::from("$'");
+        for c in word.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\'' => out.push_str("\\'"),
+                '\\' => out.push_str("\\\\"),
+                c if c.is_control() => {
+                    use std::fmt::Write as _;
+                    write!(out, "\\{:03o}", c as u32).ok();
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    let mut out = String::new();
+    for c in word.chars() {
+        if !(c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c) || !c.is_ascii()) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `${N:?name}`: bash names its own file and the line of the read (bash 396, 455, 1222, 1748 and
 /// 2120), so the Rust program does the same with the line of each.
 fn missing_argument(argv0: &str, args: &[String], position: u8, name: &str) -> Exit {
@@ -185,6 +220,22 @@ fn run_inner(
     {
         return Err(Exit::die(1, crate::UNATTENDED_ASSERT));
     }
+    // Only `on` and `off` are values of MAINTAINER_POST; anything else is a usage error for every
+    // subcommand, show included (bash PB-3). Empty reads as the default.
+    let post_setting = profile
+        .get_str("MAINTAINER_POST")
+        .map(str::to_string)
+        .or_else(|| vars.get("MAINTAINER_POST").cloned())
+        .filter(|p| !p.is_empty());
+    if let Some(value) = post_setting.as_deref().filter(|p| !matches!(*p, "on" | "off")) {
+        return Err(Exit {
+            code: 64,
+            stderr: format!(
+                "maintainer-merge: MAINTAINER_POST must be on or off, not {}\n",
+                shell_quote(value)
+            ),
+        });
+    }
     let command = parse_command(args).map_err(|error| match error {
         // `${N:?name}`: bash names its own file and the line of the read (bash 396, 455, 1222,
         // 1748 and 2120), so the Rust program does the same with the line of each.
@@ -204,10 +255,10 @@ fn run_inner(
         .unwrap_or_else(|| format!("{home}/.local/share/maintainer/receipt.key"));
     let prod_value =
         profile.get_str("PROD_GLOBS").or_else(|| vars.get("PROD_GLOBS").map(String::as_str));
-    let post = vars
-        .get("MAINTAINER_POST")
-        .cloned()
-        .or_else(|| profile.get_str("MAINTAINER_POST").map(str::to_string));
+    // PB-4: every run of whitespace separates patterns, newlines included (decision P3B-12); the
+    // suite crate's parser reads one line, so the lines are joined before it sees the value.
+    let prod_value = prod_value.map(one_line);
+    let post = post_setting;
     let pick =
         |name: &str| profile.get_str(name).map(str::to_string).or_else(|| vars.get(name).cloned());
     let cfg = GateConfig {
@@ -216,7 +267,7 @@ fn run_inner(
         state: state.clone(),
         account,
         posting: Posting::from_setting(post.as_deref().filter(|p| !p.is_empty()).or(None)),
-        prod_globs: prod_value.and_then(|value| ProdGlobs::from_profile_value(value).ok()),
+        prod_globs: prod_value.and_then(|value| ProdGlobs::from_profile_value(&value).ok()),
         claim_label: pick("CLAIM_LABEL").unwrap_or_default(),
         receipt_key: PathBuf::from(receipt_key),
         run_id: std::process::id(),
@@ -386,5 +437,27 @@ mod tests {
                 .unwrap_err();
         assert_eq!(exit.code, 1);
         assert!(exit.stderr.contains("HOME: unbound variable"));
+    }
+}
+
+#[cfg(test)]
+mod post_tests {
+    use super::{one_line, shell_quote};
+
+    #[test]
+    fn patterns_on_later_lines_and_after_tabs_still_count_pb_4() {
+        let globs =
+            mx_suite::ProdGlobs::from_profile_value(&one_line("  crates/*/src/*\t\n\n  lib/*  \n"))
+                .unwrap();
+        assert_eq!(globs.as_slice(), ["crates/*/src/*", "lib/*"]);
+    }
+
+    #[test]
+    fn a_word_is_quoted_as_printf_q_quotes_it() {
+        assert_eq!(shell_quote("maybe"), "maybe");
+        assert_eq!(shell_quote(" off"), "\\ off");
+        assert_eq!(shell_quote("off "), "off\\ ");
+        assert_eq!(shell_quote("a\nb"), "$'a\\nb'");
+        assert_eq!(shell_quote("it's"), "it\\'s");
     }
 }
