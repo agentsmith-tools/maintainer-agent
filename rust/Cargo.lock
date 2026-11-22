@@ -171,6 +171,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mx-install"
+version = "0.1.0"
+dependencies = [
+ "mx-ports",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "mx-ports"
 version = "0.1.0"
 dependencies = [

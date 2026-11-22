@@ -2,11 +2,8 @@
 # Characterization: `maintainer-merge show`, with and without a pull request
 # number, including numbers that are not numbers.
 #
-# `show` is the one subcommand that does not pass its argument through
-# pr_or_die. It builds "$RECEIPTS/<arg>.json" from the text as given, so a
-# hostile argument walks out of the receipts directory. The two traversal cases
-# pin that as it is today, see plan decision F2: a later port will refuse such
-# an argument.
+# `show` passes its argument through pr_or_die, as every other subcommand does
+# (plan decision PB-2, formerly the F2 pin).
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cz_init
@@ -67,72 +64,48 @@ case_show_missing() {
 }
 cz_case "show 99: no such receipt exits 1 with the message on stderr" case_show_missing
 
-# Pins current behaviour. The argument is not validated, so a word is looked up
-# as a file name.
+# The argument goes through pr_or_die like every other subcommand (plan decision
+# PB-2, which is F2 fixed in bash). A word, a path or a traversal is refused as a
+# pull request number and no file is read. tests/characterization/gate-hardening.sh
+# holds the table of refused arguments.
 case_show_word() {
     cz_mm show abc
     cz_expect_rc 1
     cz_expect_stdout_empty
-    cz_expect_stderr "maintainer-merge: no receipt for #abc"
+    cz_expect_stderr "maintainer-merge: pull request must be a positive integer, not 'abc'"
 }
-cz_case "show abc: a non-number is looked up as a name and reported as missing (pins current behaviour)" case_show_word
+cz_case "show abc: a non-number is refused as a pull request number" case_show_word
 
 # --- a hostile pull request number --------------------------------------------------------
 
-# Pins current behaviour, see plan decision F2. `../x` resolves to
-# $STATE/x.json, one level above the receipts directory, and `show` prints it.
+# `../x` used to resolve to $STATE/x.json, one level above the receipts
+# directory, and `show` printed it. The file is still there and must stay unread.
 case_show_dotdot() {
     printf '{"outside": "the receipts directory"}\n' > "$CZ_STATE/x.json"
     cz_mm show ../x
-    cz_expect_rc 0
-    cz_expect_stderr_empty
-    cz_expect_stdout '{"outside": "the receipts directory"}'
+    cz_expect_rc 1
+    cz_expect_stdout_empty
+    cz_expect_stderr "maintainer-merge: pull request must be a positive integer, not '../x'"
 }
-cz_case "show ../x: reads \$STATE/x.json outside the receipts directory and prints it (pins current behaviour, see plan decision F2)" case_show_dotdot
+cz_case "show ../x: refused, so \$STATE/x.json outside the receipts directory is not read (PB-2)" case_show_dotdot
 
-# Pins current behaviour, see plan decision F2. With a directory named 1 inside
-# the receipts directory, `1/../../y` resolves to $STATE/y.json.
 case_show_nested_dotdot() {
     mkdir -p "$CZ_RECEIPTS/1"
     printf '{"outside": "two levels up the path"}\n' > "$CZ_STATE/y.json"
     cz_mm show 1/../../y
-    cz_expect_rc 0
-    cz_expect_stderr_empty
-    cz_expect_stdout '{"outside": "two levels up the path"}'
-}
-cz_case "show 1/../../y: reads \$STATE/y.json when receipts/1 exists (pins current behaviour, see plan decision F2)" case_show_nested_dotdot
-
-# Without the directory the kernel cannot resolve the path, so the read fails
-# and the ordinary "no receipt" message appears. Nothing in the program decides
-# that. It is an accident of the file system.
-case_show_nested_dotdot_no_dir() {
-    printf '{"outside": "two levels up the path"}\n' > "$CZ_STATE/y.json"
-    cz_mm show 1/../../y
     cz_expect_rc 1
     cz_expect_stdout_empty
-    cz_expect_stderr "maintainer-merge: no receipt for #1/../../y"
+    cz_expect_stderr "maintainer-merge: pull request must be a positive integer, not '1/../../y'"
 }
-cz_case "show 1/../../y: without receipts/1 the path does not resolve and it reports a missing receipt (pins current behaviour, see plan decision F2)" case_show_nested_dotdot_no_dir
+cz_case "show 1/../../y: refused even when receipts/1 exists (PB-2)" case_show_nested_dotdot
 
-# The same walk out of the directory reaches a file that is not a receipt at
-# all, because only ".json" is appended.
 case_show_dotdot_not_a_receipt() {
     printf 'plain text, not a receipt\n' > "$CZ_STATE/notes.json"
     cz_mm show ../notes
-    cz_expect_rc 0
-    cz_expect_stdout "plain text, not a receipt"
-}
-cz_case "show ../notes: prints any .json file one level up, receipt or not (pins current behaviour, see plan decision F2)" case_show_dotdot_not_a_receipt
-
-# A traversal that ends outside the state directory but cannot name a file
-# without the suffix.
-case_show_dotdot_needs_suffix() {
-    printf 'no suffix here\n' > "$CZ_STATE/plain"
-    cz_mm show ../plain
     cz_expect_rc 1
     cz_expect_stdout_empty
-    cz_expect_stderr "maintainer-merge: no receipt for #../plain"
+    cz_expect_stderr "maintainer-merge: pull request must be a positive integer, not '../notes'"
 }
-cz_case "show ../plain: a file without the .json suffix is not reached" case_show_dotdot_needs_suffix
+cz_case "show ../notes: a .json file one level up is not printed (PB-2)" case_show_dotdot_not_a_receipt
 
 cz_finish

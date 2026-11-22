@@ -10,8 +10,33 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **`maintainer-merge` hardening, found by the review of the Rust port.**
+  `verify` refuses a test filter that holds anything but letters, digits and
+  `_ . : / -` and spaces, or starts with a dash: the filter reached `sh -c` in the
+  container and could forge a passing clean run and a failing mutated run.
+  `show` takes its argument through the pull request number check, and `show`
+  with no argument passes each receipt file name to Python as an argument, where
+  a name used to be spliced into the program text. `MAINTAINER_POST` accepts
+  only `on` and `off` and exits 64 on anything else; `OFF`, `false` or a typo
+  used to post for real. `PROD_GLOBS` is split on every whitespace, so patterns
+  after the first line are no longer dropped. The mutation reaches `sed` as
+  `-e EXPR --`, so a mutation starting with a dash is an expression and not an
+  option. Suite arguments for the container are read one per line, so a blank
+  inside an argument no longer splits it. Cases: `tests/characterization/gate-hardening.sh`.
+
 ### Added
 
+- **The five repository checks are characterized.** `tests/characterization/checks-*.sh`
+  records what `scripts/check_claims.sh`, `scripts/verify-action-pins.sh`,
+  `scripts/shellcheck-sweep.sh`, `evals/run-evals.sh` and `tests/containment-probe.sh`
+  do today: every message, stream and exit code, the order and argument vector of every
+  tool call (`systemd-run`, `nice` and `shellcheck` for each linter run; the flags and the
+  eleven payloads of the containment probe), and the defects that stay (a missing `gh`
+  reads as "not a tag", a runtime that prints nothing reads as "stopped" for nine of
+  eleven attacks, file names with white space are never linted). 220 cases;
+  `mutants-checks.py` replays 205 mutants of the five scripts, each caught by a named case.
 - **CI runs the characterization cases, and the merge gate has a suite for
   them.** The `characterization` job runs `tests/run-characterization.sh`. The
   new `characterization` suite in `profiles/magent/verify.d/` takes one case file
