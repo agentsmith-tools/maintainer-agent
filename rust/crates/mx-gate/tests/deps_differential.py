@@ -715,6 +715,19 @@ def drop_tool_noise(text):
     return "".join(line for line in text.splitlines(True) if not line.startswith("mkdir: "))
 
 
+def drop_head_rereads(calls):
+    """P3C-12: the program reads the head again after each stage, the bash reads it once. Every
+    read but the first is dropped from the program's call log, and nothing else is."""
+    seen, kept = False, []
+    for line in calls.splitlines(True):
+        if line == "gh pr view 7 --repo o/r --json headRefOid --jq .headRefOid\n":
+            if seen:
+                continue
+            seen = True
+        kept.append(line)
+    return "".join(kept)
+
+
 def normalise(result):
     result = dict(result)
     r = result["receipt"]
@@ -730,6 +743,7 @@ def run_case(case, root, tree, repo, rust_bin):
     d = prepare(case, root, tree, repo)
     bash = normalise(run_program(case, d, tree, "bash", rust_bin))
     rust = normalise(run_program(case, d, tree, "rust", rust_bin))
+    rust["calls"] = drop_head_rereads(rust["calls"])
     return case, bash, rust, d
 
 
