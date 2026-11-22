@@ -156,6 +156,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mx-gate"
+version = "0.1.0"
+dependencies = [
+ "mx-core",
+ "mx-ports",
+ "mx-receipt",
+ "mx-sandbox",
+ "mx-suite",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mx-install"
+version = "0.1.0"
+dependencies = [
+ "mx-ports",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "mx-ports"
 version = "0.1.0"
 dependencies = [
@@ -207,6 +230,25 @@ dependencies = [
  "mx-profile",
  "rustix",
  "signal-hook",
+]
+
+[[package]]
+name = "mx-sandbox"
+version = "0.1.0"
+dependencies = [
+ "mx-core",
+ "mx-ports",
+ "mx-suite",
+ "thiserror",
+]
+
+[[package]]
+name = "mx-suite"
+version = "0.1.0"
+dependencies = [
+ "mx-core",
+ "mx-ports",
+ "thiserror",
 ]
 
 [[package]]

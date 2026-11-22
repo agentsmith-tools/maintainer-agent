@@ -1,0 +1,16 @@
+[package]
+name = "mx-suite"
+version = "0.1.0"
+description = "The suite plugin interface of the merge gate: a validated suite name, what a verify.d suite declares, and the host that asks bash for it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mx-core.workspace = true
+mx-ports.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
