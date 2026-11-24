@@ -266,6 +266,15 @@ SLOW
 }
 cu_case "build: SIGTERM ends the build with 143 and removes its scratch directory" case_sigterm_removes_stage
 
+case_shadow_scratch_is_not_foreign() {
+    fresh
+    cu_run build --out "$CU_BUILD"
+    mkdir "$CU_BUILD/.shadow.abc123"; : > "$CU_BUILD/.shadow-ok.abc123"
+    cu_run build --out "$CU_BUILD"
+    cz_expect_rc 0
+}
+cu_case "build: the scratch of a killed shadow is not a foreign file" case_shadow_scratch_is_not_foreign
+
 case_rebuild_removes_old_marker() {
     fresh
     cu_run build --out "$CU_BUILD"

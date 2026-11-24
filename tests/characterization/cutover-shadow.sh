@@ -526,6 +526,15 @@ case_deployed_tree_is_not_the_checkout() {
 }
 cu_case "shadow: a deployed tree from another commit than the checkout's withholds the marker" case_deployed_tree_is_not_the_checkout
 
+case_no_deployed_version() {
+    ready; rm "$CU_SHARE/VERSION"
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: the deployed tree is from unknown and the checkout is at"
+}
+cu_case "shadow: a deployed tree with no VERSION withholds the marker" case_no_deployed_version
+
 case_dirty_checkout_withholds_marker() {
     ready; echo x > "$CU_FX/stray-file"
     cu_shadow
@@ -705,10 +714,10 @@ cu_case "shadow: git may build and commit in a repository below TMPDIR, as the d
 
 case_git_writes_elsewhere_refused() {
     ready
-    hook maintainer-doctor 'git init -q "$HOME/elsewhere"; git -C "$HOME" -c user.name=t -c user.email=t@e.invalid commit -q --allow-empty -m x; git -C "$TMPDIR" init -q; git -C "$TMPDIR/r" push origin x; git -C "$TMPDIR/../esc" init -q; git -C "$TMPDIR" --git-dir="$HOME/.git" commit -q --allow-empty -m y'
+    hook maintainer-doctor 'git init -q "$HOME/elsewhere"; git -C "$HOME" -c user.name=t -c user.email=t@e.invalid commit -q --allow-empty -m x; git -C "$TMPDIR" init -q; git -C "$TMPDIR/r" push origin x; git -C "$TMPDIR/../esc" init -q; git -C "$TMPDIR" --git-dir="$HOME/.git" commit -q --allow-empty -m y; git -C "$TMPDIR" --git-dir "$HOME/.git" commit -q --allow-empty -m z'
     cu_shadow
-    # 4 doctor comparisons x 2 sides x 5 refused calls (the `init` of TMPDIR itself is allowed and is the sixth call)
-    cu_expect_report_has "a program tried 40 call(s) the shims refuse as writes"
+    # 4 doctor comparisons x 2 sides x 6 refused calls (the `init` of TMPDIR itself is allowed)
+    cu_expect_report_has "a program tried 48 call(s) the shims refuse as writes"
     [ ! -e "$CU_HOME/elsewhere" ] || cz_note_fail "git init ran outside TMPDIR"
     [ ! -e "$CZ_CASE/esc" ] || cz_note_fail "a path with .. escaped TMPDIR"
 }

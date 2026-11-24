@@ -390,7 +390,7 @@ cmd_build() {
     for f in "$out"/* "$out"/.[!.]*; do
         { [ -e "$f" ] || [ -L "$f" ]; } || continue
         old="${f##*/}"
-        case "$old" in .stage.*) continue ;; esac
+        case "$old" in .stage.*|.shadow.*|.shadow-ok.*) continue ;; esac
         [ ! -d "$f" ] || [ -L "$f" ] || die "$f is a directory; refused"
         rm -f -- "$f" || die "cannot remove $f"
     done

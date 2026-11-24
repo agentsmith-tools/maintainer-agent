@@ -149,6 +149,18 @@ case_report_edited() {
 }
 cu_case "live: a shadow report that changed after the marker was made is refused" case_report_edited
 
+case_report_is_a_link() {
+    ready; mv "$CU_BUILD/shadow-report.txt" "$CZ_CASE/report-copy"; ln -s "$CZ_CASE/report-copy" "$CU_BUILD/shadow-report.txt"
+    refused_before_install "cutover.sh: there is no shadow-report.txt beside shadow-ok"
+}
+cu_case "live: a shadow report that is a symbolic link is refused" case_report_is_a_link
+
+case_report_checkout_header() {
+    ready; sed -i 's/checkout=[0-9a-f]*/checkout=0000000/' "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: shadow compared a deployed tree from $(cu_head | cut -c1-7) and the checkout is at $(cu_head | cut -c1-7); install deploys the checkout"
+}
+cu_case "live: a report whose header names another checkout than this one is refused" case_report_checkout_header
+
 case_report_missing() {
     ready; rm "$CU_BUILD/shadow-report.txt"
     refused_before_install "cutover.sh: there is no shadow-report.txt beside shadow-ok"

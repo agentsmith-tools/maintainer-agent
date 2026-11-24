@@ -83,6 +83,11 @@ leaves none. Copying `SHA256SUMS` to `shadow-ok` gives `live` nothing: it recomp
 report digest, and refuses a report with a `DIFF`, with no comparison, with a summary that does not match its
 lines, with a `SKIP` the marker does not accept, or older than the build.
 
+The marker is not a security boundary. Anything you can write, you can forge: a marker and a report written by
+hand to agree with each other are accepted. What a valid marker proves is that shadow ran on this checkout and
+this build and that every line of its report passed, and that nothing has changed since: it guards against a
+stale, partial or mistaken run, not against the person who owns the machine.
+
 ### What shadow proves, and what it does not
 
 It proves that on this machine's profiles and state, for the verbs above, the Rust build and the bash
