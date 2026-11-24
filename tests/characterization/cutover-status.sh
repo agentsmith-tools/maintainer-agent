@@ -121,7 +121,7 @@ cu_case "status: a stamp written for another HOME is refused" case_stamp_other_h
 
 case_marker_current() {
     cu_deploy; cu_build
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_rc 0
     cz_expect_stdout_has "shadow-ok: current (the marker lists the programs now in $CU_BUILD)"
@@ -130,7 +130,7 @@ cu_case "status: shadow-ok that lists the programs now in the directory is curre
 
 case_marker_with_comment_current() {
     cu_deploy; cu_build
-    { cu_table; echo '# accepted-skip: maintainer-merge'; } > "$CU_BUILD/shadow-ok"
+    cu_marker maintainer-merge
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_stdout_has "shadow-ok: current"
 }
@@ -138,7 +138,7 @@ cu_case "status: comment lines of the marker do not make it stale" case_marker_w
 
 case_marker_without_final_newline() {
     cu_deploy; cu_build
-    printf '%s' "$(cu_table)" > "$CU_BUILD/shadow-ok"
+    cu_marker; printf '%s' "$(cat "$CU_BUILD/shadow-ok")" > "$CZ_CASE/m"; mv "$CZ_CASE/m" "$CU_BUILD/shadow-ok"
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_rc 0
     cz_expect_stdout_has "shadow-ok: current"
@@ -147,7 +147,7 @@ cu_case "status: a shadow-ok with no final newline is read in full" case_marker_
 
 case_marker_stale() {
     cu_deploy; cu_build
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
     printf 'a newer build\n' >> "$CU_BUILD/run"
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_rc 0
@@ -157,7 +157,7 @@ cu_case "status: shadow-ok is stale when a program changed after shadow" case_ma
 
 case_marker_stale_extra_program() {
     cu_deploy; cu_build
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
     cp "$CU_BUILD/run" "$CU_BUILD/maintainer-extra"
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_stdout_has "shadow-ok: stale"
@@ -166,7 +166,7 @@ cu_case "status: shadow-ok is stale when a program was added after shadow" case_
 
 case_marker_stale_removed_program() {
     cu_deploy; cu_build
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
     rm "$CU_BUILD/alert"
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_stdout_has "shadow-ok: stale"
@@ -208,7 +208,7 @@ cu_case "status: a shadow-ok that is a link does not count" case_marker_link
 
 case_writes_nothing() {
     swapped
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
     cu_snap "$CU_HOME" > "$CZ_CASE/home.before"; cu_snap "$CU_BUILD" > "$CZ_CASE/build.before"
     cu_snap "$CU_FX" > "$CZ_CASE/fx.before"
     cu_run status --build-dir "$CU_BUILD"

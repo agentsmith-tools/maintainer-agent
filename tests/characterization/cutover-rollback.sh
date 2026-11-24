@@ -429,6 +429,67 @@ case_home_with_pipe() {
 }
 cu_case "rollback: a HOME with a pipe is refused by name before a step can be cut at it" case_home_with_pipe
 
+case_unreadable_pair() {
+    swapped
+    chmod 000 "$CU_BIN/maintainer-repo" "$CU_BIN/maintainer-repo.sh"
+    cu_run rollback
+    local rc="$CZ_RC"
+    chmod 755 "$CU_BIN/maintainer-repo" "$CU_BIN/maintainer-repo.sh"
+    cz_check "exit status" "$rc" 1
+    cz_expect_stderr "cutover.sh: cannot roll back: $CU_BIN/maintainer-repo cannot be read"
+    [ -f "$(STAMP)" ] || cz_note_fail "the stamp was removed although a program could not be read"
+}
+cu_case "rollback: an installed file and a saved original that cannot be read refuse and keep the stamp" case_unreadable_pair
+
+case_unreadable_backup_only() {
+    swapped
+    chmod 000 "$CU_BIN/maintainer-repo.sh"
+    cu_run rollback
+    chmod 755 "$CU_BIN/maintainer-repo.sh"
+    cz_expect_rc 1
+    cz_expect_stderr "cutover.sh: cannot roll back: $CU_BIN/maintainer-repo.sh cannot be read"
+    [ -f "$(STAMP)" ] || cz_note_fail "the stamp was removed"
+}
+cu_case "rollback: a saved original that cannot be read refuses" case_unreadable_backup_only
+
+case_dry_run_never_removes() {
+    cu_deploy; cu_build $CU_PROGRAMS
+    cu_stamp $CU_PROGRAMS
+    cu_swap_files maintainer-merge maintainer-doctor maintainer-repo run run-instance
+    cp -p "$(cu_installed alert)" "$(cu_installed alert).sh"
+    cu_snap "$CU_HOME" > "$CZ_CASE/home.before"
+    cu_run rollback --dry-run
+    cz_expect_rc 0
+    cz_expect_stdout_has "  would: rm -f $CU_SHARE/alert.sh.sh"
+    cu_snap "$CU_HOME" > "$CZ_CASE/home.after"
+    cu_expect_same_snap "the machine after a dry run that lists an rm" "$CZ_CASE/home.before" "$CZ_CASE/home.after"
+}
+cu_case "rollback: --dry-run lists the removal of a saved copy and does not remove it" case_dry_run_never_removes
+
+case_stamp_removal_fails() {
+    cu_deploy; cu_build $CU_PROGRAMS
+    cu_swap maintainer-doctor
+    local mode; mode="$(stat -c %a "$CU_SHARE")"
+    chmod 555 "$CU_SHARE"
+    cu_run rollback
+    local rc="$CZ_RC"
+    chmod "$mode" "$CU_SHARE"
+    [ "$rc" != 0 ] || cz_note_fail "a rollback that could not remove the stamp exited 0"
+    [ -f "$(STAMP)" ] || cz_note_fail "the stamp is gone although its removal failed"
+    cz_check "the program restored before the failure" "$([ ! -e "$CU_BIN/maintainer-doctor.sh" ] && echo yes)" yes
+}
+cu_case "rollback: a stamp that cannot be removed is a failure, not a success" case_stamp_removal_fails
+
+case_rollback_needs_sha256sum() {
+    swapped
+    rm -f "$CU_TOOLS/sha256sum"
+    cu_run rollback
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: the tool 'sha256sum' is not on PATH; nothing was done"
+    [ -f "$(STAMP)" ] || cz_note_fail "the stamp was removed"
+}
+cu_case "rollback: without sha256sum it refuses by name and keeps the stamp" case_rollback_needs_sha256sum
+
 case_flock_missing_leaves_machine() {
     swapped
     rm -f "$CU_TOOLS/flock"

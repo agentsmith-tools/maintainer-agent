@@ -12,7 +12,7 @@ cu_init
 ready() {
     cu_deploy; cu_build $CU_PROGRAMS install
     cu_fake_install
-    cu_table > "$CU_BUILD/shadow-ok"
+    cu_marker
 }
 installs() { cat "$CZ_CASE/install.calls" 2>/dev/null; }
 
@@ -133,6 +133,70 @@ case_marker_for_other_table() {
 }
 cu_case "live: a shadow-ok that lists some other table refuses" case_marker_for_other_table
 
+reseal() {  # the marker names the report as it is now
+    sed -i "s/^# report: .*/# report: $(sha256sum < "$CU_BUILD/shadow-report.txt" | cut -d' ' -f1)/" "$CU_BUILD/shadow-ok"
+}
+
+case_forged_marker() {
+    ready; cp "$CU_BUILD/SHA256SUMS" "$CU_BUILD/shadow-ok"; rm -f "$CU_BUILD/shadow-report.txt"
+    refused_before_install "cutover.sh: shadow-ok was made for the checkout at  and the checkout is at $(cu_head | cut -c1-12); run shadow again"
+}
+cu_case "live: a shadow-ok made by copying SHA256SUMS is refused, because shadow never ran" case_forged_marker
+
+case_report_edited() {
+    ready; echo "PASS one more" >> "$CU_BUILD/shadow-report.txt"
+    refused_before_install "cutover.sh: shadow-report.txt is not the report shadow-ok was made from"
+}
+cu_case "live: a shadow report that changed after the marker was made is refused" case_report_edited
+
+case_report_missing() {
+    ready; rm "$CU_BUILD/shadow-report.txt"
+    refused_before_install "cutover.sh: there is no shadow-report.txt beside shadow-ok"
+}
+cu_case "live: a marker with no report beside it is refused" case_report_missing
+
+case_report_with_diff() {
+    ready; sed -i 's/^SUMMARY.*/DIFF run x: stdout line 1\nSUMMARY comparisons=3 pass=2 diff=1 skip=0/' "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: the shadow report has 1 DIFF line(s)"
+}
+cu_case "live: a report with a DIFF line is refused even when the marker names it" case_report_with_diff
+
+case_report_without_comparisons() {
+    ready; printf 'SHADOW home=x checkout=%s deployed=%s build=x profiles=1\nSUMMARY comparisons=0 pass=0 diff=0 skip=0\n' "$(cu_head | cut -c1-7)" "$(cu_head | cut -c1-7)" > "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: the shadow report holds no comparison"
+}
+cu_case "live: a report with no comparison in it is refused" case_report_without_comparisons
+
+case_summary_disagrees() {
+    ready; sed -i 's/^SUMMARY.*/SUMMARY comparisons=9 pass=9 diff=0 skip=0/' "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: the shadow report's summary does not match its lines"
+}
+cu_case "live: a report whose summary does not match its lines is refused" case_summary_disagrees
+
+case_report_older_than_build() {
+    ready; touch -d "now + 1 hour" "$CU_BUILD/SHA256SUMS"
+    refused_before_install "cutover.sh: the build is newer than the shadow report; run shadow again"
+}
+cu_case "live: a report older than the build is refused" case_report_older_than_build
+
+case_skip_not_accepted() {
+    ready; cu_marker maintainer-merge; sed -i '/^# accepted-skip/d' "$CU_BUILD/shadow-ok"
+    refused_before_install "cutover.sh: the report has a SKIP for maintainer-merge that shadow-ok does not accept"
+}
+cu_case "live: a SKIP the marker does not accept is refused" case_skip_not_accepted
+
+case_marker_for_other_checkout() {
+    ready; sed -i "s/^# checkout: .*/# checkout: $(printf 'b%.0s' $(seq 1 40))/" "$CU_BUILD/shadow-ok"
+    refused_before_install "cutover.sh: shadow-ok was made for the checkout at bbbbbbbbbbbb and the checkout is at $(cu_head | cut -c1-12); run shadow again"
+}
+cu_case "live: a marker made for another commit of the checkout is refused" case_marker_for_other_checkout
+
+case_shadow_compared_other_deployed_tree() {
+    ready; sed -i 's/deployed=[0-9a-f]*/deployed=0000000/' "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: shadow compared a deployed tree from 0000000 and the checkout is at $(cu_head | cut -c1-7); install deploys the checkout"
+}
+cu_case "live: a report of a shadow against a deployed tree that is not the checkout is refused" case_shadow_compared_other_deployed_tree
+
 case_symlink_in_dir() {
     ready; rm "$CU_BUILD/alert"; ln -s "$CU_BUILD/run" "$CU_BUILD/alert"
     refused_before_install "cutover.sh: $CU_BUILD/alert is a symbolic link; the build directory holds regular files only"
@@ -177,14 +241,14 @@ case_stamp_exists() {
 cu_case "live: with a RUST_STAMP already there it refuses and points at rollback" case_stamp_exists
 
 case_no_install_program() {
-    ready; rm "$CU_BUILD/install"; cu_table > "$CU_BUILD/SHA256SUMS"; cu_table > "$CU_BUILD/shadow-ok"
+    ready; rm "$CU_BUILD/install"; cu_table > "$CU_BUILD/SHA256SUMS"; cu_marker
     refused_before_install "cutover.sh: the build in $CU_BUILD holds no install program"
 }
 cu_case "live: a build with no install program refuses" case_no_install_program
 
 case_nothing_to_swap() {
     cu_deploy; cu_build run-evals install
-    cu_fake_install; cu_table > "$CU_BUILD/shadow-ok"
+    cu_fake_install; cu_marker
     refused_before_install "cutover.sh: the build in $CU_BUILD holds none of: maintainer-merge maintainer-doctor maintainer-repo run run-instance alert"
 }
 cu_case "live: a build with none of the six swappable programs refuses" case_nothing_to_swap
@@ -284,7 +348,7 @@ cu_case "live: an install that did everything and then exits 1 is still a failur
 
 case_partial_build() {
     cu_deploy; cu_build maintainer-doctor maintainer-repo run install
-    cu_fake_install; cu_table > "$CU_BUILD/shadow-ok"
+    cu_fake_install; cu_marker
     cu_run live --build-dir "$CU_BUILD"
     cz_expect_rc 0
     cz_expect_stdout_has "live: read back 3 program(s)"
@@ -305,6 +369,7 @@ case_checkout_source_missing() {
     ready
     git -C "$CU_FX" rm -q platform/linux/alert.sh; git -C "$CU_FX" -c user.name=f -c user.email=f@e.invalid commit -q -m gone
     sed -i "s/^head=.*/head=$(cu_head)/" "$CU_BUILD/BUILD_INFO"
+    cu_marker
     refused_before_install "cutover.sh: the checkout has no $CU_FX/platform/linux/alert.sh, the bash program alert stands for"
 }
 cu_case "live: a swappable program with no bash source in the checkout refuses" case_checkout_source_missing

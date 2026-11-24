@@ -170,6 +170,23 @@ case_checkout_pipe() {
 }
 cu_case "refusal: a checkout whose path holds a pipe is refused" case_checkout_pipe
 
+case_single_quote_in_a_path() {
+    local sub q="$CZ_CASE/q';touch PWN;'"
+    mkdir -p "$q"; chmod 755 "$q"
+    for sub in build shadow live status; do
+        local arg=--build-dir; case "$sub" in build|shadow) arg=--out ;; esac
+        cu_fake_cargo
+        cu_run "$sub" "$arg" "$q"
+        cz_check "$sub with a quote in the directory exits" "$CZ_RC" 1
+        cz_expect_stderr_first "cutover.sh: the build directory holds a single quote; refused"
+    done
+    [ ! -e "$CU_HOME/PWN" ] && [ ! -e PWN ] || cz_note_fail "a command in a quoted path ran"
+    cz_set HOME "/tmp/a'b"
+    cu_run status
+    cz_expect_stderr_first "cutover.sh: HOME holds a single quote; refused"
+}
+cu_case "refusal: a single quote in HOME or a build directory is refused, and no command in it runs" case_single_quote_in_a_path
+
 case_not_a_checkout_without_rust() {
     mkdir -p "$CZ_CASE/half/scripts"
     cp "$CU_FX/scripts/cutover.sh" "$CZ_CASE/half/scripts/cutover.sh"; : > "$CZ_CASE/half/install.sh"

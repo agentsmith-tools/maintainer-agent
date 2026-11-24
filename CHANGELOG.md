@@ -53,8 +53,8 @@ middle digit.
   `shadow-ok` holds the table of what is in the directory and reads the machine
   back, `status` says which programs are bash or Rust by sha256 against
   `RUST_STAMP`, and `rollback` puts the saved bash originals back from the stamp
-  alone, with no Rust binary. 223 cases in `tests/characterization/cutover-*.sh`,
-  100 mutants in `mutants-cutover.py`, and a differential of `rollback` against
+  alone, with no Rust binary. 246 cases in `tests/characterization/cutover-*.sh`,
+  121 mutants in `mutants-cutover.py`, and a differential of `rollback` against
   `install --rollback` over 32 states
   (`rust/crates/mx-install/tests/cutover-rollback.sh`). See
   `docs/deploy/cutover.md`.

@@ -39,12 +39,13 @@ scripts/cutover.sh shadow [--out DIR] [--accept-skip NAME]... [--timeout SECONDS
 Runs each deployed bash program and its Rust build side by side on this machine's profiles and compares
 the exit status, standard output, standard error and every call the program makes to a tool that could
 reach beyond it. Those calls go to shims the script writes: a `gh` that answers a few planned reads and
-refuses every write, a `git` that passes reads through and swallows `fetch`, a `date` that answers one
+refuses every write, a `git` that passes reads through, swallows `fetch` and lets a repository below the run's `TMPDIR` be built (the doctor's sandbox probe makes one), a `date` that answers one
 fixed instant for `date -Is`, and shims for `crontab`, `systemctl`, `systemd-run`, `loginctl`,
 `notify-send`, `podman`, the model backends and the network tools. `systemctl` passes read verbs of the
 user manager through, and `systemd-run` passes a transient unit it waits for (the doctor's sandbox probe)
 or a scope (the linter sweep's memory cap). Each shim logs its calls, and shadow compares the two logs as
-well. A call that a shim refuses as a write is counted, and a run with one has no marker.
+well; the random part of a name `mktemp` made is the only thing it ignores there. Both sides get the same `TMPDIR`
+path. A call that a shim refuses as a write is counted, and a run with one has no marker.
 
 Shadow decides by reading the code which verbs are read-only. What it runs, and why that is safe:
 
@@ -72,10 +73,15 @@ minutes (the checks have an hour); `--timeout` changes both, and a side that run
 Rust program for a comparison. It is counted and listed, and it stops the marker unless you name the
 program with `--accept-skip`.
 
-The marker, `shadow-ok`, holds the sha256 table of the build that was compared. Shadow writes it only
-when every comparison passed, at least one prompt was compared and every expected prompt was, no shim
-refused a write, and the deployed tree and the checkout were as they were when the run began. It
-removes an old marker before the first comparison, so a run that stops early leaves none.
+The marker, `shadow-ok`, holds the sha256 table of the build that was compared, the commit of the checkout
+(`# checkout:`), the sha256 of `shadow-report.txt` (`# report:`) and any accepted skips. Shadow writes it only when
+every comparison passed, at least one prompt was compared and every expected prompt was, no shim refused a write,
+the deployed tree is from the checkout's commit (shadow compares the deployed bash, and `live` installs the
+checkout, so the two must be one tree), the checkout is clean, and nothing in the deployed tree, the checkout or
+`DIR` changed during the run. It removes an old marker before the first comparison, so a run that stops early
+leaves none. Copying `SHA256SUMS` to `shadow-ok` gives `live` nothing: it recomputes the table, the commit and the
+report digest, and refuses a report with a `DIFF`, with no comparison, with a summary that does not match its
+lines, with a `SKIP` the marker does not accept, or older than the build.
 
 ### What shadow proves, and what it does not
 
@@ -96,8 +102,8 @@ preview's one line.
 scripts/cutover.sh live [--build-dir DIR]
 ```
 
-Refuses unless `shadow-ok` exists and holds the table of the programs now in `DIR`. A program changed,
-added or removed after shadow makes the tables differ. It also refuses a build made from a dirty tree,
+Refuses unless `shadow-ok` verifies as above: the table of the programs now in `DIR`, the checkout's commit and the
+report. A program changed, added or removed after shadow makes the tables differ. It also refuses a build made from a dirty tree,
 from another commit than the checkout's, or a checkout that is dirty, because `install` deploys the
 checkout beside the Rust programs; and it refuses when `RUST_STAMP` is already there.
 
@@ -131,12 +137,15 @@ the stamp, judges every program before it moves the first, and refuses (changing
 - a run holds a profile's lock (exit 69; `--force` goes on),
 - the stamp is missing, unreadable, malformed, lists a program twice or lists a path the installer does
   not swap,
-- a saved original is missing,
+- a saved original is missing, or an installed file or saved original is there and cannot be read (it is not
+  "already restored": the stamp stays),
 - an installed file is neither the stamped build nor already restored,
 - the stamp, an installed program or a saved original is a symbolic link: a rollback never follows a
   link and never replaces one.
 
-A rollback that fails part way can run again: a program whose original is already back is skipped.
+Unlike `install --rollback`, this `rollback` refuses a `HOME` that holds `:`, `|`, a quote or a control character,
+and refuses an unreadable pair where `install --rollback` reads it as restored and drops the stamp; run
+`install --rollback` for such a machine. A rollback that fails part way can run again: a program whose original is already back is skipped.
 `rust/crates/mx-install/tests/cutover-rollback.sh` runs each of these states, and more, through the Rust
 `install --rollback` and through `rollback`, and compares the exit status, both streams and every file:
 the two ways back are one way.

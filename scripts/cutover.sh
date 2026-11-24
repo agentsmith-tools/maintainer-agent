@@ -36,6 +36,11 @@ EOF
 }
 usage_die() { printf '%s: %s\n' "$PROG" "$*" >&2; usage; exit 64; }
 
+# The directory the EXIT trap removes. The trap names this function and no path, so no path is ever
+# part of a command line that the shell reads again.
+CLEAN_DIR=""
+clean_up() { [ -z "$CLEAN_DIR" ] || rm -rf -- "$CLEAN_DIR"; }
+
 # What a hostile argument looks like in a message: quoted, one line.
 shown() { printf '%q' "$1"; }
 
@@ -54,6 +59,7 @@ plain_path() {  # $1 = what it is, $2 = the path
     nl_free "$2" || die "$1 holds a newline; refused"
     case "$2" in
         *\|*) die "$1 holds a '|'; refused" ;;
+        *\'*) die "$1 holds a single quote; refused" ;;
     esac
     [[ "$2" =~ [[:cntrl:]] ]] && die "$1 holds a control character; refused"
     case "$2" in
@@ -330,7 +336,7 @@ cmd_build() {
             name="${f##*/}"
             is_meta "$name" && continue
             # A build that was killed leaves its scratch directory; it is not a foreign file.
-            case "$name" in .stage.*) continue ;; esac
+            case "$name" in .stage.*|.shadow.*|.shadow-ok.*) continue ;; esac
             has_name "$known" "$name" || die "$out holds $name, which an earlier build did not write; use an empty directory"
         done
     else
@@ -362,7 +368,8 @@ cmd_build() {
     local stage
     stage="$(mktemp -d "$out/.stage.XXXXXX")" || die "cannot make a scratch directory inside $out"
     # shellcheck disable=SC2064
-    trap "rm -rf -- '$stage'" EXIT
+    CLEAN_DIR="$stage"
+    trap clean_up EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
     trap 'exit 129' HUP
@@ -458,8 +465,11 @@ cmd_rollback() {
         if [ -L "$installed" ]; then die "cannot roll back: $installed is a symbolic link; rollback never follows or replaces one"; fi
         if [ -L "$backup" ]; then die "cannot roll back: $backup is a symbolic link; rollback never follows or replaces one"; fi
         ihash=""; bhash=""
-        if [ -f "$installed" ]; then ihash="$(sha256sum < "$installed" 2>/dev/null)" || ihash=""; ihash="${ihash%% *}"; fi
-        if [ -f "$backup" ]; then bhash="$(sha256sum < "$backup" 2>/dev/null)" || bhash=""; bhash="${bhash%% *}"; fi
+        if [ -f "$installed" ]; then ihash="$({ sha256sum < "$installed"; } 2>/dev/null)" || ihash=""; ihash="${ihash%% *}"; fi
+        if [ -f "$backup" ]; then bhash="$({ sha256sum < "$backup"; } 2>/dev/null)" || bhash=""; bhash="${bhash%% *}"; fi
+        # A file that is there and cannot be read is not "restored already": the stamp stays.
+        if [ -e "$installed" ] && [ -z "$ihash" ]; then die "cannot roll back: $installed cannot be read"; fi
+        if [ -e "$backup" ] && [ -z "$bhash" ]; then die "cannot roll back: $backup cannot be read"; fi
         if [ -n "$ihash" ] && [ "$ihash" = "${ST_HASH[$i]}" ]; then
             [ -n "$bhash" ] || die "cannot roll back: $backup is missing"
             skind+=(mv); ssrc+=("$backup"); sdst+=("$installed"); restored=$((restored + 1))
@@ -488,6 +498,57 @@ cmd_rollback() {
     else rm -f -- "$stamp_file" || exit "$?"; fi
     n="$restored"
     printf '  rolled back %s program(s) to the bash originals\n' "$n"
+}
+
+# Whether shadow-ok in $1 is the marker of a clean shadow of what is in $1 and of this checkout. It binds
+# three things: the table of the programs, the commit of the checkout and the sha256 of the report. The
+# report must hold passes only (a skip only where the marker accepts it), a summary with comparisons in it,
+# a deployed tree from the checkout's commit, and be no older than the build. Sets MARK_ERR and MARK_KIND.
+MARK_ERR=""; MARK_KIND=""
+verify_marker() {  # $1 = directory
+    local dir="$1" marker current head line rhead="" rsum="" skips="" rep="$1/shadow-report.txt"
+    local npass=0 ndiff=0 nskip=0 total="" spass="" sdiff="" ssk="" hdr_dep="" hdr_chk="" prog w
+    MARK_ERR=""; MARK_KIND=""
+    marker="$(table_lines "$dir/shadow-ok")"
+    if [ -z "$marker" ]; then MARK_KIND=empty; MARK_ERR="$dir/shadow-ok holds no table"; return 1; fi
+    current="$(table_of "$dir")"
+    if [ "$marker"$'\n' != "$current"$'\n' ]; then MARK_KIND=table; MARK_ERR="the programs in $dir are not the ones shadow compared"; return 1; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "# checkout: "*) rhead="${line#\# checkout: }" ;;
+            "# report: "*) rsum="${line#\# report: }" ;;
+            "# accepted-skip: "*) skips="$skips${line#\# accepted-skip: }"$'\n' ;;
+        esac
+    done < "$dir/shadow-ok"
+    head="$(git -C "$root" rev-parse HEAD 2>/dev/null)" || { MARK_ERR="cannot read HEAD of $root"; return 1; }
+    if [ "$rhead" != "$head" ]; then MARK_ERR="shadow-ok was made for the checkout at ${rhead:0:12} and the checkout is at ${head:0:12}; run shadow again"; return 1; fi
+    if [ ! -f "$rep" ] || [ -L "$rep" ]; then MARK_ERR="there is no shadow-report.txt beside shadow-ok"; return 1; fi
+    if [ "$(sha256_of "$rep")" != "$rsum" ]; then MARK_ERR="shadow-report.txt is not the report shadow-ok was made from"; return 1; fi
+    if [ "$dir/SHA256SUMS" -nt "$rep" ]; then MARK_ERR="the build is newer than the shadow report; run shadow again"; return 1; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "PASS "*) npass=$((npass + 1)) ;;
+            "DIFF "*) ndiff=$((ndiff + 1)) ;;
+            "SKIP "*)
+                nskip=$((nskip + 1))
+                prog="${line#*: no Rust build of }"; prog="${prog%% in *}"
+                if ! has_name "$skips" "$prog"; then MARK_ERR="the report has a SKIP for $prog that shadow-ok does not accept"; return 1; fi ;;
+            "SUMMARY comparisons="*)
+                total="${line#SUMMARY comparisons=}"; total="${total%% *}"
+                spass="${line#*pass=}"; spass="${spass%% *}"; sdiff="${line#*diff=}"; sdiff="${sdiff%% *}"; ssk="${line#*skip=}"; ssk="${ssk%% *}" ;;
+            "SHADOW "*)
+                for w in $line; do
+                    case "$w" in deployed=*) hdr_dep="${w#deployed=}" ;; checkout=*) hdr_chk="${w#checkout=}" ;; esac
+                done ;;
+        esac
+    done < "$rep"
+    if [ "$ndiff" != 0 ]; then MARK_ERR="the shadow report has $ndiff DIFF line(s)"; return 1; fi
+    if [[ ! "$total" =~ ^[0-9]+$ ]] || [ "$total" -le 0 ] || [ "$npass" -le 0 ]; then MARK_ERR="the shadow report holds no comparison"; return 1; fi
+    if [ "$spass" != "$npass" ] || [ "$sdiff" != 0 ] || [ "$ssk" != "$nskip" ] || [ "$total" != "$((npass + nskip))" ]; then MARK_ERR="the shadow report's summary does not match its lines"; return 1; fi
+    if [ -z "$hdr_dep" ] || [ "${head:0:${#hdr_dep}}" != "$hdr_dep" ] || [ -z "$hdr_chk" ] || [ "${head:0:${#hdr_chk}}" != "$hdr_chk" ]; then
+        MARK_ERR="shadow compared a deployed tree from ${hdr_dep:-unknown} and the checkout is at ${head:0:7}; install deploys the checkout"; return 1
+    fi
+    return 0
 }
 
 # --- status --------------------------------------------------------------------------------
@@ -539,12 +600,10 @@ cmd_status() {
     elif [ ! -f "$dir/shadow-ok" ] || [ -L "$dir/shadow-ok" ]; then
         printf 'shadow-ok: absent (%s)\n' "$dir"
     else
-        local marker current
-        marker="$(table_lines "$dir/shadow-ok")"
-        if current="$(table_of "$dir" 2>/dev/null)" && [ "$marker"$'\n' = "$current"$'\n' ]; then
+        if ( verify_marker "$dir" ) >/dev/null 2>&1; then
             printf 'shadow-ok: current (the marker lists the programs now in %s)\n' "$dir"
         else
-            printf 'shadow-ok: stale (the programs in %s are not the ones shadow compared)\n' "$dir"
+            ( verify_marker "$dir" >/dev/null 2>&1 || :; printf 'shadow-ok: stale (%s)\n' "${MARK_ERR:-the marker cannot be verified}" )
         fi
     fi
 }
@@ -572,12 +631,6 @@ cmd_live() {
 
     [ -f "$dir/shadow-ok" ] && [ ! -L "$dir/shadow-ok" ] \
         || die "no shadow-ok in $dir: run scripts/cutover.sh shadow on this build first"
-    local marker current
-    marker="$(table_lines "$dir/shadow-ok")"
-    [ -n "$marker" ] || die "$dir/shadow-ok holds no table"
-    current="$(table_of "$dir")"
-    [ "$marker"$'\n' = "$current"$'\n' ] \
-        || die "the programs in $dir are not the ones shadow compared (shadow-ok lists another table); run shadow again"
 
     [ -f "$dir/BUILD_INFO" ] && [ ! -L "$dir/BUILD_INFO" ] || die "$dir/BUILD_INFO is missing"
     local info_head info_dirty line
@@ -591,6 +644,14 @@ cmd_live() {
     [ "$head" = "$info_head" ] || die "the build in $dir is from ${info_head:0:12} and the checkout is at ${head:0:12}; install deploys the checkout, so build and shadow again"
     status="$(git -C "$root" status --porcelain 2>/dev/null)" || die "cannot read the git status of $root"
     [ -z "$status" ] || die "the checkout is dirty; install would deploy files no build was made from"
+
+    local marker current
+    if ! verify_marker "$dir"; then
+        [ "$MARK_KIND" != table ] || die "$MARK_ERR (shadow-ok lists another table); run shadow again"
+        die "$MARK_ERR"
+    fi
+    marker="$(table_lines "$dir/shadow-ok")"
+    current="$(table_of "$dir")"
 
     if [ -e "$stamp_file" ] || [ -L "$stamp_file" ]; then
         die "$stamp_file exists: a Rust install is already in place; run scripts/cutover.sh rollback first"
@@ -730,19 +791,38 @@ SHIM
     cat > "$d/git" <<'SHIM'
 #!/usr/bin/env bash
 # cutover shadow: git. Reads pass through to the real git. `fetch` is swallowed (it would write
-# refs and reach the network); every other command that writes or reaches the network is refused.
+# refs and reach the network). A command that changes a repository runs only when the repository is
+# below the TMPDIR of this run (the doctor's sandbox probe builds one); every other command that
+# writes or reaches the network is refused.
 log="${CUTOVER_LOG_DIR:?}"
 line=""; for a in "$@"; do line="$line$(printf '%q' "$a") "; done
 printf 'git %s\n' "${line% }" >> "$log/calls"
-sub=""; skip=0
+sub=""; skip=0; dir="$PWD"; takes_dir=0; unsafe=0
 for a in "$@"; do
-    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$skip" = 1 ]; then
+        skip=0
+        if [ "$takes_dir" = 1 ]; then
+            takes_dir=0
+            case "$a" in /*) dir="$a" ;; *) dir="$dir/$a" ;; esac
+        fi
+        continue
+    fi
     case "$a" in
-        -C|-c|--git-dir|--work-tree|--namespace|--exec-path) skip=1 ;;
+        -C) skip=1; takes_dir=1 ;;
+        -c|--namespace|--exec-path) skip=1 ;;
+        --git-dir|--work-tree) skip=1; unsafe=1 ;;
+        --git-dir=*|--work-tree=*) unsafe=1 ;;
         -*) ;;
         *) sub="$a"; break ;;
     esac
 done
+inside_tmp() {  # $1 = a path: true when it is below the TMPDIR of this run
+    local p t
+    p="$(readlink -m -- "$1")" || return 1
+    t="$(readlink -m -- "${TMPDIR:-/nonexistent}")" || return 1
+    case "$p/" in "$t"/*) return 0 ;; esac
+    return 1
+}
 case "$sub" in
     fetch) printf 'git %s\n' "${line% }" >> "$log/swallowed"; exit 0 ;;
     rev-parse|rev-list|describe|log|diff|diff-tree|show|status|merge-base|for-each-ref|ls-files|ls-tree|cat-file|show-ref|name-rev|shortlog|blame|grep|version|help|--version)
@@ -750,6 +830,18 @@ case "$sub" in
     config)
         for a in "$@"; do case "$a" in --get|--get-all|--get-regexp|--list|-l) exec "${CUTOVER_REAL_GIT:?}" "$@" ;; esac; done ;;
     "") exec "${CUTOVER_REAL_GIT:?}" "$@" ;;
+esac
+case "$sub" in
+    pull|push|clone|ls-remote|remote|submodule) ;;
+    *)
+        if [ "$unsafe" = 0 ]; then
+            target="$dir"
+            if [ "$sub" = init ]; then
+                last=""; for a in "$@"; do last="$a"; done
+                case "$last" in -*|init) ;; /*) target="$last" ;; *) target="$dir/$last" ;; esac
+            fi
+            if inside_tmp "$target"; then exec "${CUTOVER_REAL_GIT:?}" "$@"; fi
+        fi ;;
 esac
 printf 'git %s\n' "${line% }" >> "$log/refused"
 echo "cutover shadow: git $sub must not run here" >&2
@@ -882,6 +974,14 @@ normalise_doctor() {  # stdin -> stdout
         -e 's/\b(pid|PID)[ =:]+[0-9]+/\1 <PID>/g'
 }
 
+# The random part of a name mktemp made, in the log of the calls a program made (the offline suite
+# mounts such directories into a container): not a difference between two runs.
+normalise_calls() {  # stdin -> stdout
+    sed -E \
+        -e 's#/tmp\.[A-Za-z0-9]{6,12}\b#/tmp.<RAND>#g' \
+        -e 's#/verify-work/[A-Za-z0-9]{6,12}\b#/verify-work/<RAND>#g'
+}
+
 # first_diff BASH_FILE RUST_FILE: where two streams part, as one line.
 first_diff() {
     local a="$1" b="$2" report n la lb
@@ -927,10 +1027,11 @@ stop_side() {  # $1 = the exit status
 run_side() {  # $1 = bash|rust, $2 = side directory, $3 = path variable, $4 = cwd, $5 = timeout, $6 = bash program, $7 = argv0, $8 = rust binary, rest = args
     local side="$1" sd="$2" shpath="$3" cwd="$4" tmo="$5" bashprog="$6" argv0="$7" rustbin="$8"; shift 8
     local -a envv cmd
-    rm -rf -- "$sd"; mkdir -p -- "$sd/log" "$sd/tmp"
+    # TMPDIR has one path for both sides, so a path a program prints from it is the same on both.
+    rm -rf -- "$sd" "${sd%/*}/tmp"; mkdir -p -- "$sd/log" "${sd%/*}/tmp"
     [ -z "$SH_SIDE_PREP" ] || "$SH_SIDE_PREP" "$sd"
     envv=("HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${USER:-$(id -un)}" "PATH=$shpath" "LC_ALL=C" "TZ=UTC"
-          "PYTHONDONTWRITEBYTECODE=1" "GIT_TERMINAL_PROMPT=0" "GIT_OPTIONAL_LOCKS=0" "TMPDIR=$sd/tmp"
+          "PYTHONDONTWRITEBYTECODE=1" "GIT_TERMINAL_PROMPT=0" "GIT_OPTIONAL_LOCKS=0" "TMPDIR=${sd%/*}/tmp"
           "CUTOVER_LOG_DIR=$sd/log" "CUTOVER_FIXED_DATE=2026-01-01T00:00:00+00:00"
           "CUTOVER_REAL_DATE=$SH_REAL_DATE" "CUTOVER_REAL_GIT=$SH_REAL_GIT")
     [ -z "$SH_REAL_SYSTEMCTL" ] || envv+=("CUTOVER_REAL_SYSTEMCTL=$SH_REAL_SYSTEMCTL")
@@ -1013,6 +1114,8 @@ compare() {
             *) cp -- "$base/bash/$s" "$base/bash/$s.n"; cp -- "$base/rust/$s" "$base/rust/$s.n" ;;
         esac
     done
+    normalise_calls < "$base/bash/calls.txt" > "$base/bash/calls.n"
+    normalise_calls < "$base/rust/calls.txt" > "$base/rust/calls.n"
     SH_REFUSED=$((SH_REFUSED + $(count_lines "$base/bash/log/refused") + $(count_lines "$base/rust/log/refused")))
     SH_UNPLANNED=$((SH_UNPLANNED + $(count_lines "$base/bash/log/unplanned") + $(count_lines "$base/rust/log/unplanned")))
     if [ -n "$why" ]; then
@@ -1023,8 +1126,8 @@ compare() {
         SH_DIFF=$((SH_DIFF + 1)); report_line "DIFF $name: stdout $(first_diff "$base/bash/stdout.n" "$base/rust/stdout.n")"
     elif ! cmp -s "$base/bash/stderr.n" "$base/rust/stderr.n"; then
         SH_DIFF=$((SH_DIFF + 1)); report_line "DIFF $name: stderr $(first_diff "$base/bash/stderr.n" "$base/rust/stderr.n")"
-    elif ! cmp -s "$base/bash/calls.txt" "$base/rust/calls.txt"; then
-        SH_DIFF=$((SH_DIFF + 1)); report_line "DIFF $name: calls to the shims $(first_diff "$base/bash/calls.txt" "$base/rust/calls.txt")"
+    elif ! cmp -s "$base/bash/calls.n" "$base/rust/calls.n"; then
+        SH_DIFF=$((SH_DIFF + 1)); report_line "DIFF $name: calls to the shims $(first_diff "$base/bash/calls.n" "$base/rust/calls.n")"
     else
         SH_PASS=$((SH_PASS + 1)); report_line "PASS $name"
     fi
@@ -1126,8 +1229,8 @@ cmd_shadow() {
     trap 'stop_side 130' INT
     trap 'stop_side 129' HUP
     if [ -z "$SH_KEEP" ]; then
-        # shellcheck disable=SC2064
-        trap "rm -rf -- '$SH_SCRATCH'" EXIT
+        CLEAN_DIR="$SH_SCRATCH"
+        trap clean_up EXIT
     else
         printf 'shadow: keeping the scratch directory %s\n' "$SH_SCRATCH" >&2
     fi
@@ -1175,8 +1278,13 @@ cmd_shadow() {
 
     # The marker: only a run in which every comparison passed. A skip counts unless it was
     # accepted by name, and an accepted skip is written into the marker.
-    local why_not="" left=0 skipped_used=() n
-    if [ "$SH_DIFF" != 0 ]; then why_not="$SH_DIFF comparison(s) differ"; fi
+    local why_not="" left=0 skipped_used=() n head_full
+    head_full="$(git -C "$root" rev-parse HEAD 2>/dev/null)" || head_full=""
+    [ -z "$(git -C "$root" status --porcelain 2>/dev/null)" ] || why_not="the checkout is dirty, so shadow compared nothing that install would deploy"
+    if [ "$deployed_commit" = unknown ] || [ -z "$head_full" ] || [ "${head_full:0:${#deployed_commit}}" != "$deployed_commit" ]; then
+        why_not="${why_not:+$why_not; }the deployed tree is from $deployed_commit and the checkout is at ${head_full:0:7}; run ./install.sh first, because live installs the checkout"
+    fi
+    if [ "$SH_DIFF" != 0 ]; then why_not="${why_not:+$why_not; }$SH_DIFF comparison(s) differ"; fi
     [ "$SH_PASS" -gt 0 ] || why_not="${why_not:+$why_not; }no comparison passed"
     [ "$SH_PROMPTS" -gt 0 ] || why_not="${why_not:+$why_not; }no prompt was compared"
     [ "$SH_PROMPTS" = "$SH_PROMPT_EXPECTED" ] || why_not="${why_not:+$why_not; }$SH_PROMPTS prompts were compared and $SH_PROMPT_EXPECTED were expected"
@@ -1200,11 +1308,13 @@ cmd_shadow() {
     fi
     local tmp
     tmp="$(mktemp "$dir/.shadow-ok.XXXXXX")" || die "cannot write the marker"
-    { printf '%s\n' "$table"; for n in "${skipped_used[@]}"; do printf '# accepted-skip: %s\n' "$n"; done; } > "$tmp" \
+    { printf '%s\n' "$table"; printf '# checkout: %s\n# report: %s\n' "$head_full" "$(sha256_of "$SH_REPORT")"
+      for n in "${skipped_used[@]}"; do printf '# accepted-skip: %s\n' "$n"; done; } > "$tmp" \
         || { rm -f -- "$tmp"; die "cannot write the marker"; }
     chmod 644 -- "$tmp"
     mv -f -- "$tmp" "$dir/shadow-ok" || die "cannot place the marker"
-    report_line "MARKER written: $dir/shadow-ok"
+    # Not a line of the report: the marker holds the report's sha256.
+    printf 'MARKER written: %s\n' "$dir/shadow-ok"
 }
 
 SH_PROMPT_EXPECTED=0

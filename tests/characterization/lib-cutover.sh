@@ -224,7 +224,7 @@ cu_deploy() {
     cp "$CU_FX/platform/linux/alert.sh" "$CU_SHARE/alert.sh"
     chmod 755 "$CU_BIN"/* "$CU_SHARE"/*.sh
     for p in "${profiles[@]}"; do cp -a "$CU_FX/profiles/$p" "$CU_SHARE/profiles/$p"; done
-    printf 'version=fixture\ncommit=abc1234\ninstalled_at=2026-01-01T00:00:00+00:00\ninstalled_from=%s\n' "$CU_FX" > "$CU_SHARE/VERSION"
+    printf 'version=fixture\ncommit=%s\ninstalled_at=2026-01-01T00:00:00+00:00\ninstalled_from=%s\n' "$(git -C "$CU_FX" rev-parse --short HEAD)" "$CU_FX" > "$CU_SHARE/VERSION"
 }
 
 # The deployed path of a program, and the bash program in the fixture checkout it comes from.
@@ -306,6 +306,17 @@ cu_table() {
 }
 
 cu_head() { git -C "$CU_FX" rev-parse HEAD; }
+
+# cu_marker [SKIPPED_PROGRAM...]: the shadow-ok and shadow-report.txt a clean shadow of the build directory leaves.
+cu_marker() {
+    local rep="$CU_BUILD/shadow-report.txt" short n; short="$(cu_head | cut -c1-7)"
+    { printf 'SHADOW home=%s checkout=%s deployed=%s build=%s profiles=1\n' "$CU_HOME" "$short" "$short" "$short"
+      printf 'PASS run --show-prompt alpha review (default)\nPASS install --dry-run\n'
+      for n in "$@"; do printf 'SKIP %s show: no Rust build of %s in %s (the bash program stays)\n' "$n" "$n" "$CU_BUILD"; done
+      printf 'SUMMARY comparisons=%d pass=2 diff=0 skip=%d\n' "$(( 2 + $# ))" "$#"; } > "$rep"
+    { cu_table; printf '# checkout: %s\n# report: %s\n' "$(cu_head)" "$(sha256sum < "$rep" | cut -d' ' -f1)"
+      for n in "$@"; do printf '# accepted-skip: %s\n' "$n"; done; } > "$CU_BUILD/shadow-ok"
+}
 
 # cu_build_without NAME...: a build directory with every program except these.
 cu_build_without() {

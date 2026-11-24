@@ -47,7 +47,7 @@ cu_case "shadow: a build whose programs behave as the bash ones passes every com
 case_report_header_and_counts() {
     ready
     cu_shadow
-    cu_expect_report_has "SHADOW home=$CU_HOME checkout=$(cu_head | cut -c1-7) deployed=abc1234 build=$(cu_head | cut -c1-7) profiles=2"
+    cu_expect_report_has "SHADOW home=$CU_HOME checkout=$(cu_head | cut -c1-7) deployed=$(cu_head | cut -c1-7) build=$(cu_head | cut -c1-7) profiles=2"
     cu_expect_report_has "PROMPTS compared=$N_PROMPTS expected=$N_PROMPTS"
     cu_expect_report_has "SHIMS refused=0 unplanned=0 (both sides together)"
     cu_expect_report_has "DEPLOYED tree and checkout unchanged by the run: yes"
@@ -58,7 +58,7 @@ cu_case "shadow: the report states the commits, the prompts compared and what th
 case_marker_is_the_table() {
     ready
     cu_shadow
-    cz_check "shadow-ok" "$(cat "$CU_BUILD/shadow-ok")" "$(cu_table)"
+    cz_check "the table lines of shadow-ok" "$(grep -v '^#' "$CU_BUILD/shadow-ok")" "$(cu_table)"
     cz_check "mode of shadow-ok" "$(stat -c %a "$CU_BUILD/shadow-ok")" 644
     cu_run status --build-dir "$CU_BUILD"
     cz_expect_stdout_has "shadow-ok: current"
@@ -188,10 +188,10 @@ case_accept_skip() {
     cu_deploy alpha beta; cu_build_without maintainer-merge
     cu_shadow --accept-skip maintainer-merge
     cz_expect_rc 0
-    cz_check "shadow-ok" "$(cat "$CU_BUILD/shadow-ok")" "$(cu_table)
-# accepted-skip: maintainer-merge"
+    cz_check "the table lines of shadow-ok" "$(grep -v '^#' "$CU_BUILD/shadow-ok")" "$(cu_table)"
+    cz_check "the accepted skips of shadow-ok" "$(grep '^# accepted' "$CU_BUILD/shadow-ok")" "# accepted-skip: maintainer-merge"
     cu_expect_report_has "SKIP maintainer-merge show 7: no Rust build"
-    cu_expect_report_has "MARKER written: $CU_BUILD/shadow-ok"
+    cz_expect_stdout_has "MARKER written: $CU_BUILD/shadow-ok"
 }
 cu_case "shadow: --accept-skip NAME lets the run be marked, and the marker says which skip was accepted" case_accept_skip
 
@@ -208,7 +208,7 @@ case_accept_skip_unused() {
     ready
     cu_shadow --accept-skip maintainer-merge
     cz_expect_rc 0
-    cz_check "shadow-ok" "$(cat "$CU_BUILD/shadow-ok")" "$(cu_table)"
+    cz_check "the accepted skips of shadow-ok" "$(grep -c '^# accepted' "$CU_BUILD/shadow-ok")" 0
 }
 cu_case "shadow: accepting a skip that did not happen adds nothing to the marker" case_accept_skip_unused
 
@@ -517,6 +517,36 @@ case_run_lock_not_taken() {
 }
 cu_case "shadow: a held run lock is neither waited for nor taken" case_run_lock_not_taken
 
+case_deployed_tree_is_not_the_checkout() {
+    ready; printf 'version=x\ncommit=0000000\n' > "$CU_SHARE/VERSION"
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: the deployed tree is from 0000000 and the checkout is at $(cu_head | cut -c1-7); run ./install.sh first, because live installs the checkout"
+}
+cu_case "shadow: a deployed tree from another commit than the checkout's withholds the marker" case_deployed_tree_is_not_the_checkout
+
+case_dirty_checkout_withholds_marker() {
+    ready; echo x > "$CU_FX/stray-file"
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: the checkout is dirty"
+}
+cu_case "shadow: a dirty checkout withholds the marker" case_dirty_checkout_withholds_marker
+
+case_marker_binds_commit_and_report() {
+    ready; cu_shadow; cz_expect_rc 0
+    cz_check "the marker's lines after the table" "$(grep '^#' "$CU_BUILD/shadow-ok")" "# checkout: $(cu_head)
+# report: $(sha256sum < "$CU_BUILD/shadow-report.txt" | cut -d' ' -f1)"
+    cu_run status --build-dir "$CU_BUILD"
+    cz_expect_stdout_has "shadow-ok: current"
+    echo "PASS extra" >> "$CU_BUILD/shadow-report.txt"
+    cu_run status --build-dir "$CU_BUILD"
+    cz_expect_stdout_has "shadow-ok: stale (shadow-report.txt is not the report shadow-ok was made from)"
+}
+cu_case "shadow: the marker binds the checkout commit and the sha256 of the report, and status checks both" case_marker_binds_commit_and_report
+
 case_scratch_removed() {
     ready
     hook maintainer-doctor 'echo x > "$TMPDIR/leftover"'
@@ -652,6 +682,47 @@ case_sigterm() {
     if [ -n "$sleeper" ] && kill -0 "$sleeper" 2>/dev/null; then cz_note_fail "the sleeping stand-in ($sleeper) outlived the shadow"; kill "$sleeper" 2>/dev/null; fi
 }
 cu_case "shadow: SIGTERM ends the run with 143, stops the side that was running and removes the scratch directory" case_sigterm
+
+case_tmpdir_is_one_path() {
+    ready
+    hook maintainer-doctor 'echo "tmp: $TMPDIR"'
+    cu_shadow
+    cz_expect_rc 0
+    cu_expect_report_has "PASS maintainer-doctor --quick alpha"
+    cu_expect_report_has "PASS maintainer-doctor --quick (bad profile name)"
+}
+cu_case "shadow: both sides get the same TMPDIR path, so a path a program prints from it does not differ" case_tmpdir_is_one_path
+
+case_git_scratch_repo() {
+    ready; KEEP
+    hook maintainer-doctor 'git init -q "$TMPDIR/r" && git -C "$TMPDIR/r" add -A && git -C "$TMPDIR/r" -c user.name=t -c user.email=t@e.invalid -c commit.gpgsign=false commit -q --allow-empty -m probe; echo "scratch repo rc=$?"'
+    cu_shadow
+    cz_expect_rc 0
+    cu_expect_report_has "SHIMS refused=0 unplanned=0"
+    cz_check "doctor runs that built and committed in a scratch repository" "$(kept stdout | grep -c '^scratch repo rc=0$')" 8
+}
+cu_case "shadow: git may build and commit in a repository below TMPDIR, as the doctor's sandbox probe does" case_git_scratch_repo
+
+case_git_writes_elsewhere_refused() {
+    ready
+    hook maintainer-doctor 'git init -q "$HOME/elsewhere"; git -C "$HOME" -c user.name=t -c user.email=t@e.invalid commit -q --allow-empty -m x; git -C "$TMPDIR" init -q; git -C "$TMPDIR/r" push origin x; git -C "$TMPDIR/../esc" init -q; git -C "$TMPDIR" --git-dir="$HOME/.git" commit -q --allow-empty -m y'
+    cu_shadow
+    # 4 doctor comparisons x 2 sides x 5 refused calls (the `init` of TMPDIR itself is allowed and is the sixth call)
+    cu_expect_report_has "a program tried 40 call(s) the shims refuse as writes"
+    [ ! -e "$CU_HOME/elsewhere" ] || cz_note_fail "git init ran outside TMPDIR"
+    [ ! -e "$CZ_CASE/esc" ] || cz_note_fail "a path with .. escaped TMPDIR"
+}
+cu_case "shadow: git changes nothing outside TMPDIR: a repository elsewhere, a push, a .. path and --git-dir are refused" case_git_writes_elsewhere_refused
+
+case_mktemp_names_are_not_a_difference() {
+    ready
+    hook check-claims 'gh api "$(mktemp -d)" >/dev/null 2>&1; gh api "x/verify-work/$(basename "$(mktemp -u XXXXXXXX)")" >/dev/null 2>&1'
+    cu_shadow
+    cz_expect_rc 0
+    cu_expect_report_has "PASS check-claims"
+    cu_expect_report_has "SHIMS refused=0 unplanned=4"
+}
+cu_case "shadow: the random part of a mktemp name in a call is not a difference, and a different call still is" case_mktemp_names_are_not_a_difference
 
 case_crontab_list_only() {
     ready
