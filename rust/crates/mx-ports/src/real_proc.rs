@@ -739,6 +739,72 @@ mod tests {
         assert_tiny_timeout_kills_a_long_child(Duration::from_nanos(1));
     }
 
+    /// A shell that leaves a grandchild in a session of its own holding the output pipes. The
+    /// group kill cannot reach it, so the call waits out the post-kill grace for the pipes.
+    const PIPE_HOLDER: &str = "setsid sleep 4 & echo held; sleep 30";
+
+    #[test]
+    fn the_wait_for_pipes_after_a_kill_lasts_about_the_grace_and_no_longer() {
+        let timeout = Duration::from_secs(1);
+        let started = Instant::now();
+        let out =
+            run_bounded(proc(), ProcSpec::command("sh", ["-c", PIPE_HOLDER], timeout)).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(out.exit, ProcExit::TimedOut);
+        assert_eq!(text(&out.stdout), "held\n");
+        assert!(
+            elapsed >= timeout + KILL_GRACE - Duration::from_millis(100),
+            "returned after {elapsed:?}: the grace for the pipes was cut short"
+        );
+        assert!(
+            elapsed < timeout + KILL_GRACE + Duration::from_secs(2),
+            "returned after {elapsed:?}: the grace for the pipes was not bounded"
+        );
+    }
+
+    #[test]
+    fn a_program_that_ignores_sigterm_is_killed_within_the_grace_after_the_deadline() {
+        let timeout = Duration::from_secs(1);
+        let started = Instant::now();
+        let spec = ProcSpec::command("sh", ["-c", "trap '' TERM; sleep 30"], timeout);
+        let out = run_bounded(proc(), spec).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(out.exit, ProcExit::TimedOut);
+        assert!(elapsed >= timeout, "returned after {elapsed:?}, before the deadline");
+        assert!(
+            elapsed < timeout + KILL_GRACE + Duration::from_secs(1),
+            "returned after {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_until_checks_readiness_once_more_when_the_deadline_has_passed() {
+        let mut calls = 0;
+        assert!(wait_until(Instant::now(), || {
+            calls += 1;
+            true
+        }));
+        assert_eq!(calls, 1);
+        let mut calls = 0;
+        let started = Instant::now();
+        assert!(!wait_until(Instant::now(), || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 1, "a passed deadline is checked once and then given up");
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn wait_until_with_a_deadline_that_never_comes_polls_until_ready() {
+        let mut calls = 0;
+        assert!(wait_until(Deadline::after(Duration::MAX), || {
+            calls += 1;
+            calls == 4
+        }));
+        assert_eq!(calls, 4);
+    }
+
     #[test]
     fn a_missing_kill_utility_is_reported_and_the_program_is_still_killed() {
         let spec = ProcSpec::command("sleep", ["30"], Duration::from_secs(1));

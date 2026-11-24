@@ -237,6 +237,11 @@ STUB
     SUITE_PINNED=("Beta|reason" "a-b|reason" "a_c|reason")
     scenario "a pinned case that passes is reported" 1 \
         "$(printf '%s\n' '  - expected to fail and did not: FAIL  a_c')"
+    SUITE_PINNED=("a-b|reason" "Beta|reason")
+    scenario "pinned cases listed out of order: no difference" 0 ""
+    SUITE_PINNED=("Beta|reason" "a-b|reason" "Éclair|reason" "a_c|reason")
+    scenario "several pinned cases that pass are all reported, in C order" 1 \
+        "$(printf '%s\n' '  - expected to fail and did not: FAIL  a_c' '  - expected to fail and did not: FAIL  Éclair')"
     SUITE_PINNED=("Beta|reason" "a_c|reason")
     scenario "an unpinned failure and a pinned case that passes are both reported" 1 \
         "$(printf '%s\n' '  - expected to fail and did not: FAIL  a_c' '  + failed and is not pinned: FAIL  a-b')"

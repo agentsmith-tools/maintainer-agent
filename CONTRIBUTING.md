@@ -267,5 +267,8 @@ To add a backend:
    lines. A fifth backend has no bash twin, so its own tests carry the proof.
 5. Teach the doctor about it: add an arm to `backend` in
    `rust/crates/mx-doctor/src/install.rs` for the program the backend runs. The
-   doctor prints no check for a name it does not list.
+   doctor prints no CLI check for a name it does not list. It also fails
+   `backend '<name>' not installed` unless `<share>/backends/<name>.sh` exists, and
+   `install.sh` deploys only `lib/backends/*.sh`, so a backend with no bash file
+   reads red in the doctor until that check changes.
 6. Run `scripts/rust-gate.sh` before you commit.
