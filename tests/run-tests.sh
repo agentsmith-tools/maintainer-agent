@@ -12236,6 +12236,19 @@ else
 fi
 rm -f "$stub_dir/gh"
 
+echo "== the install black-box comparison does not depend on the order a suite lists its failures in =="
+# rust/crates/mx-install/tests/blackbox.sh --with-suite compares the FAIL lines of two suite runs
+# with `comm`. A directory listing is in one order on tmpfs and in another on ext4, so the order of
+# those lines is not the same on every machine (FU1-5). --self-test runs a stand-in suite twice,
+# once with the real `find` and once with a `find` that reverses its NUL-separated records, and
+# checks that the verdict and the report do not move and that every difference is listed. Its
+# scratch directory is inside this suite's own, so nothing lands in the caller's home.
+bb_out="$(MX_SCRATCH="$stub_dir/bb-scratch" bash "$suite_root/rust/crates/mx-install/tests/blackbox.sh" --self-test 2>&1)"; bb_rc=$?
+bb_n="$(sed -n 's/^self-test: \([0-9][0-9]*\) checks passed, 0 failed$/\1/p' <<<"$bb_out")"
+[ "$bb_rc" = 0 ] && [ "${bb_n:-0}" -gt 0 ] \
+    && ok "the install black-box comparison gives one verdict for both directory orders ($bb_n checks)" \
+    || bad "blackbox.sh --self-test failed or ran no check (rc=$bb_rc): $(tail -n 3 <<<"$bb_out" | tr '\n' ' ' | cut -c1-300)"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
