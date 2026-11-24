@@ -12,9 +12,10 @@ Adding a harness is easy. Adding one that may write to GitHub in somebody's name
 is not, and the difference is a single question: **can this CLI be given a
 per-command deny list it cannot edit?**
 
-`backend_rehearsal` is where a backend answers it, and `run.sh` refuses a
-`POST=off` run on any backend that does not declare it. That function is the
-whole admission test. What follows is the current field, measured against it.
+`backend_rehearsal` (`Backend::declares_rehearsal` in `rust/crates/mx-backends`)
+is where a backend answers it, and `run` refuses a `POST=off` run on any backend
+that does not declare it. That function is the whole admission test. What follows
+is the current field, measured against it.
 
 | harness | per-command deny list | tier | state here |
 |---|---|---|---|
@@ -42,10 +43,11 @@ opencode. Issue #5 is where that evidence goes, and it is the gate on lifting
 either restriction. Lifting a guard because a configuration ought to work is the
 shape `lessons.md` records most often.
 
-**Definition of done for a new backend:** a `lib/backends/<name>.sh` answering
-the four questions, a wall generated from `deny.json` if it can hold one, a
-containment probe run that names the command it refused, and a row in the table
-above with the date it was proven. Not before.
+**Definition of done for a new backend:** a `Backend` in `rust/crates/mx-backends`
+answering the six questions and registered in `backend_by_name` (the backend set is
+closed, and `CONTRIBUTING.md` lists the steps), a wall generated from `deny.json` if
+it can hold one, a containment probe run that names the command it refused, and a
+row in the table above with the date it was proven. Not before.
 
 ## 2. Repo shape
 
