@@ -168,10 +168,16 @@ case_report_without_comparisons() {
 cu_case "live: a report with no comparison in it is refused" case_report_without_comparisons
 
 case_summary_disagrees() {
-    ready; sed -i 's/^SUMMARY.*/SUMMARY comparisons=9 pass=9 diff=0 skip=0/' "$CU_BUILD/shadow-report.txt"; reseal
+    ready; sed -i 's/^SUMMARY.*/SUMMARY comparisons=9 pass=2 diff=0 skip=0/' "$CU_BUILD/shadow-report.txt"; reseal
     refused_before_install "cutover.sh: the shadow report's summary does not match its lines"
 }
-cu_case "live: a report whose summary does not match its lines is refused" case_summary_disagrees
+cu_case "live: a report whose summary total does not match its lines is refused" case_summary_disagrees
+
+case_summary_pass_disagrees() {
+    ready; sed -i 's/^SUMMARY.*/SUMMARY comparisons=2 pass=9 diff=0 skip=0/' "$CU_BUILD/shadow-report.txt"; reseal
+    refused_before_install "cutover.sh: the shadow report's summary does not match its lines"
+}
+cu_case "live: a report whose summary pass count does not match its lines is refused" case_summary_pass_disagrees
 
 case_report_older_than_build() {
     ready; touch -d "now + 1 hour" "$CU_BUILD/SHA256SUMS"
