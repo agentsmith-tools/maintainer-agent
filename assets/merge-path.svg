@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 660" width="1120" height="660"
+     role="img" aria-label="How a pull request gets merged. One: the agent reads, reviews and files, behind a deny wall. Two: maintainer-merge verify extracts the head, runs the test and it passes, applies a mutation, runs the test again and it fails, then signs a receipt. Three: maintainer-merge merge refuses unless seven conditions hold, then merges. An unattended run cannot merge by hand, read the signing key or write an asserted receipt.">
+  <title>How a pull request gets merged</title>
+  <desc>Three stages. The agent works behind a deny wall. Verify runs the test clean, mutates the guard, runs it again, and signs a receipt only if it failed. Merge refuses unless the receipt and six board conditions hold.</desc>
+
+  <rect x="0.5" y="0.5" width="1119" height="659" rx="18" fill="#14171c" stroke="#2a303a"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" text-rendering="geometricPrecision">
+
+    <text x="40" y="48" font-size="13" letter-spacing="2" fill="#8b93a1">HOW A PULL REQUEST GETS MERGED</text>
+
+    <!-- cards -->
+    <rect x="40" y="76" width="250" height="464" rx="14" fill="#1b1f26" stroke="#2a303a"/>
+    <rect x="360" y="76" width="360" height="464" rx="14" fill="#1b1f26" stroke="#2a303a"/>
+    <rect x="790" y="76" width="290" height="464" rx="14" fill="#1b1f26" stroke="#2a303a"/>
+
+    <!-- arrows between the stages -->
+    <g fill="none" stroke="#5d6573" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M298 308 L350 308 M338 298 L350 308 L338 318"/>
+      <path d="M728 308 L780 308 M768 298 L780 308 L768 318"/>
+    </g>
+
+    <!-- 1: the agent -->
+    <circle cx="70" cy="112" r="13" fill="none" stroke="#3a414d" stroke-width="2"/>
+    <text x="70" y="117" font-size="13" font-weight="bold" text-anchor="middle" fill="#e8e6e1">1</text>
+    <text x="94" y="117" font-size="15" font-weight="bold" letter-spacing="1.5" fill="#e8e6e1">THE AGENT</text>
+    <text x="60" y="148" font-size="12.5" fill="#8b93a1">on a timer, as the owner</text>
+
+    <text x="60" y="204" font-size="15.5" fill="#e8e6e1">starts a run</text>
+    <text x="60" y="224" font-size="12.5" fill="#8b93a1">cadence gate, run lock</text>
+    <text x="60" y="268" font-size="15.5" fill="#e8e6e1">pins the identity</text>
+    <text x="60" y="288" font-size="12.5" fill="#8b93a1">the owner's gh account</text>
+    <text x="60" y="332" font-size="15.5" fill="#e8e6e1">reads the tracker</text>
+    <text x="60" y="352" font-size="12.5" fill="#8b93a1">reviews, files, prunes</text>
+
+    <rect x="60" y="392" width="210" height="124" rx="10" fill="#e0a44c" fill-opacity="0.07"
+          stroke="#e0a44c" stroke-width="1.5" stroke-dasharray="6 5"/>
+    <text x="78" y="424" font-size="15" font-weight="bold" letter-spacing="1" fill="#e0a44c">DENY WALL</text>
+    <text x="78" y="452" font-size="13.5" fill="#c9ced8">no gh pr merge</text>
+    <text x="78" y="474" font-size="13.5" fill="#c9ced8">no signing key</text>
+    <text x="78" y="496" font-size="13.5" fill="#c9ced8">no git push</text>
+
+    <!-- 2: verify -->
+    <circle cx="390" cy="112" r="13" fill="none" stroke="#3a414d" stroke-width="2"/>
+    <text x="390" y="117" font-size="13" font-weight="bold" text-anchor="middle" fill="#e8e6e1">2</text>
+    <text x="414" y="117" font-size="15" font-weight="bold" letter-spacing="1.5" fill="#e8e6e1">VERIFY</text>
+    <text x="380" y="148" font-size="12.5" fill="#8b93a1">maintainer-merge verify</text>
+    <text x="380" y="168" font-size="12.5" fill="#e0a44c">in a container: no network</text>
+
+    <path d="M392 204 L392 448" stroke="#343b46" stroke-width="2"/>
+    <circle cx="392" cy="204" r="8" fill="#1b1f26" stroke="#8b93a1" stroke-width="2.5"/>
+    <circle cx="392" cy="266" r="8" fill="#7fb069"/>
+    <circle cx="392" cy="328" r="8" fill="#e0a44c"/>
+    <circle cx="392" cy="390" r="8" fill="#d9776b"/>
+    <circle cx="392" cy="452" r="8" fill="#e8e6e1"/>
+
+    <text x="418" y="209" font-size="15.5" fill="#e8e6e1">extract the head</text>
+    <text x="418" y="229" font-size="12.5" fill="#8b93a1">refuses a symlink out of the tree</text>
+
+    <text x="418" y="271" font-size="15.5" fill="#e8e6e1">run the test</text>
+    <text x="418" y="291" font-size="12.5" fill="#8b93a1">clean, it must pass</text>
+    <rect x="636" y="253" width="58" height="26" rx="13" fill="#7fb069" fill-opacity="0.16" stroke="#7fb069" stroke-width="1.5"/>
+    <text x="665" y="271" font-size="12.5" font-weight="bold" text-anchor="middle" fill="#8fc27a">PASS</text>
+
+    <text x="418" y="333" font-size="15.5" fill="#e8e6e1">apply the mutation</text>
+    <text x="418" y="353" font-size="12.5" fill="#8b93a1">to one production file</text>
+
+    <text x="418" y="395" font-size="15.5" fill="#e8e6e1">run the test again</text>
+    <text x="418" y="415" font-size="12.5" fill="#8b93a1">mutated, it must fail</text>
+    <rect x="636" y="377" width="58" height="26" rx="13" fill="#d9776b" fill-opacity="0.16" stroke="#d9776b" stroke-width="1.5"/>
+    <text x="665" y="395" font-size="12.5" font-weight="bold" text-anchor="middle" fill="#e58d81">FAIL</text>
+
+    <text x="418" y="457" font-size="15.5" fill="#e8e6e1">sign the receipt</text>
+    <text x="418" y="477" font-size="12.5" fill="#8b93a1">bound to the PR and its head</text>
+
+    <text x="380" y="516" font-size="12.5" fill="#8b93a1">no pass-then-fail, no receipt</text>
+
+    <!-- 3: merge -->
+    <circle cx="820" cy="112" r="13" fill="none" stroke="#3a414d" stroke-width="2"/>
+    <text x="820" y="117" font-size="13" font-weight="bold" text-anchor="middle" fill="#e8e6e1">3</text>
+    <text x="844" y="117" font-size="15" font-weight="bold" letter-spacing="1.5" fill="#e8e6e1">MERGE</text>
+    <text x="810" y="148" font-size="12.5" fill="#8b93a1">maintainer-merge merge</text>
+    <text x="810" y="168" font-size="12.5" fill="#e0a44c">refuses unless all seven hold</text>
+
+    <g fill="none" stroke="#7fb069" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M814 206 L819 211 L828 199"/>
+      <path d="M814 244 L819 249 L828 237"/>
+      <path d="M814 282 L819 287 L828 275"/>
+      <path d="M814 320 L819 325 L828 313"/>
+      <path d="M814 358 L819 363 L828 351"/>
+      <path d="M814 396 L819 401 L828 389"/>
+      <path d="M814 434 L819 439 L828 427"/>
+    </g>
+    <g font-size="14" fill="#e8e6e1">
+      <text x="842" y="210">receipt names this head</text>
+      <text x="842" y="248">kind: observed, dependency</text>
+      <text x="842" y="286">no production diff since</text>
+      <text x="842" y="324">review is APPROVED</text>
+      <text x="842" y="362">checks green, none empty</text>
+      <text x="842" y="400">branch CLEAN, not BEHIND</text>
+      <text x="842" y="438">gh account is the owner</text>
+    </g>
+
+    <rect x="810" y="468" width="250" height="46" rx="23" fill="#e8e6e1"/>
+    <text x="935" y="497" font-size="17" font-weight="bold" text-anchor="middle" fill="#14171c">merged</text>
+
+    <!-- what an unattended run cannot do -->
+    <rect x="40" y="566" width="1040" height="54" rx="12" fill="#d9776b" fill-opacity="0.06"
+          stroke="#d9776b" stroke-width="1.5" stroke-dasharray="6 5"/>
+    <g stroke="#d9776b" stroke-width="2.5" stroke-linecap="round">
+      <path d="M66 586 L80 600 M80 586 L66 600"/>
+    </g>
+    <text x="100" y="598" font-size="14" fill="#c9ced8">An unattended run cannot merge by hand, read the signing key, or write an asserted receipt.</text>
+  </g>
+</svg>
