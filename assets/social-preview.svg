@@ -1,32 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640"
+     role="img" aria-label="maintainer-agent: merges only on proof that a guard bites. A test passes, the guard is removed, the test fails, and only then is there a receipt and a merge.">
+  <title>maintainer-agent</title>
+  <desc>The mark, the name, the one-line claim, and the proof a merge waits for: a test that passes, the guard removed, a test that fails.</desc>
   <rect width="1280" height="640" fill="#14171c"/>
-  <g transform="translate(60 30)">
-  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="30.0"
-     text-rendering="geometricPrecision">
-    <text x="96" y="150.0" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="180.6" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="211.2" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="241.8" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="272.4" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="303.0" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="333.6" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="364.2" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
-    <text x="96" y="150.0" fill="#e0a44c" xml:space="preserve">                ╱</text>
-    <text x="96" y="180.6" fill="#e0a44c" xml:space="preserve">               ╱ </text>
-    <text x="96" y="211.2" fill="#e0a44c" xml:space="preserve">              ╱  </text>
-    <text x="96" y="241.8" fill="#e0a44c" xml:space="preserve">             ╱   </text>
-    <text x="96" y="272.4" fill="#e0a44c" xml:space="preserve">            ╱    </text>
-    <text x="96" y="303.0" fill="#e0a44c" xml:space="preserve">      ╲    ╱     </text>
-    <text x="96" y="333.6" fill="#e0a44c" xml:space="preserve">       ╲  ╱      </text>
-    <text x="96" y="364.2" fill="#e0a44c" xml:space="preserve">        ╲╱       </text>
-  </g>
-  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
-    <text x="400" y="248" font-size="62" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
-    <text x="404" y="300" font-size="26" fill="#8a919c">an unattended maintainer for one repository</text>
 
-    <text x="404" y="378" font-size="26" fill="#c96a5f" xml:space="preserve">- merged because the board was green</text>
-    <text x="404" y="416" font-size="26" fill="#7ba86b" xml:space="preserve">+ merged because the guard went red</text>
-    <text x="404" y="454" font-size="26" fill="#7ba86b" xml:space="preserve">+   when I took the fix away</text>
+  <!-- Everything that matters sits inside x 130..1150, y 130..510: GitHub crops the
+       card, and tests/run-tests.sh decodes the PNG and checks that margin. -->
+
+  <!-- the mark: two bars hold, the check proves -->
+  <g transform="translate(131 176)">
+    <rect x="0" y="0" width="32" height="150" rx="8" fill="#e8e6e1"/>
+    <rect x="52" y="0" width="32" height="150" rx="8" fill="#e8e6e1"/>
+    <path d="M112 88 L142 122 L206 10" fill="none" stroke="#e0a44c" stroke-width="24"
+          stroke-linecap="round" stroke-linejoin="round"/>
   </g>
-</g>
+
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" text-rendering="geometricPrecision">
+    <text x="384" y="278" font-size="68" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
+    <text x="388" y="330" font-size="27" fill="#9aa3b2">merges only on proof that a guard bites</text>
+  </g>
+
+  <!-- the proof a merge waits for -->
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="22" text-rendering="geometricPrecision"
+     text-anchor="middle">
+    <rect x="133" y="410" width="190" height="54" rx="27" fill="#7fb069" fill-opacity="0.14" stroke="#7fb069" stroke-width="2"/>
+    <text x="228" y="444" fill="#8fc27a">test passes</text>
+
+    <path d="M342 437 L364 437 M355 428 L364 437 L355 446" fill="none" stroke="#5d6573" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="383" y="410" width="214" height="54" rx="27" fill="#e0a44c" fill-opacity="0.14" stroke="#e0a44c" stroke-width="2"/>
+    <text x="490" y="444" fill="#e0a44c">guard removed</text>
+
+    <path d="M616 437 L638 437 M629 428 L638 437 L629 446" fill="none" stroke="#5d6573" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="657" y="410" width="190" height="54" rx="27" fill="#d9776b" fill-opacity="0.14" stroke="#d9776b" stroke-width="2"/>
+    <text x="752" y="444" fill="#e58d81">test fails</text>
+
+    <path d="M866 437 L888 437 M879 428 L888 437 L879 446" fill="none" stroke="#5d6573" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="907" y="410" width="238" height="54" rx="27" fill="#e8e6e1"/>
+    <text x="1026" y="444" fill="#14171c" font-weight="bold">receipt, merge</text>
+  </g>
 </svg>
