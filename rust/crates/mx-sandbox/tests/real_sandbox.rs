@@ -1013,3 +1013,109 @@ fn a_staged_gate_binary_runs_from_a_copy_of_the_tree_at_its_relative_path() {
         format!("gate-ran-from {}\n", copy.display())
     );
 }
+
+#[test]
+fn the_changed_paths_come_back_sorted_whatever_order_find_lists_them_in() {
+    let scratch = Scratch::new("findorder");
+    let stub = scratch.path("stubbin");
+    std::fs::create_dir_all(&stub).unwrap();
+    let script = stub.join("find");
+    std::fs::write(
+        &script,
+        "#!/bin/bash\n/usr/bin/find \"$@\" | python3 -c 'import sys; d=[x for x in sys.stdin.buffer.read().split(b\"\\0\") if x]; sys.stdout.buffer.write(b\"\".join(x+b\"\\0\" for x in reversed(d)))'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (_s, tree) = mutable(
+        "findorder-tree",
+        &[("b.rs", "x"), ("a.rs", "x"), ("c/z.rs", "x"), ("c/a.rs", "x")],
+    );
+    let path = format!("{}:{PATHS}", stub.display());
+    let sandbox = RealSandbox::new(
+        Arc::new(RealProc::new(path.as_str(), git_env())),
+        Arc::new(RealPipe::new(PATHS, None)),
+        Runtime::Podman,
+        Vec::new(),
+    )
+    .unwrap();
+    let mut changed = None;
+    for _ in 0..50 {
+        match sandbox.apply_mutation(&tree, &globs(&["*.rs"]), &sed("s/x/y/")) {
+            Err(SandboxError::Run { reason }) if reason.contains("Text file busy") => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => {
+                changed = Some(other.unwrap());
+                break;
+            }
+        }
+    }
+    assert_eq!(changed.unwrap().paths(), ["a.rs", "b.rs", "c/a.rs", "c/z.rs"]);
+}
+
+#[test]
+fn the_debug_output_of_a_sandbox_names_the_runtime_variables_and_never_their_values() {
+    let env = pick_env(&["HOME", "XDG_RUNTIME_DIR"], |n| Some(format!("secret-value-of-{n}")));
+    let sandbox = RealSandbox::new(
+        Arc::new(real_proc()),
+        Arc::new(RealPipe::new(PATHS, None)),
+        Runtime::Podman,
+        env,
+    )
+    .unwrap();
+    let shown = format!("{sandbox:?}");
+    assert!(shown.contains("HOME") && shown.contains("XDG_RUNTIME_DIR"), "{shown}");
+    assert!(!shown.contains("secret-value"), "{shown}");
+}
+
+fn staged_fixture(name: &str) -> (Scratch, Scratch, ContainedTree, RealSandbox, String, PathBuf) {
+    let scratch = Scratch::new(name);
+    let bin = scratch.path("gate");
+    std::fs::write(&bin, "#!/bin/sh\necho gate\n").unwrap();
+    let (_s, tree) = mutable(&format!("{name}-tree"), &[("a.rs", "x")]);
+    let path = stub_runtime(&scratch, "echo ran");
+    let sandbox = sandbox_with(&path, Vec::new(), Duration::from_secs(30));
+    let relative = sandbox.stage_executable(&tree, &bin, "gate").unwrap();
+    (scratch, _s, tree, sandbox, relative, bin)
+}
+
+#[test]
+fn a_staged_binary_overwritten_by_an_earlier_container_blocks_the_next_run_until_it_is_staged_again()
+ {
+    let (scratch, _keep, tree, sandbox, relative, bin) = staged_fixture("stagehash");
+    let work = tree.root().to_path_buf();
+    let log = scratch.path("log");
+    assert_eq!(run_container(&sandbox, &spec(&work, false), &log), Ok(ContainerExit(0)));
+    // the first container replaces the staged gate with its own program
+    std::fs::write(tree.root().join(&relative), "#!/bin/sh\necho planted\n").unwrap();
+    let refused = run_container(&sandbox, &spec(&work, false), &log).unwrap_err();
+    assert_eq!(refused, SandboxError::StagedChanged { path: tree.root().join(&relative) });
+    // staging again restores the file and records the new hash
+    sandbox.stage_executable(&tree, &bin, "gate").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tree.root().join(&relative)).unwrap(),
+        "#!/bin/sh\necho gate\n"
+    );
+    assert_eq!(run_container(&sandbox, &spec(&work, false), &log), Ok(ContainerExit(0)));
+}
+
+#[test]
+fn a_staged_binary_replaced_by_a_link_or_removed_blocks_the_run() {
+    let (scratch, _keep, tree, sandbox, relative, _bin) = staged_fixture("stagelink2");
+    let work = tree.root().to_path_buf();
+    let staged = tree.root().join(&relative);
+    let log = scratch.path("log");
+    let copy = scratch.path("copy");
+    std::fs::copy(&staged, &copy).unwrap();
+    std::fs::remove_file(&staged).unwrap();
+    symlink(&copy, &staged).unwrap();
+    assert!(matches!(
+        run_container(&sandbox, &spec(&work, false), &log),
+        Err(SandboxError::StagedChanged { .. })
+    ));
+    std::fs::remove_file(&staged).unwrap();
+    assert!(matches!(
+        run_container(&sandbox, &spec(&work, false), &log),
+        Err(SandboxError::StagedChanged { .. })
+    ));
+}

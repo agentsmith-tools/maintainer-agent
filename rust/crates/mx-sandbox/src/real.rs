@@ -22,6 +22,14 @@
 //! seeded), and the suite's command names the file as `/repo/.container-target/stage/<name>`
 //! (or `.container-target/stage/<name>` from the root of a copy).
 //!
+//! # Staged files
+//!
+//! A container of an earlier run has the tree mounted writable and could overwrite a staged
+//! binary. `stage_executable` records the hash of the copy, and `run_container` checks every
+//! recorded file before it starts a container (`StagedChanged`). The caller must stage the
+//! binary again immediately before EACH container run (clean, mutated, and the prefetch): the
+//! call copies afresh and records the new hash, so the check is the net for a run that forgot.
+//!
 //! # Cleanup
 //!
 //! Scratch directories made by [`Sandbox::scratch_dir`] are removed by [`Drop`] and by
@@ -108,6 +116,8 @@ pub struct RealSandbox {
     runtime_env: Vec<(String, String)>,
     grace: Duration,
     scratch: Mutex<Vec<PathBuf>>,
+    /// Each staged file and the hash of what was copied.
+    staged: Mutex<Vec<(PathBuf, [u8; 32])>>,
 }
 
 impl std::fmt::Debug for RealSandbox {
@@ -143,6 +153,7 @@ impl RealSandbox {
             runtime_env,
             grace: RUNTIME_GRACE,
             scratch: Mutex::new(Vec::new()),
+            staged: Mutex::new(Vec::new()),
         })
     }
 
@@ -216,6 +227,12 @@ impl RealSandbox {
         std::io::copy(&mut from, &mut to).map_err(|e| stage_err(&dest, e))?;
         to.set_permissions(std::fs::Permissions::from_mode(0o755))
             .map_err(|e| stage_err(&dest, e))?;
+        drop(to);
+        // The hash of what is on disk now, checked again before every container run.
+        let hash = sha256_of(&dest).map_err(|e| stage_err(&dest, e))?;
+        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        staged.retain(|(path, _)| path != &dest);
+        staged.push((dest, hash));
         Ok(format!(".container-target/stage/{name}"))
     }
 
@@ -478,6 +495,11 @@ impl Sandbox for RealSandbox {
             .filter(|n| before.get(*n) != after.get(*n))
             .map(|n| n.strip_prefix("./").unwrap_or(n).to_string())
             .collect();
+        // `find` lists a tree in directory order, which differs between two checkouts of the
+        // same commit; the changed paths are sorted so a refusal that prints them is stable
+        // (P3A-17). The bash prints them in `find` order.
+        let mut changed = changed;
+        changed.sort();
         let globs: Vec<MutateGlob> = globs.iter().cloned().collect();
         Mutated::new(changed, &globs)
             .map_err(|nothing| SandboxError::NothingChanged { globs: nothing.globs })
@@ -549,6 +571,14 @@ impl Sandbox for RealSandbox {
                         reason: format!("cannot start {} over: {e}", log.display()),
                     });
                 }
+            }
+        }
+        // A staged binary an earlier container overwrote is not the gate that was staged.
+        let staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        for (path, hash) in staged {
+            let plain = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+            if !plain || sha256_of(&path).ok() != Some(hash) {
+                return Err(SandboxError::StagedChanged { path });
             }
         }
         // The tree is mounted writable, so an earlier container could have left a link at the

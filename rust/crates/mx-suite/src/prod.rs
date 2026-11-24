@@ -27,18 +27,15 @@ pub struct ProdGlobs(NonEmpty<String>);
 
 impl ProdGlobs {
     /// Reads the profile's value as the bash gate does:
-    /// `read -r -a PROD_GLOBS <<< "${PROD_GLOBS:-}"`.
+    /// `mapfile -t PROD_GLOBS < <(tr -s '[:space:]' '\n' <<<"${PROD_GLOBS:-}" | sed '/^$/d')`.
     ///
-    /// `read` takes the FIRST LINE only and splits it on spaces and tabs, so a
-    /// value that spans two lines silently loses everything after the first
-    /// newline. That narrows what counts as production without a word, so the
-    /// pull request lists it under "Found, not fixed"; this function pins it,
-    /// and the test `a_second_line_is_ignored_as_the_bash_ignores_it` carries
-    /// the name of that decision.
+    /// The value splits on every run of whitespace, newlines included (bash line 83, #269).
+    /// An older gate used `read -r -a`, which stops at the first newline and dropped the
+    /// patterns of a second line without a word; this port never had that bug to preserve
+    /// (decision P3A-15, replacing the pin of the first interface).
     pub fn from_profile_value(value: &str) -> Result<Self, NoProdGlobs> {
-        let first_line = value.split('\n').next().unwrap_or("");
-        let words: Vec<String> = first_line
-            .split([' ', '\t'])
+        let words: Vec<String> = value
+            .split([' ', '\t', '\n', '\x0b', '\x0c', '\r'])
             .filter(|word| !word.is_empty())
             .map(str::to_string)
             .collect();
@@ -70,72 +67,214 @@ impl ProdGlobs {
     }
 }
 
-/// bash pattern matching over bytes, without extglob.
+/// bash pattern matching over bytes, as `[[ "$p" == $g ]]` does it with extglob on (the
+/// operator turns it on whatever `shopt` says): `*`, `?`, bracket classes with ranges,
+/// negation (`!` or `^`), POSIX classes `[:alpha:]`, equivalence classes `[=a=]` and
+/// collating symbols `[.a.]`, `\x`, and the extended patterns `?(..)`, `*(..)`, `+(..)`,
+/// `@(..)` and `!(..)` with `|` alternatives, nested. The matcher decides on bytes, the way
+/// bash does in the C locale.
+///
+/// A construct this matcher does not understand answers YES, "this is a production path":
+/// the unsafe error here is calling a production path ordinary, because the receipt then
+/// speaks for less than the profile asked (decision P3A-16). An unknown `[:name:]` is the
+/// one such construct.
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    let (mut p, mut t) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while t < text.len() {
-        let step = match pattern.get(p) {
-            Some(b'*') => {
-                star = Some((p, t));
-                p += 1;
-                continue;
-            }
-            Some(b'?') => Some(1),
-            Some(b'[') => match class_match(pattern, p, text[t]) {
-                Class::Hit(width) => Some(width),
-                Class::Miss => None,
-                // bash reads a `[` that never closes as a plain `[`.
-                Class::Unclosed => (text[t] == b'[').then_some(1),
-            },
-            Some(b'\\') if p + 1 < pattern.len() => (pattern[p + 1] == text[t]).then_some(2),
-            Some(&c) => (c == text[t]).then_some(1),
-            None => None,
-        };
-        match step {
-            Some(width) => {
-                p += width;
-                t += 1;
-            }
-            None => match star {
-                Some((sp, st)) => {
-                    p = sp + 1;
-                    t = st + 1;
-                    star = Some((sp, st + 1));
-                }
-                None => return false,
-            },
+    full(pattern, text, &mut 0)
+}
+
+/// Pattern work done so far, to bound a pattern that backtracks without end. Past the limit the
+/// answer is yes, for the reason above.
+const STEP_LIMIT: u64 = 2_000_000;
+
+fn full(pattern: &[u8], text: &[u8], steps: &mut u64) -> bool {
+    *steps += 1;
+    if *steps > STEP_LIMIT {
+        return true;
+    }
+    let Some(&first) = pattern.first() else { return text.is_empty() };
+    // An extended pattern: one of ?*+@! right before a `(` that closes.
+    if matches!(first, b'?' | b'*' | b'+' | b'@' | b'!') && pattern.get(1) == Some(&b'(') {
+        if let Some((alts, after)) = group(pattern, 1) {
+            return extended(first, &alts, &pattern[after..], text, steps);
         }
     }
-    pattern[p..].iter().all(|&c| c == b'*')
+    match first {
+        b'*' => (0..=text.len()).any(|k| full(&pattern[1..], &text[k..], steps)),
+        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps),
+        b'[' => match class(pattern, text.first().copied()) {
+            Class::Hit(width) => !text.is_empty() && full(&pattern[width..], &text[1..], steps),
+            Class::Miss => false,
+            // bash reads a `[` that never closes as a plain `[`.
+            Class::Unclosed => {
+                text.first() == Some(&b'[') && full(&pattern[1..], &text[1..], steps)
+            }
+            Class::Unknown => true,
+        },
+        b'\\' if pattern.len() > 1 => {
+            text.first() == Some(&pattern[1]) && full(&pattern[2..], &text[1..], steps)
+        }
+        c => text.first() == Some(&c) && full(&pattern[1..], &text[1..], steps),
+    }
+}
+
+/// The alternatives of the group whose `(` is at `pattern[open]`, and the index after its `)`.
+/// `None` when the group never closes (then `@(` is plain characters).
+fn group(pattern: &[u8], open: usize) -> Option<(Vec<&[u8]>, usize)> {
+    let mut depth = 0_usize;
+    let mut alts = Vec::new();
+    let mut start = open + 1;
+    let mut i = open;
+    while i < pattern.len() {
+        match pattern[i] {
+            b'\\' => i += 1,
+            b'[' => {
+                // a bracket expression inside the group may hold `)` or `|`
+                if let Some(end) = bracket_end(pattern, i) {
+                    i = end - 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    alts.push(&pattern[start..i]);
+                    return Some((alts, i + 1));
+                }
+            }
+            b'|' if depth == 1 => {
+                alts.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extended(op: u8, alts: &[&[u8]], rest: &[u8], text: &[u8], steps: &mut u64) -> bool {
+    let one = |span: &[u8], steps: &mut u64| alts.iter().any(|alt| full(alt, span, steps));
+    match op {
+        b'@' => (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps)),
+        b'?' => {
+            full(rest, text, steps)
+                || (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps))
+        }
+        b'*' | b'+' => repeat(op == b'+', alts, rest, text, steps),
+        _ => (0..=text.len()).any(|k| !one(&text[..k], steps) && full(rest, &text[k..], steps)),
+    }
+}
+
+/// `*(..)` (zero or more) and `+(..)` (one or more) followed by `rest`.
+fn repeat(at_least_one: bool, alts: &[&[u8]], rest: &[u8], text: &[u8], steps: &mut u64) -> bool {
+    if at_least_one {
+        // One round, which may be empty when an alternative is, then any number more.
+        return (0..=text.len()).any(|k| {
+            alts.iter().any(|alt| full(alt, &text[..k], steps))
+                && repeat(false, alts, rest, &text[k..], steps)
+        });
+    }
+    if full(rest, text, steps) {
+        return true;
+    }
+    // A further round must take at least one byte, or the recursion never ends.
+    (1..=text.len()).any(|k| {
+        alts.iter().any(|alt| full(alt, &text[..k], steps))
+            && repeat(false, alts, rest, &text[k..], steps)
+    })
 }
 
 /// What a `[` in a pattern means for one byte of the text.
 enum Class {
     /// The byte is in the class, which is this many bytes of the pattern wide.
     Hit(usize),
-    /// A well-formed class that does not hold the byte.
+    /// A well-formed class that does not hold the byte (or there is no byte).
     Miss,
     /// The class never closes, so the `[` is an ordinary character.
     Unclosed,
+    /// A `[:name:]` this matcher does not know.
+    Unknown,
 }
 
-/// Matches one byte against the class that starts at `pattern[at]`.
-fn class_match(pattern: &[u8], at: usize, byte: u8) -> Class {
+/// The index just past the `]` that closes the bracket expression at `pattern[at]`, if it closes.
+fn bracket_end(pattern: &[u8], at: usize) -> Option<usize> {
     let mut i = at + 1;
+    if matches!(pattern.get(i), Some(b'!' | b'^')) {
+        i += 1;
+    }
+    let first = i;
+    loop {
+        let c = *pattern.get(i)?;
+        if c == b']' && i > first {
+            return Some(i + 1);
+        }
+        if c == b'[' && matches!(pattern.get(i + 1), Some(b':' | b'=' | b'.')) {
+            let kind = pattern[i + 1];
+            let close = (i + 2..pattern.len().saturating_sub(1))
+                .find(|&j| pattern[j] == kind && pattern[j + 1] == b']');
+            if let Some(j) = close {
+                i = j + 2;
+                continue;
+            }
+        }
+        i += if c == b'\\' { 2 } else { 1 };
+    }
+}
+
+fn posix_class(name: &[u8], byte: u8) -> Option<bool> {
+    Some(match name {
+        b"alpha" => byte.is_ascii_alphabetic(),
+        b"digit" => byte.is_ascii_digit(),
+        b"alnum" => byte.is_ascii_alphanumeric(),
+        b"upper" => byte.is_ascii_uppercase(),
+        b"lower" => byte.is_ascii_lowercase(),
+        b"space" => matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'),
+        b"blank" => matches!(byte, b' ' | b'\t'),
+        b"punct" => byte.is_ascii_punctuation(),
+        b"print" => (0x20..0x7f).contains(&byte),
+        b"graph" => (0x21..0x7f).contains(&byte),
+        b"cntrl" => byte < 0x20 || byte == 0x7f,
+        b"xdigit" => byte.is_ascii_hexdigit(),
+        b"ascii" => byte < 0x80,
+        b"word" => byte.is_ascii_alphanumeric() || byte == b'_',
+        _ => return None,
+    })
+}
+
+/// Matches the first byte of the text against the class that starts at `pattern[0]`.
+fn class(pattern: &[u8], byte: Option<u8>) -> Class {
+    let Some(end) = bracket_end(pattern, 0) else { return Class::Unclosed };
+    let Some(byte) = byte else { return Class::Miss };
+    let mut i = 1;
     let negate = matches!(pattern.get(i), Some(b'!' | b'^'));
     if negate {
         i += 1;
     }
-    let first = i;
     let mut hit = false;
-    loop {
-        let Some(&c) = pattern.get(i) else { return Class::Unclosed };
-        if c == b']' && i > first {
-            break;
+    // `end - 1` is the `]` that closes the expression; a `]` right after the opening is a member.
+    while i < end - 1 {
+        let c = pattern[i];
+        if c == b'[' && matches!(pattern.get(i + 1), Some(b':' | b'=' | b'.')) {
+            let kind = pattern[i + 1];
+            let close = (i + 2..end - 1).find(|&j| pattern[j] == kind && pattern[j + 1] == b']');
+            if let Some(j) = close {
+                let name = &pattern[i + 2..j];
+                match kind {
+                    b':' => match posix_class(name, byte) {
+                        Some(yes) => hit |= yes,
+                        None => return Class::Unknown,
+                    },
+                    // `[=a=]` and `[.a.]` name one character in the C locale; a longer name
+                    // is a collating element this matcher does not know.
+                    _ if name.len() == 1 => hit |= name[0] == byte,
+                    _ => return Class::Unknown,
+                }
+                i = j + 2;
+                continue;
+            }
         }
         let (lo, next) =
-            if c == b'\\' && i + 1 < pattern.len() { (pattern[i + 1], i + 2) } else { (c, i + 1) };
+            if c == b'\\' && i + 1 < end { (pattern[i + 1], i + 2) } else { (c, i + 1) };
         if pattern.get(next) == Some(&b'-') && pattern.get(next + 1).is_some_and(|&e| e != b']') {
             let hi = pattern[next + 1];
             hit |= (lo..=hi).contains(&byte);
@@ -145,7 +284,7 @@ fn class_match(pattern: &[u8], at: usize, byte: u8) -> Class {
             i = next;
         }
     }
-    if hit == negate { Class::Miss } else { Class::Hit(i + 1 - at) }
+    if hit == negate { Class::Miss } else { Class::Hit(end) }
 }
 
 #[cfg(test)]
@@ -188,15 +327,21 @@ mod tests {
     }
 
     #[test]
-    fn a_second_line_is_ignored_as_the_bash_ignores_it() {
-        // Found, not fixed (P30-8): `read -r -a` stops at the first newline, so
-        // PROD_GLOBS="bin/*<newline>docs/*" declares one pattern.
-        assert_eq!(globs("bin/* lib/*\ndocs/*"), ["bin/*", "lib/*"]);
+    fn a_second_line_is_read_as_the_bash_reads_it() {
+        // bash line 83 (#269): `tr -s '[:space:]' '\n'` splits on every whitespace byte, so
+        // the second line's patterns count (P3A-15).
+        assert_eq!(globs("bin/* lib/*\ndocs/*"), ["bin/*", "lib/*", "docs/*"]);
+        assert_eq!(globs("a\n\n b\t\x0bc\r\x0cd"), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_leading_newline_does_not_hide_the_patterns_after_it() {
+        assert_eq!(globs("\nbin/*"), ["bin/*"]);
     }
 
     #[test]
     fn an_empty_or_blank_value_declares_nothing() {
-        for value in ["", " ", "\t", "   \t  ", "\n", "\nbin/*"] {
+        for value in ["", " ", "\t", "   \t  ", "\n", " \n\r\x0b\x0c "] {
             assert_eq!(ProdGlobs::from_profile_value(value), Err(NoProdGlobs), "{value:?}");
         }
     }
@@ -284,9 +429,36 @@ mod tests {
     }
 
     #[test]
-    fn extglob_is_not_special() {
-        assert!(!matches("@(a|b)", "a"));
-        assert!(matches("@(a|b)", "@(a|b)"));
+    fn extended_patterns_follow_bash_with_extglob_on() {
+        // bash turns extglob on inside [[ ]] whatever `shopt` says.
+        assert!(matches("@(a|b)", "a"));
+        assert!(!matches("@(a|b)", "c"));
+        assert!(matches("src/@(a|b).rs", "src/b.rs"));
+        assert!(matches("?(x)y", "y") && matches("?(x)y", "xy") && !matches("?(x)y", "xxy"));
+        assert!(matches("*(ab)c", "c") && matches("*(ab)c", "ababc") && !matches("*(ab)c", "abac"));
+        assert!(matches("+(ab)c", "abc") && !matches("+(ab)c", "c"));
+        assert!(matches("+(|a)b", "b"), "an empty alternative is one empty round");
+        assert!(matches("!(a)b", "xb") && !matches("!(a)b", "ab") && matches("!(a)b", "b"));
+        assert!(matches("bin/!(*.md)", "bin/run") && !matches("bin/!(*.md)", "bin/a.md"));
+        assert!(matches("@(a|@(b|c))d", "cd"), "groups nest");
+        assert!(matches("@(a", "@(a"), "a group that never closes is plain characters");
+    }
+
+    #[test]
+    fn posix_classes_equivalence_classes_and_collating_symbols_follow_bash() {
+        assert!(matches("[[:alpha:]]x", "ax") && !matches("[[:alpha:]]x", "1x"));
+        assert!(matches("[![:digit:]]", "a") && !matches("[![:digit:]]", "5"));
+        assert!(matches("[[:upper:][:digit:]]", "Q") && matches("[[:upper:][:digit:]]", "7"));
+        assert!(matches("[[=a=]]", "a") && !matches("[[=a=]]", "b"));
+        assert!(matches("[[.a.]]", "a"));
+        assert!(matches("[]a]", "]") && matches("[!]a]", "b"));
+    }
+
+    #[test]
+    fn a_class_name_this_matcher_does_not_know_answers_production_not_ordinary() {
+        // Fail closed (P3A-16): calling a production path ordinary is the unsafe error.
+        assert!(matches("[[:nosuch:]]", "anything"));
+        assert!(matches("[[.space.]]", "anything"));
     }
 
     #[test]

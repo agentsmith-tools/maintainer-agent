@@ -91,6 +91,17 @@ MUTANTS = [
  ("M62", B+"real.rs", "        ensure_plain_dir(&target)?;\n", "", "a linked .container-target is followed"),
  ("M63", B+"real.rs", "        ensure_plain_dir(&dir)?;\n", "", "a linked stage directory is followed"),
  ("M64", B+"real.rs", "Ok(meta) if meta.is_dir() => Ok(()),", "Ok(_) => Ok(()),", "any entry counts as a plain directory"),
+ ("M65", B+"real.rs", "            if !plain || sha256_of(&path).ok() != Some(hash) {", "            if false && (!plain || sha256_of(&path).ok() != Some(hash)) {", "a replaced staged binary is run"),
+ ("M66", B+"real.rs", "        staged.retain(|(path, _)| path != &dest);\n", "", "staging again leaves the old hash recorded"),
+ ("M67", B+"real.rs", "        changed.sort();\n", "", "changed paths are in find order"),
+ ("M68", B+"real.rs", '.field("runtime_env_names", &names)', '.field("runtime_env", &self.runtime_env)', "Debug prints the values of the runtime environment"),
+ ("M69", B+"error.rs", "that\\n  asks git what is tracked will fail for that reason and not for the code's.\"", "that\\n  asks git what is tracked will fail for that reason.\"", "the index note loses its end"),
+ ("M70", S+"prod.rs", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps),", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps) && false,", "? never matches"),
+ ("M71", S+"prod.rs", '        b"alpha" => byte.is_ascii_alphabetic(),', '        b"alpha" => byte.is_ascii_alphanumeric(),', "[:alpha:] holds digits"),
+ ("M72", S+"prod.rs", '        _ => (0..=text.len()).any(|k| !one(&text[..k], steps) && full(rest, &text[k..], steps)),', '        _ => (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps)),', "!(..) matches what the group matches"),
+ ("M73", S+"prod.rs", "    if !at_least_one && full(rest, text, steps) {", "    if full(rest, text, steps) {", "+(..) matches zero rounds"),
+ ("M74", S+"prod.rs", "                        None => return Class::Unknown,", "                        None => return Class::Miss,", "an unknown class name answers not production"),
+ ("M75", S+"prod.rs", "            .split([' ', '\\t', '\\n', '\\x0b', '\\x0c', '\\r'])", "            .split([' ', '\\t'])", "only blanks separate patterns"),
  ("M60", B+"real.rs", "let mut bytes = [0_u8; 8];", "let mut bytes = [0_u8; 7];", "scratch names are 7 characters"),
 ]
 

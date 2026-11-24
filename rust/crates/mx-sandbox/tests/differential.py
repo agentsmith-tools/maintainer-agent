@@ -122,6 +122,58 @@ def gen_path():
     return "".join(RNG.choice(chars) for _ in range(RNG.randint(0, 9)))
 
 
+EXT_PIECES = ["a", "b", "c", ".", "/", "x", "src", "bin/", "*", "?", "-", "_", "1", "é"]
+
+
+def gen_extended():
+    """Patterns with POSIX classes, equivalence classes, collating symbols and extglob, which
+    the first matcher did not have (#275)."""
+    def group(depth):
+        alts = ["".join(RNG.choice(EXT_PIECES) for _ in range(RNG.randint(0, 3))) for _ in range(RNG.randint(1, 3))]
+        if depth < 2 and RNG.random() < 0.3:
+            alts[0] += RNG.choice("?*+@!") + "(" + group(depth + 1) + ")"
+        return "|".join(alts)
+    classes = ["[[:alpha:]]", "[[:digit:]]", "[![:digit:]]", "[^[:upper:]]", "[[:alnum:]_]", "[[:punct:]]", "[[:space:]]",
+               "[[:lower:][:digit:]]", "[[=a=]]", "[[.a.]]", "[[=b=]c]", "[[:xdigit:]]", "[[:cntrl:]]", "[[:print:]]", "[[:graph:]]",
+               "[[:blank:]]", "[a-c[:digit:]]", "[]a]", "[!]a]"]
+    out = []
+    for _ in range(RNG.randint(1, 4)):
+        r = RNG.random()
+        if r < 0.45:
+            out.append(RNG.choice("?*+@!") + "(" + group(0) + ")")
+        elif r < 0.75:
+            out.append(RNG.choice(classes))
+        else:
+            out.append(RNG.choice(EXT_PIECES))
+    return "".join(out)
+
+
+def section_glob_extended(count):
+    pairs = []
+    for _ in range(count):
+        pat = gen_extended().replace(" ", "_")
+        path = "".join(RNG.choice(list("abcx/.-_*?1 [](|)@!+é\\") + ["A", "Z", "9", "src/", "bin/"]) for _ in range(RNG.randint(0, 8)))
+        pairs.append((pat, path))
+    pairs += [("@(a|b)", "a"), ("+(ab)", "abab"), ("!(a)", "b"), ("!(a)", "a"), ("?(a)b", "b"), ("*(a|b)c", "abac"),
+              ("[[:alpha:]]", "a"), ("[![:digit:]]", "5"), ("src/@(a|b).rs", "src/a.rs"), ("bin/!(*.md)", "bin/x.md"),
+              ("@(a", "@(a"), ("@()", ""), ("!()", "x"), ("[[:nosuch:]]", "a")]
+    stdin = "".join(f"{p}\t{q}\n" for p, q in pairs).encode()
+    script = 'while IFS=$\'\\t\' read -r g p; do if [[ "$p" == $g ]]; then echo 1; else echo 0; fi; done'
+    a = bash(script, stdin=stdin)
+    b = probe(["glob"], stdin=stdin)
+    la, lb = text(a[1]).split("\n"), text(b[1]).split("\n")
+    assert len(la) == len(lb), (len(la), len(lb))
+    for i, (x, y) in enumerate(zip(la, lb)):
+        pat, path = pairs[i] if i < len(pairs) else ("", "")
+
+        def explain(xa, yb, pat=pat):
+            # Fail closed (P3A-16): the port may say production where bash says not, never the reverse.
+            if xa[1] == b"0" and yb[1] == b"1":
+                return "P3A-16: a construct the matcher does not know answers production"
+            return None
+        record("glob-extended", f"{pat!r} vs {path!r}", (a[0], x.encode(), b""), (b[0], y.encode(), b""), explain)
+
+
 def section_glob(count):
     pairs = []
     for _ in range(count):
@@ -344,6 +396,10 @@ def section_mutation(count):
         da, db = tree_digest(base / "a"), tree_digest(base / "b")
         # The probe prints a die text where the bash returns a status; map the two shapes.
         err = text(b[2])
+        # The bash lists changed paths in the order `find` visits two separately built trees,
+        # which is directory order on the filesystem; the port sorts them (P3A-17), so the
+        # harness sorts the bash list too.
+        a = (a[0], b"".join(sorted(a[1].splitlines(keepends=True))), a[2])
         if b[0] == 1 and "the mutation changed nothing" in err:
             b = (0, b"", b"")
         elif b[0] == 1 and "mutation failed to apply" in err:
@@ -443,6 +499,10 @@ def nested_functions():
     begin = pt
     while not lines[begin].lstrip().startswith('"$rt"'):
         begin -= 1
+    # `split_extra_args` runs on the line before the call and fills EXTRA_ARGS.
+    if "split_extra_args" in lines[begin - 1]:
+        begin -= 1
+    assert "split_extra_args" in "\n".join(lines[begin:begin + 2]), "the prefetch block lost its split_extra_args line"
     stop = next(i for i in range(pt, len(lines)) if 'prefetch.log" 2>&1' in lines[i])
     body = "\n".join(lines[begin:stop + 1]).rstrip(" \\")
     return run_in, "run_prefetch() {\n" + body + "\n}"
@@ -513,8 +573,6 @@ def section_flags(count):
             def explain(x, y, name=name, invalid=invalid, b=b):
                 if invalid and y[0] != 0 and b"not a positive" in b[2]:
                     return "P30-3: bash hands a limit that is zero or not an amount to the runtime; the port refuses it"
-                if name == "spaced":
-                    return "P30-10: bash splits suite_podman_args on blanks, the port on newlines only"
                 return None
             record("flags", f"flags{i} {name} {kind}", (a[0], b"\0".join(argv_a or []), b""), (b[0], b"\0".join(argv_b or []), b""), explain)
         shutil.rmtree(base, ignore_errors=True)
@@ -523,6 +581,7 @@ def section_flags(count):
 def main():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     plan = [("glob", lambda: section_glob(int(os.environ.get("N_GLOB", "1500")))),
+            ("glob-extended", lambda: section_glob_extended(int(os.environ.get("N_GLOBX", "600")))),
             ("escapes", lambda: section_escapes(int(os.environ.get("N_ESC", "70")))),
             ("selection", lambda: section_selection(int(os.environ.get("N_SEL", "90")))),
             ("ran", section_ran),
