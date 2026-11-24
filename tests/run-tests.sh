@@ -12070,6 +12070,15 @@ for cp in docs/verifying.md README.md CHANGELOG.md; do
         || ok "the characterization suite does not cover $cp"
 done
 
+# The characterization suite lists every path its cases characterize (FU1-2). The check reads the
+# case files and suite_covers; it is a file of its own so that shellcheck does not need more memory
+# for this one.
+chc_out="$(MX_TREE="$root" bash "$suite_root/tests/characterization-covers.sh" 2>&1)"; chc_rc=$?
+chc_n="$(sed -n 's/^\([0-9][0-9]*\) passed, 0 failed$/\1/p' <<<"$chc_out")"
+[ "$chc_rc" = 0 ] && [ "${chc_n:-0}" -gt 0 ] \
+    && ok "the characterization suite lists every path its cases characterize ($chc_n checks)" \
+    || bad "tests/characterization-covers.sh failed (rc=$chc_rc): $(grep -E '^  FAIL' <<<"$chc_out" | head -3 | tr '\n' ' ' | cut -c1-300)"
+
 # suite_ran counts PASSED cases, and 0 whenever the summary line is missing.
 chl="$stub_dir/chlog"; rm -rf "$chl"; mkdir -p "$chl"
 printf '== run-backends.sh: 52 cases\nPASS  one\n52 cases, 50 passed, 2 failed\nfiles run: 1\n' > "$chl/with"
