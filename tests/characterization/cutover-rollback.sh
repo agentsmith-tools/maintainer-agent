@@ -412,6 +412,23 @@ case_lock_file_free() {
 }
 cu_case "rollback: a lock file nobody holds is not a run in flight" case_lock_file_free
 
+case_home_with_pipe() {
+    cu_home_at "$CZ_CASE/ho|me"
+    cu_deploy; cu_build $CU_PROGRAMS
+    cu_stamp $CU_PROGRAMS
+    cu_swap_files maintainer-merge maintainer-doctor maintainer-repo run run-instance
+    # a swap that never began: a rollback drops the saved copy of alert.sh
+    cp -p "$(cu_installed alert)" "$(cu_installed alert).sh"
+    printf 'decoy\n' > "$CZ_CASE/ho"
+    cu_run rollback
+    cz_expect_rc 1
+    cz_expect_stdout_empty
+    cz_expect_stderr "cutover.sh: HOME holds a '|'; refused"
+    cz_check "the file a path cut at the pipe would name" "$(cat "$CZ_CASE/ho" 2>/dev/null)" decoy
+    cz_check "the saved copy of alert.sh" "$([ -f "$CU_SHARE/alert.sh.sh" ] && echo kept)" kept
+}
+cu_case "rollback: a HOME with a pipe is refused by name before a step can be cut at it" case_home_with_pipe
+
 case_flock_missing_leaves_machine() {
     swapped
     rm -f "$CU_TOOLS/flock"

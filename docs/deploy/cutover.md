@@ -7,7 +7,10 @@ controlled steps and moves it back in one. It is bash on purpose: the way back m
 programs it may have to back away from.
 
 The order is **build, shadow, live, status, rollback**. Every step refuses before it changes anything,
-exits 64 for a usage error and 1 for a refusal, and names what it refused on standard error.
+exits 64 for a usage error and 1 for a refusal, and names what it refused on standard error. It refuses a
+`HOME`, a checkout path or a build directory that is not absolute or holds a newline or another control
+character, a `|` or a `:`, because those paths reach `PATH` entries, table lines and the list of steps of a
+rollback. A profile or task name with anything but letters, digits, `.`, `_` and `-` is refused the same way.
 
 ## 1. build
 

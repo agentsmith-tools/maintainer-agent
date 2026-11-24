@@ -120,6 +120,76 @@ case_home_colon() {
 }
 cu_case "refusal: a HOME with a colon is refused" case_home_colon
 
+case_home_pipe_every_subcommand() {
+    local sub
+    for sub in "build" "shadow" "live" "status" "rollback --dry-run"; do
+        cz_set HOME "/tmp/a|b"
+        # shellcheck disable=SC2086
+        cu_run $sub
+        cz_check "$sub with a pipe in HOME exits" "$CZ_RC" 1
+        cz_expect_stderr_first "cutover.sh: HOME holds a '|'; refused"
+        cz_expect_stdout_empty
+    done
+}
+cu_case "refusal: a HOME with a pipe is refused by every subcommand" case_home_pipe_every_subcommand
+
+case_home_control_character() {
+    cz_set HOME $'/tmp/a\tb'
+    cu_run status
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: HOME holds a control character; refused"
+    cz_set HOME $'/tmp/a\x1fb'
+    cu_run status
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: HOME holds a control character; refused"
+}
+cu_case "refusal: a HOME with a tab or a unit separator is refused" case_home_control_character
+
+case_dir_pipe() {
+    local sub
+    for sub in live status; do
+        cu_run "$sub" --build-dir "/tmp/a|b"
+        cz_check "$sub with a pipe in the directory exits" "$CZ_RC" 1
+        cz_expect_stderr_first "cutover.sh: the build directory holds a '|'; refused"
+    done
+    cu_fake_cargo
+    cu_run build --out "$CZ_CASE/o|ut"
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: the build directory holds a '|'; refused"
+    [ ! -e "$CZ_CASE/o|ut" ] || cz_note_fail "build created a directory with a pipe in its name"
+}
+cu_case "refusal: a build directory with a pipe is refused by build, live and status" case_dir_pipe
+
+case_checkout_pipe() {
+    mkdir -p "$CZ_CASE/fx|x"
+    cp -a "$CU_FX/." "$CZ_CASE/fx|x/"
+    CU_FX="$CZ_CASE/fx|x"
+    cu_run status
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: the checkout path holds a '|'; refused"
+}
+cu_case "refusal: a checkout whose path holds a pipe is refused" case_checkout_pipe
+
+case_not_a_checkout_without_rust() {
+    mkdir -p "$CZ_CASE/half/scripts"
+    cp "$CU_FX/scripts/cutover.sh" "$CZ_CASE/half/scripts/cutover.sh"; : > "$CZ_CASE/half/install.sh"
+    CU_FX="$CZ_CASE/half"
+    cu_run status
+    cz_expect_rc 1
+    cz_expect_stderr_has "is not a maintainer-agent checkout"
+}
+cu_case "refusal: a tree with install.sh and no rust/ is not a checkout" case_not_a_checkout_without_rust
+
+case_not_a_checkout_without_install() {
+    mkdir -p "$CZ_CASE/half/scripts" "$CZ_CASE/half/rust"
+    cp "$CU_FX/scripts/cutover.sh" "$CZ_CASE/half/scripts/cutover.sh"
+    CU_FX="$CZ_CASE/half"
+    cu_run status
+    cz_expect_rc 1
+    cz_expect_stderr_has "is not a maintainer-agent checkout"
+}
+cu_case "refusal: a tree with rust/ and no install.sh is not a checkout" case_not_a_checkout_without_install
+
 case_not_a_checkout() {
     mkdir -p "$CZ_CASE/loose/scripts"
     cp "$CU_FX/scripts/cutover.sh" "$CZ_CASE/loose/scripts/cutover.sh"
@@ -187,6 +257,19 @@ case_dir_world_writable_sticky() {
     cz_expect_stderr_first "cutover.sh: $CU_BUILD is writable by everyone (mode 1777); refused"
 }
 cu_case "refusal: a sticky world-writable build directory is refused too" case_dir_world_writable_sticky
+
+case_dir_writable_by_others_only() {
+    cu_deploy; cu_build
+    chmod 772 "$CU_BUILD"
+    cu_run live --build-dir "$CU_BUILD"
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: $CU_BUILD is writable by everyone (mode 772); refused"
+    chmod 770 "$CU_BUILD"
+    cu_run live --build-dir "$CU_BUILD"
+    cz_expect_stderr_lacks_writable
+}
+cz_expect_stderr_lacks_writable() { cz_expect_lacks stderr "writable by everyone"; }
+cu_case "refusal: a build directory writable by others but not readable (mode 772) is refused as writable" case_dir_writable_by_others_only
 
 case_dir_group_writable_ok() {
     cu_deploy; cu_build

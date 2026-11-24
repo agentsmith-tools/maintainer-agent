@@ -136,6 +136,15 @@ case_marker_with_comment_current() {
 }
 cu_case "status: comment lines of the marker do not make it stale" case_marker_with_comment_current
 
+case_marker_without_final_newline() {
+    cu_deploy; cu_build
+    printf '%s' "$(cu_table)" > "$CU_BUILD/shadow-ok"
+    cu_run status --build-dir "$CU_BUILD"
+    cz_expect_rc 0
+    cz_expect_stdout_has "shadow-ok: current"
+}
+cu_case "status: a shadow-ok with no final newline is read in full" case_marker_without_final_newline
+
 case_marker_stale() {
     cu_deploy; cu_build
     cu_table > "$CU_BUILD/shadow-ok"

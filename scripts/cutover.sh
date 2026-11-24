@@ -48,9 +48,14 @@ need() {
 
 nl_free() { case "$1" in *$'\n'*) return 1 ;; esac; return 0; }
 
-# A path that reaches argv, a PATH entry or a table line: absolute, one line, no colon.
+# A path that reaches argv, a PATH entry, a table line or the list of steps of a rollback: absolute, one
+# line, no control character, no colon and no pipe.
 plain_path() {  # $1 = what it is, $2 = the path
     nl_free "$2" || die "$1 holds a newline; refused"
+    case "$2" in
+        *\|*) die "$1 holds a '|'; refused" ;;
+    esac
+    [[ "$2" =~ [[:cntrl:]] ]] && die "$1 holds a control character; refused"
     case "$2" in
         *:*) die "$1 holds a colon, which would split a PATH entry; refused" ;;
         /*) ;;
@@ -213,7 +218,8 @@ read_stamp() {
     if [ "$size" != "$bare" ]; then ST_ERR="RUST_STAMP holds a NUL byte"; return 1; fi
     text="$(cat -- "$stamp_file" 2>/dev/null; printf x)" || { ST_ERR="$stamp_file cannot be read"; return 1; }
     text="${text%x}"
-    while IFS= read -r line || [ -n "$line" ]; do
+    # The here-string ends the last line, so a stamp whose last line has no newline is read in full.
+    while IFS= read -r line; do
         [ -n "$line" ] || continue
         if ! [[ "$line" =~ ^[0-9A-Fa-f]{64}\ \ . ]]; then
             ST_ERR="RUST_STAMP has a line that is not \`<sha256>  <path>\`: $line"; return 1
@@ -445,7 +451,8 @@ cmd_rollback() {
 
     # Every program is judged before the first is moved. A saved original or an installed
     # file that is a link is refused: a rollback never follows one and never replaces one.
-    local i installed backup ihash bhash steps=() restored=0 n
+    local i installed backup ihash bhash restored=0 n
+    local skind=() ssrc=() sdst=()   # the steps, one entry in each array: no field is cut out of a joined string
     for i in "${!ST_PATH[@]}"; do
         installed="${ST_PATH[$i]}"; backup="$installed.sh"
         if [ -L "$installed" ]; then die "cannot roll back: $installed is a symbolic link; rollback never follows or replaces one"; fi
@@ -455,27 +462,26 @@ cmd_rollback() {
         if [ -f "$backup" ]; then bhash="$(sha256sum < "$backup" 2>/dev/null)" || bhash=""; bhash="${bhash%% *}"; fi
         if [ -n "$ihash" ] && [ "$ihash" = "${ST_HASH[$i]}" ]; then
             [ -n "$bhash" ] || die "cannot roll back: $backup is missing"
-            steps+=("mv|$backup|$installed"); restored=$((restored + 1))
+            skind+=(mv); ssrc+=("$backup"); sdst+=("$installed"); restored=$((restored + 1))
         elif [ -z "$bhash" ]; then
             :   # restored already: a rollback that failed part way can run again
         elif [ "$bhash" = "$ihash" ]; then
-            steps+=("rm|$backup")
+            skind+=(rm); ssrc+=("$backup"); sdst+=("")
         else
             die "cannot roll back: $installed no longer matches the stamp, so it is not the build this installer wrote"
         fi
     done
 
     printf '  rolling back from %s\n' "$share"
-    local step kind a b
-    for step in "${steps[@]}"; do
-        IFS='|' read -r kind a b <<<"$step"
-        case "$kind" in
+    local j
+    for j in "${!skind[@]}"; do
+        case "${skind[$j]}" in
             mv)
-                if [ "$dry" = 1 ]; then printf '  would: mv %s %s\n' "$a" "$b"
-                else mv -f -- "$a" "$b" || exit "$?"; fi ;;
+                if [ "$dry" = 1 ]; then printf '  would: mv %s %s\n' "${ssrc[$j]}" "${sdst[$j]}"
+                else mv -f -- "${ssrc[$j]}" "${sdst[$j]}" || exit "$?"; fi ;;
             rm)
-                if [ "$dry" = 1 ]; then printf '  would: rm -f %s\n' "$a"
-                else rm -f -- "$a" || exit "$?"; fi ;;
+                if [ "$dry" = 1 ]; then printf '  would: rm -f %s\n' "${ssrc[$j]}"
+                else rm -f -- "${ssrc[$j]}" || exit "$?"; fi ;;
         esac
     done
     if [ "$dry" = 1 ]; then printf '  would: rm -f %s\n' "$stamp_file"
@@ -1091,12 +1097,15 @@ cmd_shadow() {
         profiles+=("$p")
     done
     [ "${#profiles[@]}" -gt 0 ] || die "no profile is deployed under $share/profiles; shadow compared nothing"
-    local tasks_of=() t ts tl
+    local tasks_of=() t ts tl words
     for p in "${profiles[@]}"; do
         ts="$(profile_tasks "$p")"
-        [ -n "$ts" ] || die "the profile $p declares no TASKS; shadow would compare nothing for it"
+        # Split on white space (a newline too) without expanding a glob character against the working directory.
+        words=()
+        read -r -d '' -a words <<<"$ts" || true
+        [ "${#words[@]}" -gt 0 ] || die "the profile $p declares no TASKS; shadow would compare nothing for it"
         tl=""
-        for t in $ts; do
+        for t in "${words[@]}"; do
             plain_task "$t" || die "the task name $(shown "$t") of profile $p is not a plain name; refused before anything ran"
             tl="$tl $t"
         done

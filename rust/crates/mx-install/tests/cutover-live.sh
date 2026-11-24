@@ -47,9 +47,11 @@ cutover() { env -i HOME="$H" PATH="$PATH" LC_ALL=C TZ=UTC CARGO_TARGET_DIR="${CA
 
 H="$work/home"; mkdir -p "$H"
 env -i HOME="$H" PATH="$PATH" LC_ALL=C TZ=UTC bash "$co/install.sh" > "$work/plain.out" 2> "$work/plain.err" || fault "the bash install failed: $(head -3 "$work/plain.err")"
-listing() {  # type, path, mode, link target and the hash of the bytes of everything under HOME
+# Type, path, mode, link target and the hash of the bytes of everything under HOME. VERSION is left out:
+# every install stamps it with the time it ran (installed_at), and a rollback does not undo a stamp.
+listing() {
     ( cd "$H" && find . -mindepth 1 -printf '%y %p %m %l\n' | LC_ALL=C sort
-      find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum )
+      find . -type f ! -path ./.local/share/maintainer/VERSION -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum )
 }
 listing > "$work/plain.tree"
 B="$work/build"

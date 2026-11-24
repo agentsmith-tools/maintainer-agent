@@ -190,6 +190,14 @@ cu_case_end() {
     cz_case_end
 }
 
+# cu_home_at PATH: the sandbox HOME is PATH (a path the case chose) instead of home/.
+cu_home_at() {
+    rmdir "$CU_HOME" 2>/dev/null
+    CU_HOME="$1"; CU_SHARE="$CU_HOME/.local/share/maintainer"; CU_BIN="$CU_HOME/.local/bin"
+    mkdir -p "$CU_HOME"
+    CZ_E[HOME]="$CU_HOME"
+}
+
 # The checkout the script lives in, as a case sees it.
 cu_script() { printf '%s' "$CU_FX/scripts/cutover.sh"; }
 

@@ -29,6 +29,7 @@ CUT = "scripts/cutover.sh"
 U, R, S, B, L, SH = ("cutover-usage.sh", "cutover-rollback.sh", "cutover-status.sh", "cutover-build.sh",
                      "cutover-live.sh", "cutover-shadow.sh")
 CAP_SECONDS, CAP_BYTES = 300, 8_000_000_000
+CONTROL_CAP_SECONDS = 1800   # a control runs every case of a file, and the shadow file takes minutes
 
 # id, text that occurs once in scripts/cutover.sh, its replacement, case file, a word of the case that must fail
 MUTANTS = [
@@ -37,10 +38,12 @@ MUTANTS = [
     ("refusal-exit-code", "die() { printf '%s: %s\\n' \"$PROG\" \"$*\" >&2; exit 1; }", "die() { printf '%s: %s\\n' \"$PROG\" \"$*\" >&2; exit 2; }", U, "HOME unset"),
     ("need-tool-ignored", "command -v \"$t\" >/dev/null 2>&1 || die \"the tool '$t' is not on PATH; nothing was done\"", "command -v \"$t\" >/dev/null 2>&1 || true", U, "status without sha256sum"),
     ("newline-allowed", "nl_free() { case \"$1\" in *$'\\n'*) return 1 ;; esac; return 0; }", "nl_free() { return 0; }", U, "a HOME with a newline"),
+    ("pipe-allowed", "        *\\|*) die \"$1 holds a '|'; refused\" ;;", "", U, "pipe"),
+    ("control-character-allowed", '[[ "$2" =~ [[:cntrl:]] ]] && die "$1 holds a control character; refused"', 'true', U, "unit separator"),
     ("colon-allowed", "*:*) die \"$1 holds a colon, which would split a PATH entry; refused\" ;;", "*:*) ;;", U, "a build directory with a colon"),
     ("symlink-dir-followed", "[ ! -L \"$d\" ] || die \"$d is a symbolic link; the build directory must be a real directory\"", "true", U, "symbolic link"),
-    ("world-writable-allowed", "[ $(( ${perm: -1} & 2 )) -eq 0 ] || die", "[ $(( ${perm: -1} & 4 )) -eq 0 ] || die", U, "a world-writable build directory"),
-    ("not-a-checkout-allowed", '[ -f "$root/install.sh" ] && [ -d "$root/rust" ] \\\n    ||', '[ -f "$root/install.sh" ] \\\n    ||', U, "outside a checkout"),
+    ("world-writable-allowed", "[ $(( ${perm: -1} & 2 )) -eq 0 ] || die", "[ $(( ${perm: -1} & 4 )) -eq 0 ] || die", U, "writable"),
+    ("not-a-checkout-allowed", '[ -f "$root/install.sh" ] && [ -d "$root/rust" ] \\\n    ||', '[ -f "$root/install.sh" ] \\\n    ||', U, "checkout"),
     # rollback
     ("rollback-busy-check-off", 'if [ "$dry" = 0 ] && [ "$force" = 0 ]; then\n        local busy', 'if false; then\n        local busy', R, "run lock is held refuses"),
     ("rollback-busy-exit-code", "            exit 69", "            exit 70", R, "run lock is held refuses"),
@@ -57,11 +60,11 @@ MUTANTS = [
     ("rollback-restored-already-refused", 'elif [ -z "$bhash" ]; then', 'elif false; then', R, "interrupted rollback is skipped"),
     ("rollback-never-started-kept", 'elif [ "$bhash" = "$ihash" ]; then', 'elif false; then', R, "swap never began"),
     ("rollback-stamp-kept", 'else rm -f -- "$stamp_file" || exit "$?"; fi', 'else true; fi', R, "undone file for file"),
-    ("rollback-copies-instead-of-moves", 'else mv -f -- "$a" "$b" || exit "$?"; fi', 'else cp -- "$a" "$b" || exit "$?"; fi', R, "undone file for file"),
+    ("rollback-copies-instead-of-moves", 'else mv -f -- "${ssrc[$j]}" "${sdst[$j]}" || exit "$?"; fi', 'else cp -- "${ssrc[$j]}" "${sdst[$j]}" || exit "$?"; fi', R, "undone file for file"),
     ("rollback-count-zero", 'n="$restored"', 'n=0', R, "undone file for file"),
     ("stamp-hash-not-lowercased", "hash=\"$(printf '%s' \"$hash\" | tr 'A-F' 'a-f')\"", 'hash="$hash"', R, "upper-case hex"),
-    ("stamp-last-line-dropped", 'while IFS= read -r line || [ -n "$line" ]; do\n        [ -n "$line" ] || continue', 'while IFS= read -r line; do\n        [ -n "$line" ] || continue', R, "no newline is read in full"),
-    ("stamp-hash-length", '^[0-9A-Fa-f]{64}\\ \\ .', '^[0-9A-Fa-f]{63}\\ \\ .', R, "short hash"),
+    ("marker-last-line-dropped", 'while IFS= read -r line || [ -n "$line" ]; do\n        case "$line" in', 'while IFS= read -r line; do\n        case "$line" in', S, "no final newline"),
+    ("stamp-hash-length", '^[0-9A-Fa-f]{64}\\ \\ .', '^[0-9A-Fa-f]{63}\\ \\ .', R, "undone file for file"),
     ("stamp-duplicate-allowed", '[ "$i" != "$path" ] || { ST_ERR="RUST_STAMP lists $path twice"; return 1; }', 'true', R, "program listed twice"),
     ("stamp-unknown-program-allowed", 'n="$(name_of_installed "$path")" || { ST_ERR="RUST_STAMP lists $path, which is not a program this installer swaps"; return 1; }', 'n=""', R, "does not swap is refused"),
     ("stamp-nul-allowed", 'if [ "$size" != "$bare" ]; then ST_ERR="RUST_STAMP holds a NUL byte"; return 1; fi', 'true', R, "NUL byte"),
@@ -110,12 +113,13 @@ MUTANTS = [
     ("shadow-no-profiles-allowed", '[ "${#profiles[@]}" -gt 0 ] || die "no profile is deployed under', 'true || die "no profile is deployed under', SH, "an empty profiles directory"),
     ("shadow-profile-name-unchecked", 'plain_profile "$p" || die', 'true || die', SH, "a profile name with a space"),
     ("shadow-task-name-unchecked", 'plain_task "$t" || die', 'true || die', SH, "a task name with"),
-    ("shadow-no-tasks-allowed", '[ -n "$ts" ] || die "the profile $p declares no TASKS', 'true || die "the profile $p declares no TASKS', SH, "declares no tasks"),
+    ("shadow-blank-tasks-allowed", '[ "${#words[@]}" -gt 0 ] || die "the profile $p declares no TASKS', 'true || die "the profile $p declares no TASKS', SH, "only blanks"),
     ("shadow-exit-code-not-compared", 'elif [ "$rc_b" != "$rc_r" ]; then', 'elif false; then', SH, "another exit code"),
     ("shadow-stdout-not-compared", 'elif ! cmp -s "$base/bash/stdout.n" "$base/rust/stdout.n"; then', 'elif false; then', SH, "one byte of one prompt"),
     ("shadow-stderr-not-compared", 'elif ! cmp -s "$base/bash/stderr.n" "$base/rust/stderr.n"; then', 'elif false; then', SH, "extra line on standard error"),
     ("shadow-calls-not-compared", 'elif ! cmp -s "$base/bash/calls.txt" "$base/rust/calls.txt"; then', 'elif false; then', SH, "a gh write is refused"),
-    ("shadow-timeout-ignored", '124|137) why="the bash side timed out', '999) why="the bash side timed out', SH, "outlives the timeout"),
+    ("shadow-timeout-ignored", '124|137) why="the bash side timed out', '999) why="the bash side timed out', SH, "both sides time out"),
+    ("shadow-timeout-rust-ignored", '124|137) why="${why:+$why; }the Rust side timed out', '999) why="${why:+$why; }the Rust side timed out', SH, "outlives the timeout"),
     ("shadow-doctor-not-normalised", "doctor) normalise_doctor < \"$base/bash/$s\" > \"$base/bash/$s.n\"; normalise_doctor < \"$base/rust/$s\" > \"$base/rust/$s.n\" ;;", "doctor) cp -- \"$base/bash/$s\" \"$base/bash/$s.n\"; cp -- \"$base/rust/$s\" \"$base/rust/$s.n\" ;;", SH, "only in a timestamp and a pid"),
     ("shadow-normalise-everything", "doctor) normalise_doctor", "*) normalise_doctor", SH, "only the doctor's output is normalised"),
     ("shadow-fetch-not-swallowed", 'fetch) printf \'git %s\\n\' "${line% }" >> "$log/swallowed"; exit 0 ;;', 'fetch) exec "${CUTOVER_REAL_GIT:?}" "$@" ;;', SH, "git fetch is swallowed"),
@@ -134,7 +138,7 @@ MUTANTS = [
     ("shadow-token-passed", '( cd -- "$cwd" && exec env -i "${envv[@]}" timeout', '( cd -- "$cwd" && exec env "${envv[@]}" timeout', SH, "token in the caller"),
     ("shadow-scratch-kept", '    if [ -z "$SH_KEEP" ]; then\n        # shellcheck disable=SC2064\n        trap "rm -rf -- \'$SH_SCRATCH\'" EXIT', '    if false; then\n        # shellcheck disable=SC2064\n        trap "rm -rf -- \'$SH_SCRATCH\'" EXIT', SH, "scratch directory"),
     ("shadow-marker-wrong-table", "{ printf '%s\\n' \"$table\"; for n in", "{ printf '%s\\n' \"$recorded\" | tac; for n in", SH, "holds the sha256 table"),
-    ("shadow-marker-programs-changed", '[ "$(table_of "$dir")" = "$table" ] || why_not=', 'true || why_not=', SH, "changed since build"),
+    ("shadow-marker-programs-changed", '[ "$(table_of "$dir")" = "$table" ] || why_not=', 'true || why_not=', SH, "changes during the run"),
 ]
 
 
@@ -170,14 +174,14 @@ def fresh(work, source=None):
     time.sleep(1.1)
 
 
-def run(work, case_file, only=None):
+def run(work, case_file, only=None, cap=CAP_SECONDS):
     env = {k: v for k, v in os.environ.items() if k not in ("MX_TREE", "CU_ONLY")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if only:
         env["CU_ONLY"] = only
     cmd = "ulimit -v %d; exec bash tests/run-characterization.sh %s" % (CAP_BYTES // 1024, case_file)
     try:
-        cp = subprocess.run(["bash", "-c", cmd], cwd=work, capture_output=True, text=True, env=env, timeout=CAP_SECONDS)
+        cp = subprocess.run(["bash", "-c", cmd], cwd=work, capture_output=True, text=True, env=env, timeout=cap)
     except subprocess.TimeoutExpired:
         return "CAPPED", None, []
     out = cp.stdout + cp.stderr
@@ -220,7 +224,7 @@ def main():
         if want and cf not in {m[3] for m in MUTANTS if m[0] in want}:
             continue
         fresh(work, pristine)
-        kind, res, _ = run(work, cf)
+        kind, res, _ = run(work, cf, None, CONTROL_CAP_SECONDS)
         controls[cf] = res
         print("pristine control before, %-20s %s %s" % (cf, kind, res), flush=True)
         if kind != "RAN" or res[2] != 0:
@@ -250,7 +254,7 @@ def main():
             print("%-34s %-8s %s fails=%s" % (mid, "SURVIVED" if kind == "RAN" else kind, res, [f[:60] for f in fails][:2]), flush=True)
     for cf in sorted(controls):
         fresh(work, pristine)
-        kind, res, _ = run(work, cf)
+        kind, res, _ = run(work, cf, None, CONTROL_CAP_SECONDS)
         same = tree_hash(work) == pristine_hash
         print("pristine control after,  %-20s %s %s, tree hash unchanged: %s" % (cf, kind, res, same), flush=True)
         if kind != "RAN" or res[2] != 0 or not same:

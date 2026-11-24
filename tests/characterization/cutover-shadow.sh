@@ -266,6 +266,14 @@ case_profile_without_tasks() {
 }
 cu_case "shadow: a profile that declares no tasks is refused by name" case_profile_without_tasks
 
+case_profile_blank_tasks() {
+    ready; printf 'TASKS="  "\n' > "$CU_SHARE/profiles/beta/profile.env"
+    cu_shadow
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: the profile beta declares no TASKS; shadow would compare nothing for it"
+}
+cu_case "shadow: a profile whose TASKS is only blanks declares no tasks" case_profile_blank_tasks
+
 case_profile_unreadable() {
     ready; printf 'exit 7\n' > "$CU_SHARE/profiles/beta/profile.env"
     cu_shadow
@@ -300,7 +308,7 @@ cu_case "shadow: a profile name with a newline is refused and shown on one line"
 
 case_hostile_task_names() {
     local t
-    for t in 'a&b' 'a|b' 'a\b' '-x' 're-view' 'a;b'; do
+    for t in 'a&b' 'a|b' 'a\b' '-x' 're-view' 'a;b' '*' '?'; do
         cu_sandbox_new; ready
         printf 'TASKS="review %s"\n' "$t" > "$CU_SHARE/profiles/beta/profile.env"
         cu_shadow
@@ -309,7 +317,7 @@ case_hostile_task_names() {
         cu_expect_no_marker
     done
 }
-cu_case "shadow: a task name with &, |, \\, a leading dash, a hyphen or ; is refused before any comparison" case_hostile_task_names
+cu_case "shadow: a task name with &, |, \\, a leading dash, a hyphen, ; or a glob character is refused before any comparison" case_hostile_task_names
 
 case_tasks_on_two_lines() {
     ready
@@ -366,6 +374,25 @@ case_timeout() {
 cu_case "shadow: a side that outlives the timeout is a DIFF and never a PASS" case_timeout
 
 # --- read-only ------------------------------------------------------------------------------------------------------------
+
+case_both_sides_time_out() {
+    ready; hook check-claims 'sleep 30'
+    cu_shadow --timeout 2
+    cz_expect_rc 1
+    cu_expect_report_has "DIFF check-claims: the bash side timed out after 2s; the Rust side timed out after 2s"
+    cu_expect_no_marker
+}
+cu_case "shadow: when both sides time out the DIFF says so for both" case_both_sides_time_out
+
+case_programs_changed_during_the_run() {
+    ready
+    hook install-cron "echo more >> \"$CU_BUILD/alert\""
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: the programs in $CU_BUILD changed during the run"
+}
+cu_case "shadow: a program of the build directory that changes during the run withholds the marker" case_programs_changed_during_the_run
 
 case_real_tools_never_reached() {
     ready
@@ -475,16 +502,15 @@ cu_case "shadow: a program that writes into the checkout withholds the marker" c
 
 case_run_lock_not_taken() {
     ready
+    # Any call to flock, by the shadow or by a program it runs, reaches this recorder, and cu_case_end fails the case.
+    cu_stub_recorder flock
     local lock="$CU_HOME/.local/state/alpha-maint/run.lock"
     mkdir -p "$(dirname "$lock")"
-    ( exec 9> "$lock"; flock -n 9 || exit 3; : > "$CZ_CASE/lock-ready"; exec sleep 25 ) &
+    ( exec 9> "$lock"; "$(type -P flock)" -n 9 || exit 3; : > "$CZ_CASE/lock-ready"; exec sleep 120 ) &
     local holder=$!
     for _ in $(seq 1 50); do [ -e "$CZ_CASE/lock-ready" ] && break; sleep 0.1; done
-    local start=$SECONDS
     cu_shadow
-    local took=$((SECONDS - start))
     cz_expect_rc 0
-    [ "$took" -lt 20 ] || cz_note_fail "the shadow waited for a held run lock ($took s)"
     kill -0 "$holder" 2>/dev/null || cz_note_fail "the process holding the run lock is gone"
     kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
     cz_check "the lock file is still empty" "$(wc -c < "$lock")" 0
