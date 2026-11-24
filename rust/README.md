@@ -25,6 +25,7 @@ A binary's `main` deals with `SIGPIPE`, because Rust ignores it. Restoring the d
 `crates/mx-doctor` is `bin/maintainer-doctor` in Rust: the library holds every check as a decision over facts read through the ports, and the binary is named `maintainer-doctor`. Its tests are in `crates/mx-doctor/tests/`:
 
 - `blackbox.sh`: the doctor characterization cases of `tests/characterization/` run against an assembled tree (`rust/scripts/assemble-tree.sh`), three times, with the four pinned differences named in the script.
+- `flock.rs`: the flock check on a real search path. The check is `command -v flock`, so bash decides: a flock file without the execute bit still counts as on `PATH`, a directory or a dangling link named flock does not, and a flock that exits non-zero counts and is never run. `doctor-core.sh` pins the same five cases for both builds.
 - `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit code, the order of every external call and the state tree.
 - `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
 
