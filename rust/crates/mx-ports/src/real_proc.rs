@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(out.exit, ProcExit::TimedOut);
         assert_eq!(text(&out.stdout), "held\n");
         assert!(
-            elapsed >= timeout + KILL_GRACE - Duration::from_millis(100),
+            elapsed + Duration::from_millis(100) >= timeout + KILL_GRACE,
             "returned after {elapsed:?}: the grace for the pipes was cut short"
         );
         assert!(
