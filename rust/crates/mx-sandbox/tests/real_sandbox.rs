@@ -990,3 +990,26 @@ fn staging_refuses_a_linked_container_target_or_stage_directory() {
         Err(SandboxError::Stage { .. })
     ));
 }
+
+#[test]
+fn a_staged_gate_binary_runs_from_a_copy_of_the_tree_at_its_relative_path() {
+    // The container mounts the tree at /repo and a suite may `cp -r /repo /tmp/w`. The host path
+    // of the gate does not exist there, so the binary travels inside the tree and the command
+    // names it relative to the tree root. Here the copy is a different directory and the staged
+    // file is run from it by that relative path.
+    let scratch = Scratch::new("stagerun");
+    let bin = scratch.path("gate-src");
+    std::fs::write(&bin, "#!/bin/sh\necho gate-ran-from \"$(pwd)\"\n").unwrap();
+    let (_s, tree) = mutable("stagerun-tree", &[("a.rs", "x")]);
+    let relative = sandbox().stage_executable(&tree, &bin, "maintainer-merge").unwrap();
+    let copy = scratch.path("copy");
+    run("cp", &["-r", tree.root().to_str().unwrap(), copy.to_str().unwrap()], &scratch.0);
+    // Remove the original: nothing of the host path of the first tree may be needed.
+    std::fs::remove_dir_all(tree.root()).unwrap();
+    let staged = copy.join(&relative);
+    let out = run(staged.to_str().unwrap(), &[], &copy);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("gate-ran-from {}\n", copy.display())
+    );
+}
