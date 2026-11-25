@@ -159,9 +159,62 @@ fn missing_argument(argv0: &str, args: &[String], position: u8, name: &str) -> E
     Exit { code: 1, stderr: format!("{argv0}: line {line}: {position}: {name}\n") }
 }
 
-/// Runs the program. Returns the exit status; everything it prints goes to the real streams.
+/// Splits the process environment into the variables whose names and values are text, and the
+/// names whose value is not UTF-8. A value that cannot be read must never read as unset
+/// (review rv271 F2), so the caller hands the second list to [`run`].
 #[must_use]
-pub fn run(argv0: &str, exe: &Path, args: &[String], vars: &BTreeMap<String, String>) -> i32 {
+pub fn split_env(
+    pairs: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut vars = BTreeMap::new();
+    let mut bad = Vec::new();
+    for (name, value) in pairs {
+        let Ok(name) = name.into_string() else { continue };
+        match value.into_string() {
+            Ok(value) => {
+                vars.insert(name, value);
+            }
+            Err(_) => bad.push(name),
+        }
+    }
+    bad.sort();
+    (vars, bad)
+}
+
+/// The names of variables this program reads.
+fn is_read_by_the_gate(name: &str) -> bool {
+    name.starts_with("MAINTAINER_")
+        || name.starts_with("UPDATE_READBACK_")
+        || name.starts_with("VERIFY_")
+        || name.starts_with("PREFETCH_")
+        || matches!(name, "PROD_GLOBS" | "CLAIM_LABEL" | "CLASSIFY_TIMEOUT" | "HOME" | "PATH")
+}
+
+/// A present value that is not text is a refusal, exit 64, naming the variable (decision P3B-13).
+fn refuse_non_utf8(bad: &[String]) -> Result<(), Exit> {
+    match bad.iter().find(|name| is_read_by_the_gate(name)) {
+        Some(name) => Err(Exit {
+            code: 64,
+            stderr: format!("maintainer-merge: the value of {name} is not valid UTF-8 text\n"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Runs the program. Returns the exit status; everything it prints goes to the real streams.
+/// `bad_env` names the variables whose value was not UTF-8 (see [`split_env`]).
+#[must_use]
+pub fn run(
+    argv0: &str,
+    exe: &Path,
+    args: &[String],
+    vars: &BTreeMap<String, String>,
+    bad_env: &[String],
+) -> i32 {
+    if let Err(exit) = refuse_non_utf8(bad_env) {
+        drop(std::io::stderr().write_all(exit.stderr.as_bytes()));
+        return exit.code;
+    }
     let search_path = vars.get("PATH").cloned().unwrap_or_else(|| DEFAULT_PATH.to_string());
     let proc = RealProc::new(search_path.clone(), child_env(vars));
     let code = match run_inner(argv0, exe, args, vars, &proc, &search_path) {
@@ -177,6 +230,80 @@ pub fn run(argv0: &str, exe: &Path, args: &[String], vars: &BTreeMap<String, Str
 
 fn text(profile: &mx_profile::Profile, name: &str) -> String {
     profile.get_str(name).unwrap_or_default().to_string()
+}
+
+/// `cmd_receipt` refuses an unattended run after the pull request number and before it looks at
+/// the head (bash 404 before 409), so that order is kept here (decision P3B-10).
+fn refuse_unattended_receipt(args: &[String], vars: &BTreeMap<String, String>) -> Result<(), Exit> {
+    if args.first().map(String::as_str) == Some("receipt")
+        && vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty())
+        && args.len() >= 4
+        && args[1..4].iter().all(|a| !a.is_empty())
+        && crate::PrNumber::parse(&args[1]).is_ok()
+    {
+        return Err(Exit::die(1, crate::UNATTENDED_ASSERT));
+    }
+    Ok(())
+}
+
+/// Only `on` and `off` are values of `MAINTAINER_POST`; anything else is a usage error for every
+/// subcommand, show included (bash PB-3). Empty reads as the default.
+fn post_setting(
+    profile: &mx_profile::Profile,
+    vars: &BTreeMap<String, String>,
+) -> Result<Option<String>, Exit> {
+    let setting = profile
+        .get_str("MAINTAINER_POST")
+        .map(str::to_string)
+        .or_else(|| vars.get("MAINTAINER_POST").cloned())
+        .filter(|p| !p.is_empty());
+    match setting.as_deref().filter(|p| !matches!(*p, "on" | "off")) {
+        Some(value) => Err(Exit {
+            code: 64,
+            stderr: format!(
+                "maintainer-merge: MAINTAINER_POST must be on or off, not {}\n",
+                shell_quote(value)
+            ),
+        }),
+        None => Ok(setting),
+    }
+}
+
+/// The gate's configuration from the loaded profile and the environment.
+fn build_config(
+    profile: &mx_profile::Profile,
+    vars: &BTreeMap<String, String>,
+    post: Option<&str>,
+) -> Result<GateConfig, Exit> {
+    let account = Account::new(&text(profile, "MAINTAINER_ACCOUNT"))
+        .map_err(|e| Exit::die(1, &e.to_string()))?;
+    let home = vars.get("HOME").cloned().unwrap_or_default();
+    let receipt_key = vars
+        .get("MAINTAINER_RECEIPT_KEY")
+        .cloned()
+        .unwrap_or_else(|| format!("{home}/.local/share/maintainer/receipt.key"));
+    let prod_value =
+        profile.get_str("PROD_GLOBS").or_else(|| vars.get("PROD_GLOBS").map(String::as_str));
+    // PB-4: every run of whitespace separates patterns, newlines included (decision P3B-12); the
+    // suite crate's parser reads one line, so the lines are joined before it sees the value.
+    let prod_value = prod_value.map(one_line);
+    let pick =
+        |name: &str| profile.get_str(name).map(str::to_string).or_else(|| vars.get(name).cloned());
+    Ok(GateConfig {
+        slug: text(profile, "MAINTAINER_SLUG"),
+        repo: PathBuf::from(text(profile, "MAINTAINER_REPO")),
+        state: PathBuf::from(text(profile, "MAINTAINER_STATE")),
+        account,
+        posting: Posting::from_setting(post),
+        prod_globs: prod_value.and_then(|value| ProdGlobs::from_profile_value(&value).ok()),
+        claim_label: pick("CLAIM_LABEL").unwrap_or_default(),
+        receipt_key: PathBuf::from(receipt_key),
+        run_id: std::process::id(),
+        has_suite_host: false,
+        in_run: vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty()),
+        readback_reads: pick("UPDATE_READBACK_READS"),
+        readback_wait: pick("UPDATE_READBACK_WAIT"),
+    })
 }
 
 #[allow(clippy::too_many_lines, reason = "one function: locate, load, configure, wire")]
@@ -214,32 +341,8 @@ fn run_inner(
             });
         }
     }
-    // `cmd_receipt` refuses an unattended run after the pull request number and before it looks at
-    // the head (bash 404 before 409), so that order is kept here (decision P3B-10).
-    if args.first().map(String::as_str) == Some("receipt")
-        && vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty())
-        && args.len() >= 4
-        && args[1..4].iter().all(|a| !a.is_empty())
-        && crate::PrNumber::parse(&args[1]).is_ok()
-    {
-        return Err(Exit::die(1, crate::UNATTENDED_ASSERT));
-    }
-    // Only `on` and `off` are values of MAINTAINER_POST; anything else is a usage error for every
-    // subcommand, show included (bash PB-3). Empty reads as the default.
-    let post_setting = profile
-        .get_str("MAINTAINER_POST")
-        .map(str::to_string)
-        .or_else(|| vars.get("MAINTAINER_POST").cloned())
-        .filter(|p| !p.is_empty());
-    if let Some(value) = post_setting.as_deref().filter(|p| !matches!(*p, "on" | "off")) {
-        return Err(Exit {
-            code: 64,
-            stderr: format!(
-                "maintainer-merge: MAINTAINER_POST must be on or off, not {}\n",
-                shell_quote(value)
-            ),
-        });
-    }
+    refuse_unattended_receipt(args, vars)?;
+    let post_setting = post_setting(&profile, vars)?;
     let command = parse_command(args).map_err(|error| match error {
         // `${N:?name}`: see `missing_argument`.
         crate::CommandError::Missing { position, name } => {
@@ -248,36 +351,9 @@ fn run_inner(
         other => Exit::from(&other),
     })?;
 
-    let state = PathBuf::from(text(&profile, "MAINTAINER_STATE"));
-    let account = Account::new(&text(&profile, "MAINTAINER_ACCOUNT"))
-        .map_err(|e| Exit::die(1, &e.to_string()))?;
-    let home = vars.get("HOME").cloned().unwrap_or_default();
-    let receipt_key = vars
-        .get("MAINTAINER_RECEIPT_KEY")
-        .cloned()
-        .unwrap_or_else(|| format!("{home}/.local/share/maintainer/receipt.key"));
-    let prod_value =
-        profile.get_str("PROD_GLOBS").or_else(|| vars.get("PROD_GLOBS").map(String::as_str));
-    // PB-4: every run of whitespace separates patterns, newlines included (decision P3B-12); the
-    // suite crate's parser reads one line, so the lines are joined before it sees the value.
-    let prod_value = prod_value.map(one_line);
-    let post = post_setting;
+    let cfg = build_config(&profile, vars, post_setting.as_deref())?;
     let pick =
         |name: &str| profile.get_str(name).map(str::to_string).or_else(|| vars.get(name).cloned());
-    let cfg = GateConfig {
-        slug: text(&profile, "MAINTAINER_SLUG"),
-        repo: PathBuf::from(text(&profile, "MAINTAINER_REPO")),
-        state: state.clone(),
-        account,
-        posting: Posting::from_setting(post.as_deref().filter(|p| !p.is_empty()).or(None)),
-        prod_globs: prod_value.and_then(|value| ProdGlobs::from_profile_value(&value).ok()),
-        claim_label: pick("CLAIM_LABEL").unwrap_or_default(),
-        receipt_key: PathBuf::from(receipt_key),
-        run_id: std::process::id(),
-        in_run: vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty()),
-        readback_reads: pick("UPDATE_READBACK_READS"),
-        readback_wait: pick("UPDATE_READBACK_WAIT"),
-    };
     let mut settings = VerifySettings {
         verify_timeout: pick("VERIFY_TIMEOUT").unwrap_or_default(),
         prefetch_timeout: pick("PREFETCH_TIMEOUT").unwrap_or_default(),
@@ -501,5 +577,228 @@ mod post_tests {
         assert_eq!(shell_quote("off "), "off\\ ");
         assert_eq!(shell_quote("a\nb"), "$'a\\nb'");
         assert_eq!(shell_quote("it's"), "it\\'s");
+    }
+}
+
+/// `run_inner` and the configuration it builds, on a real profile load (the bash loader, through
+/// the real `Proc`) over a scratch tree, so the unit suite itself holds the guards of the
+/// environment: an unattended run, `MAINTAINER_POST`, and variables that are not text.
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Scratch {
+        dir: PathBuf,
+        vars: BTreeMap<String, String>,
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.dir));
+        }
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    fn scratch(extra: &[(&str, &str)]) -> Scratch {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let exe = std::env::current_exe().unwrap();
+        let base = exe.parent().and_then(Path::parent).unwrap().join("mx-gate-scratch");
+        let dir = base.join(format!(
+            "run-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        copy_dir(&root.join("lib"), &dir.join("lib"));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let mut vars: BTreeMap<String, String> = [
+            ("HOME", dir.join("home").display().to_string()),
+            ("PATH", "/usr/bin:/bin".to_string()),
+            ("MAINTAINER_SLUG", "o/r".to_string()),
+            ("MAINTAINER_REPO", dir.join("repo").display().to_string()),
+            ("MAINTAINER_STATE", dir.join("state").display().to_string()),
+            ("MAINTAINER_ACCOUNT", "testuser".to_string()),
+            ("MAINTAINER_PROFILE", "t".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        for (k, v) in extra {
+            vars.insert((*k).to_string(), (*v).to_string());
+        }
+        Scratch { dir, vars }
+    }
+
+    fn exec(s: &Scratch, args: &[&str]) -> Result<i32, Exit> {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let argv0 = s.dir.join("bin/maintainer-merge").display().to_string();
+        let search = "/usr/bin:/bin";
+        let proc = RealProc::new(search, child_env(&s.vars));
+        run_inner(&argv0, Path::new("/x"), &args, &s.vars, &proc, search)
+    }
+
+    fn profile_of(s: &Scratch) -> mx_profile::Profile {
+        let proc = RealProc::new("/usr/bin:/bin", child_env(&s.vars));
+        let env = LoadEnv::from_vars(
+            s.dir.join("lib"),
+            s.vars.iter().map(|(n, v)| (n.clone(), v.clone())),
+        );
+        load_profile(&proc, &env).result.expect("the scratch profile loads")
+    }
+
+    fn config(extra: &[(&str, &str)]) -> GateConfig {
+        let s = scratch(extra);
+        let profile = profile_of(&s);
+        let post = post_setting(&profile, &s.vars).unwrap();
+        build_config(&profile, &s.vars, post.as_deref()).unwrap()
+    }
+
+    #[test]
+    fn show_runs_end_to_end_through_the_loader_and_lists_no_receipts() {
+        let s = scratch(&[]);
+        assert_eq!(exec(&s, &["show"]).unwrap(), 0);
+        assert!(s.dir.join("state/receipts").is_dir());
+    }
+
+    #[test]
+    fn only_the_exact_words_on_and_off_are_values_of_maintainer_post_for_every_subcommand() {
+        for bad in ["OFF", "Off", "false", "0", "no", "yes", "true", " off", "off ", "maybe"] {
+            let s = scratch(&[("MAINTAINER_POST", bad)]);
+            for args in [&["show"][..], &["merge", "7"], &["update", "7"]] {
+                let exit = exec(&s, args).unwrap_err();
+                assert_eq!(exit.code, 64, "{bad:?} {args:?}");
+                assert_eq!(
+                    exit.stderr,
+                    format!(
+                        "maintainer-merge: MAINTAINER_POST must be on or off, not {}\n",
+                        shell_quote(bad)
+                    ),
+                );
+            }
+        }
+        for good in ["on", "off", ""] {
+            let s = scratch(&[("MAINTAINER_POST", good)]);
+            assert_eq!(exec(&s, &["show"]).unwrap(), 0, "{good:?}");
+        }
+    }
+
+    #[test]
+    fn posting_is_off_only_for_the_exact_word_off_and_on_otherwise() {
+        assert_eq!(config(&[("MAINTAINER_POST", "off")]).posting, Posting::Off);
+        assert_eq!(config(&[("MAINTAINER_POST", "on")]).posting, Posting::On);
+        assert_eq!(config(&[("MAINTAINER_POST", "")]).posting, Posting::On);
+        assert_eq!(config(&[]).posting, Posting::On);
+    }
+
+    #[test]
+    fn an_unattended_run_is_one_whose_in_run_variable_is_set_and_not_empty() {
+        assert!(config(&[("MAINTAINER_IN_RUN", "review")]).in_run);
+        assert!(!config(&[("MAINTAINER_IN_RUN", "")]).in_run);
+        assert!(!config(&[]).in_run);
+    }
+
+    #[test]
+    fn an_unattended_receipt_is_refused_after_the_number_and_before_the_head_p3b_10() {
+        let s = scratch(&[("MAINTAINER_IN_RUN", "review")]);
+        let exit = exec(&s, &["receipt", "7", "abc", "proof"]).unwrap_err();
+        assert_eq!(
+            exit,
+            Exit::die(1, crate::UNATTENDED_ASSERT),
+            "a short head does not come first"
+        );
+        let exit = exec(&s, &["receipt", "x", "abc", "proof"]).unwrap_err();
+        assert!(exit.stderr.contains("pull request must be a positive integer"), "{exit:?}");
+        let attended = scratch(&[]);
+        let exit = exec(&attended, &["receipt", "7", "abc", "proof"]).unwrap_err();
+        assert_eq!(exit.stderr, "maintainer-merge: head sha looks truncated: abc\n");
+    }
+
+    #[test]
+    fn the_prod_globs_of_a_profile_count_on_every_line_p3b_12() {
+        let globs = config(&[("PROD_GLOBS", "bin/*\n\tlib/*  \n")]).prod_globs.unwrap();
+        assert_eq!(globs.as_slice(), ["bin/*", "lib/*"]);
+        assert!(config(&[("PROD_GLOBS", "")]).prod_globs.is_none());
+    }
+
+    #[test]
+    fn the_claim_label_comes_from_the_environment_and_the_readback_reads_from_the_defaults() {
+        let c = config(&[("CLAIM_LABEL", "claimed")]);
+        assert_eq!(c.claim_label, "claimed");
+        assert_eq!(
+            c.readback_reads.as_deref(),
+            Some("6"),
+            "lib/defaults.env, which the loader reads"
+        );
+        assert!(config(&[]).claim_label.is_empty());
+    }
+
+    #[test]
+    fn a_variable_that_is_not_text_is_split_out_and_never_read_as_unset_p3b_13() {
+        let pairs = vec![
+            (OsString::from("MAINTAINER_IN_RUN"), OsString::from_vec(vec![0xff])),
+            (OsString::from("HOME"), OsString::from("/h")),
+            (OsString::from_vec(vec![0xfe]), OsString::from("x")),
+        ];
+        let (vars, bad) = split_env(pairs);
+        assert_eq!(bad, ["MAINTAINER_IN_RUN"]);
+        assert_eq!(vars.get("HOME").map(String::as_str), Some("/h"));
+        assert!(!vars.contains_key("MAINTAINER_IN_RUN"));
+    }
+
+    #[test]
+    fn a_non_text_value_of_a_name_the_gate_reads_refuses_with_exit_64_naming_it() {
+        for name in [
+            "MAINTAINER_IN_RUN",
+            "MAINTAINER_POST",
+            "PROD_GLOBS",
+            "CLAIM_LABEL",
+            "UPDATE_READBACK_READS",
+            "VERIFY_MEMORY",
+            "PATH",
+            "HOME",
+        ] {
+            let exit = refuse_non_utf8(&[name.to_string()]).unwrap_err();
+            assert_eq!(exit.code, 64, "{name}");
+            assert_eq!(
+                exit.stderr,
+                format!("maintainer-merge: the value of {name} is not valid UTF-8 text\n")
+            );
+        }
+        assert!(
+            refuse_non_utf8(&["LS_COLORS".to_string()]).is_ok(),
+            "an unrelated name is ignored"
+        );
+        assert!(refuse_non_utf8(&[]).is_ok());
+    }
+
+    #[test]
+    fn run_refuses_before_it_loads_anything_when_a_gate_variable_is_not_text() {
+        let s = scratch(&[]);
+        let code = run(
+            &s.dir.join("bin/maintainer-merge").display().to_string(),
+            Path::new("/x"),
+            &["receipt".into(), "7".into(), "abcdef0".into(), "p".into()],
+            &s.vars,
+            &["MAINTAINER_IN_RUN".to_string()],
+        );
+        assert_eq!(code, 64);
+        assert!(!s.dir.join("state").exists(), "nothing was read or written");
     }
 }

@@ -8,7 +8,8 @@
 use crate::{
     Account, CommitId, DiffFailure, Dirs, GateGit, GhFailure, GhPort, Helper, HelperMissing,
     HoldersFailure, IdentityPort, IssueNumber, LeaseAnswer, LockError, LockGuard, LockPort,
-    MergeState, PrNumber, Progress, Review, RuntimeProbe, Say, StampSource, UpdateFacts, WhoAmI,
+    MergeState, PrNumber, Progress, Review, RuntimeProbe, Say, SpendToken, StampSource,
+    UpdateFacts, WhoAmI,
 };
 use mx_core::Fact;
 use mx_ports::{Clock, Fs, FsError, GitError, Proc, ProcExit, ProcSpec};
@@ -328,10 +329,16 @@ impl GhPort for RealGh<'_> {
             return Err(unreadable(""));
         }
         let value: Value = serde_json::from_str(&ran.stdout).map_err(|_| unreadable("not JSON"))?;
-        let author = value.get("author").filter(|a| !a.is_null());
-        let author_login = match author {
-            None => "",
-            Some(object) => object.get("login").and_then(Value::as_str).unwrap_or(""),
+        // The python helper reads `d["isCrossRepository"]` (a missing key raises) and
+        // `(d.get("author") or {}).get("login")` (a string author raises), and either leaves
+        // `update` with nothing printed, which refuses. A fact that is absent or of another
+        // type is unreadable here too, never the safe value (review rv271 F1).
+        let author_login = match value.get("author") {
+            None | Some(Value::Null) => "",
+            Some(Value::Object(object)) => {
+                object.get("login").and_then(Value::as_str).unwrap_or("")
+            }
+            Some(_) => return Err(unreadable("head")),
         };
         // Every value must be text without a newline, as the python helper insists, so a null
         // reviewDecision is unreadable (decision P30-7, preserved).
@@ -342,9 +349,11 @@ impl GhPort for RealGh<'_> {
         if author_login.contains('\n') {
             return Err(unreadable("author"));
         }
-        let cross = value
-            .get("isCrossRepository")
-            .is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false)));
+        let cross = match value.get("isCrossRepository") {
+            Some(Value::Bool(flag)) => *flag,
+            Some(Value::Number(number)) => number.as_f64().is_none_or(|n| n != 0.0),
+            _ => return Err(unreadable("head")),
+        };
         let modify = value.get("maintainerCanModify") == Some(&Value::Bool(true));
         Ok(UpdateFacts {
             head: head.to_string(),
@@ -403,7 +412,7 @@ impl GhPort for RealGh<'_> {
         if ran.ok() { Ok(()) } else { Err(GhFailure { exit: ran.code, output: ran.merged() }) }
     }
 
-    fn merge(&self, pr: &PrNumber, head: &CommitId) -> Result<(), GhFailure> {
+    fn merge(&self, pr: &PrNumber, head: &CommitId, _spend: SpendToken) -> Result<(), GhFailure> {
         let ran = self.gh(
             &[
                 "pr",

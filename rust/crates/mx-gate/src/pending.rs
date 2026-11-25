@@ -17,9 +17,7 @@ use std::path::{Path, PathBuf};
 pub struct Pending;
 
 fn missing() -> SuiteError {
-    SuiteError::Bash {
-        reason: "the Rust suite host is not in this build; use bin/maintainer-merge".into(),
-    }
+    SuiteError::Bash { reason: "this build has no suite host yet".into() }
 }
 
 impl SuiteHost for Pending {
@@ -61,9 +59,7 @@ impl SuiteSelector for Pending {
 }
 
 fn no_sandbox() -> SandboxError {
-    SandboxError::Run {
-        reason: "the Rust sandbox is not in this build; use bin/maintainer-merge".into(),
-    }
+    SandboxError::Run { reason: "this build has no sandbox yet".into() }
 }
 
 impl Sandbox for Pending {

@@ -42,11 +42,15 @@ impl RuntimeProbe for FixedRuntime {
 pub struct FakeDirs {
     pub made: Mutex<Vec<PathBuf>>,
     pub removed: Mutex<Vec<PathBuf>>,
+    pub fail_on: Mutex<Vec<PathBuf>>,
 }
 
 impl Dirs for FakeDirs {
     fn make_dir(&self, path: &Path) -> Result<(), String> {
         self.made.lock().unwrap().push(path.to_path_buf());
+        if self.fail_on.lock().unwrap().iter().any(|p| p == path) {
+            return Err("read-only file system".to_string());
+        }
         Ok(())
     }
 
@@ -130,6 +134,7 @@ impl World {
                 receipt_key: "/k/receipt.key".into(),
                 in_run: false,
                 run_id: 1,
+                has_suite_host: true,
                 readback_reads: Some("3".into()),
                 readback_wait: Some("0".into()),
             },

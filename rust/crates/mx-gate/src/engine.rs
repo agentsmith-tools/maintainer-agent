@@ -26,6 +26,9 @@ use std::time::Duration;
 /// The refusal of `receipt` in an unattended run (bash 404).
 pub const UNATTENDED_ASSERT: &str = "an unattended run may not assert a receipt.\n  Only `maintainer-merge verify` earns one, because only it observes the\n  mutation. If this pull request cannot be mutation-proven, say so in the report\n  and leave the merge to a human.";
 
+/// What `verify` and the check of a partial receipt say while this build has no suite host.
+pub const NO_SUITE_HOST: &str = "this build of the Rust gate has no suite host or sandbox yet, so it cannot verify a pull request or check which suites a partial receipt covers. Nothing was changed.";
+
 /// Directories the gate makes and removes (`mkdir -p`, the EXIT trap's `rm -rf`).
 pub trait Dirs {
     /// `mkdir -p`.
@@ -70,6 +73,8 @@ pub struct GateConfig {
     pub in_run: bool,
     /// Makes the temporary refs of this run its own, so two runs never share one.
     pub run_id: u32,
+    /// False while the suite and sandbox adapters of the p3a lane are not built in.
+    pub has_suite_host: bool,
     /// `UPDATE_READBACK_READS`.
     pub readback_reads: Option<String>,
     /// `UPDATE_READBACK_WAIT`.
@@ -267,6 +272,9 @@ impl<'a> Gate<'a> {
         // Only a receipt proved in parts is asked (the bash reads `partial`, default false).
         if !receipt.is_partial() {
             return Ok(());
+        }
+        if !self.cfg.has_suite_host {
+            return Err(die(NO_SUITE_HOST));
         }
         let globs = self.prod_globs()?;
         let files =

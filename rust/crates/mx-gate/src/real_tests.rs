@@ -348,7 +348,7 @@ fn the_update_and_the_merge_use_the_bash_argv() {
     let runner = Runner::new(&proc, &vars());
     let gh = RealGh::new(&runner, "o/r");
     gh.update_branch(&pr(), &head).unwrap();
-    gh.merge(&pr(), &head).unwrap();
+    gh.merge(&pr(), &head, crate::SpendToken::new()).unwrap();
     assert_eq!(argv_of(&log).len(), 2);
 }
 
@@ -533,4 +533,106 @@ fn a_gh_that_cannot_start_is_a_failed_checks_read_not_an_empty_board() {
     );
     let runner = Runner::new(&proc, &vars());
     assert_eq!(RealGh::new(&runner, "o/r").checks(&pr()).unwrap_err().exit, 127);
+}
+
+fn facts_of(json: &str) -> Result<crate::UpdateFacts, crate::GhFailure> {
+    let log = EffectLog::new();
+    let proc = FakeProc::new(&log);
+    proc.script(
+        &[
+            "gh",
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "o/r",
+            "--json",
+            "headRefOid,mergeStateStatus,reviewDecision,author,isCrossRepository,maintainerCanModify",
+        ],
+        ok(json),
+    );
+    let runner = Runner::new(&proc, &vars());
+    RealGh::new(&runner, "o/r").update_facts(&pr())
+}
+
+const FACTS_OK: &str =
+    r#""headRefOid":"abc","mergeStateStatus":"BEHIND","reviewDecision":"APPROVED""#;
+
+#[test]
+fn update_facts_without_is_cross_repository_are_unreadable_not_same_repository() {
+    let json = format!(r#"{{{FACTS_OK},"author":{{"login":"a"}},"maintainerCanModify":true}}"#);
+    assert_eq!(facts_of(&json).unwrap_err().output, "head");
+}
+
+#[test]
+fn update_facts_whose_is_cross_repository_is_neither_a_bool_nor_a_number_are_unreadable() {
+    for bad in [r#""false""#, "null", "[]", "{}"] {
+        let json = format!(
+            r#"{{{FACTS_OK},"author":{{"login":"a"}},"isCrossRepository":{bad},"maintainerCanModify":true}}"#
+        );
+        assert_eq!(facts_of(&json).unwrap_err().output, "head", "{bad}");
+    }
+    let json = format!(
+        r#"{{{FACTS_OK},"author":{{"login":"a"}},"isCrossRepository":1,"maintainerCanModify":false}}"#
+    );
+    assert!(facts_of(&json).unwrap().cross_repository, "a number is truthy as in python");
+}
+
+#[test]
+fn update_facts_whose_author_is_a_string_or_a_list_are_unreadable_so_dependabot_cannot_hide() {
+    for bad in [r#""dependabot""#, "[]", "1", "true"] {
+        let json = format!(
+            r#"{{{FACTS_OK},"author":{bad},"isCrossRepository":false,"maintainerCanModify":false}}"#
+        );
+        assert_eq!(facts_of(&json).unwrap_err().output, "head", "{bad}");
+    }
+}
+
+#[test]
+fn update_facts_accept_a_null_author_and_an_author_object_without_a_login() {
+    for author in ["null", "{}"] {
+        let json = format!(
+            r#"{{{FACTS_OK},"author":{author},"isCrossRepository":false,"maintainerCanModify":false}}"#
+        );
+        assert_eq!(facts_of(&json).unwrap().author, "");
+    }
+}
+
+#[test]
+fn a_gh_that_ran_past_its_timeout_is_exit_124_and_a_failed_read_never_a_success() {
+    let log = EffectLog::new();
+    let proc = FakeProc::new(&log);
+    proc.script(
+        &["gh", "pr", "view", "7", "--repo", "o/r", "--json", "headRefOid", "--jq", ".headRefOid"],
+        Script::always(Ok(mx_ports::ProcOutput {
+            exit: mx_ports::ProcExit::TimedOut,
+            stdout: b"abc".to_vec(),
+            stderr: Vec::new(),
+        })),
+    );
+    let runner = Runner::new(&proc, &vars());
+    let failure = RealGh::new(&runner, "o/r").head(&pr()).unwrap_err();
+    assert_eq!(failure.exit, 124);
+}
+
+#[test]
+fn an_author_login_with_a_newline_makes_the_update_facts_unreadable_by_name() {
+    let json = format!(
+        r#"{{{FACTS_OK},"author":{{"login":"a\nb"}},"isCrossRepository":false,"maintainerCanModify":false}}"#
+    );
+    assert_eq!(facts_of(&json).unwrap_err().output, "author");
+}
+
+#[test]
+fn a_claim_label_with_a_backslash_a_quote_or_a_newline_never_reaches_gh() {
+    for label in ["a\\b", "a\"b", "a\nb"] {
+        let log = EffectLog::new();
+        let proc = FakeProc::new(&log);
+        let runner = Runner::new(&proc, &vars());
+        let failure = RealGh::new(&runner, "o/r")
+            .issue_has_label(IssueNumber::new(3).unwrap(), label)
+            .unwrap_err();
+        assert!(failure.output.contains("cannot be quoted"), "{label:?}");
+        assert!(argv_of(&log).is_empty());
+    }
 }

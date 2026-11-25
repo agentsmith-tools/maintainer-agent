@@ -530,3 +530,121 @@ fn a_suite_that_needs_another_runtime_refuses_before_a_tree_is_extracted() {
         "maintainer-merge: the 'rust' suite needs docker, and this machine has podman\n"
     );
 }
+
+// ----- the dependency prefetch, the work directory and the scratch directories ---------------------
+
+fn prefetching_world() -> World {
+    let mut w = world();
+    w.suites = FakeSuiteHost::new(
+        "/verify.d",
+        vec![suite("rust", &["bin/a"]).prefetching("cargo fetch --locked")],
+    );
+    w.sandbox.script_run(Script::sequence([
+        Ok(ContainerExit(0)),
+        Ok(ContainerExit(0)),
+        Ok(ContainerExit(101)),
+    ]));
+    w.fs.put(format!("{WORK}/prefetch.log"), b"fetched\n".to_vec(), 0);
+    w
+}
+
+fn runs(w: &World) -> Vec<(Vec<String>, String, mx_sandbox::LogMode)> {
+    w.sandbox
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            SandboxCall::Run { argv, log, mode } => Some((argv, log.display().to_string(), mode)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_suite_that_prefetches_fetches_first_with_a_network_its_own_timeout_and_a_truncated_log() {
+    let w = prefetching_world();
+    go(&w, false, None).unwrap();
+    let runs = runs(&w);
+    assert_eq!(runs.len(), 3);
+    let (argv, log, mode) = &runs[0];
+    assert!(!argv.contains(&"--network=none".to_string()), "the fetch has a network");
+    assert!(!argv.contains(&"--cpus".to_string()));
+    assert_eq!(&argv[argv.len() - 3..], ["sh", "-c", "cargo fetch --locked"]);
+    let at = argv.iter().position(|a| a == "--timeout").unwrap();
+    assert_eq!(argv[at + 1], "300", "PREFETCH_TIMEOUT, not VERIFY_TIMEOUT");
+    assert!(log.ends_with("prefetch.log"));
+    assert_eq!(*mode, mx_sandbox::LogMode::Truncate);
+    assert!(runs[1].0.contains(&"--network=none".to_string()), "the test run has none");
+    assert!(
+        w.stdout()
+            .contains("  fetching what the lockfile pins (network, no build scripts, --locked)\n")
+    );
+}
+
+#[test]
+fn a_prefetch_guard_that_refuses_stops_the_verify_before_any_container_has_a_network() {
+    let mut w = prefetching_world();
+    w.suites = FakeSuiteHost::new(
+        "/verify.d",
+        vec![
+            suite("rust", &["bin/a"])
+                .prefetching("cargo fetch")
+                .guard_refuses("Cargo.lock names a git source"),
+        ],
+    );
+    let exit = go(&w, false, None).unwrap_err();
+    assert_eq!(
+        exit.stderr,
+        "maintainer-merge: the dependency fetch was refused before it got a network:\n\n    Cargo.lock names a git source\n"
+    );
+    assert!(runs(&w).is_empty());
+    assert!(!w.stdout().contains("fetching what the lockfile pins"));
+}
+
+#[test]
+fn a_prefetch_that_fails_names_the_gates_network_and_shows_the_last_five_lines() {
+    let w = prefetching_world();
+    w.sandbox.script_run(Script::always(Ok(ContainerExit(101))));
+    w.fs.put(format!("{WORK}/prefetch.log"), b"1\n2\n3\n4\n5\n6\n".to_vec(), 0);
+    refuse(&w, &VerifyRefusal::PrefetchFailed { work_tail: "2\n3\n4\n5\n6".into() });
+    assert_eq!(runs(&w).len(), 1, "no test run after a failed fetch");
+}
+
+#[test]
+fn a_prefetch_whose_container_never_started_is_a_failed_fetch_too() {
+    let w = prefetching_world();
+    w.sandbox.script_run(Script::always(Err(SandboxError::Run { reason: "no podman".into() })));
+    refuse(&w, &VerifyRefusal::PrefetchFailed { work_tail: "fetched".into() });
+}
+
+#[test]
+fn a_prefetch_timeout_that_is_not_a_number_refuses_before_the_fetch_runs() {
+    let mut w = prefetching_world();
+    w.verify.prefetch_timeout = "soon".into();
+    let exit = go(&w, false, None).unwrap_err();
+    assert!(exit.stderr.contains("the container timeout is 'soon'"), "{exit:?}");
+    assert!(runs(&w).is_empty());
+}
+
+#[test]
+fn a_verify_work_directory_that_cannot_be_made_refuses_by_name_before_any_scratch() {
+    let w = world();
+    w.dirs.fail_on.lock().unwrap().push(PathBuf::from("/s/verify-work"));
+    refuse(&w, &VerifyRefusal::CannotCreateVerifyWork { verify_work: "/s/verify-work".into() });
+    assert!(w.sandbox.calls().iter().all(|c| !matches!(c, SandboxCall::Scratch { .. })));
+}
+
+#[test]
+fn a_scratch_directory_that_cannot_be_made_refuses_by_name_and_removes_the_first() {
+    let w = world();
+    w.sandbox.script_scratch(Script::sequence([
+        Ok(PathBuf::from(WORK)),
+        Err(SandboxError::ScratchDir { dir: PathBuf::from("/s/verify-work") }),
+    ]));
+    refuse(&w, &VerifyRefusal::CannotCreateScratch { verify_work: "/s/verify-work".into() });
+    assert_eq!(w.dirs.removed.lock().unwrap().as_slice(), [PathBuf::from(WORK)]);
+    let w = world();
+    w.sandbox.script_scratch(Script::always(Err(SandboxError::ScratchDir {
+        dir: PathBuf::from("/s/verify-work"),
+    })));
+    refuse(&w, &VerifyRefusal::CannotCreateScratch { verify_work: "/s/verify-work".into() });
+}

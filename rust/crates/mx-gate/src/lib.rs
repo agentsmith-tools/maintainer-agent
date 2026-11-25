@@ -86,7 +86,8 @@ mod verify_tests;
 pub use cli::{Command, CommandError, Exit, USAGE, parse_command};
 pub use decision::{Action, GateDecision, PROGRAM};
 pub use engine::{
-    Dirs, Gate, GateConfig, Ports, Printed, RuntimeProbe, StampSource, UNATTENDED_ASSERT,
+    Dirs, Gate, GateConfig, NO_SUITE_HOST, Ports, Printed, RuntimeProbe, StampSource,
+    UNATTENDED_ASSERT,
 };
 pub use facts::{
     Approved, Check, CheckBoard, GreenBoard, MergeState, PrFacts, PrState, StateClear,
@@ -106,7 +107,7 @@ pub use ports::{
 };
 pub use pr::{
     ClaimsClear, Conditions, Evidence, Mergeable, Merged, Merger, Posting, Pr, Receipted,
-    Unverified, Verified,
+    SpendToken, Unverified, Verified,
 };
 pub use progress::Progress;
 pub use staleness::{DiffFailure, Fresh, ProductionDiff};

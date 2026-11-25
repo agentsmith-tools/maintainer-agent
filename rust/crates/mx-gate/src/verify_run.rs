@@ -104,6 +104,9 @@ impl Gate<'_> {
     ) -> R<()> {
         let refuse = |r: VerifyRefusal| Exit::from(&r);
         self.lease_gate(pr, Action::Verify)?;
+        if !self.cfg.has_suite_host {
+            return Err(die(crate::NO_SUITE_HOST));
+        }
         let runtime =
             self.p.runtime.runtime().ok_or_else(|| refuse(VerifyRefusal::NoContainerRuntime))?;
 
@@ -171,6 +174,12 @@ impl Gate<'_> {
         });
 
         let verify_work = self.cfg.verify_work();
+        // `mkdir -p "$VERIFY_WORK"` comes before the first scratch directory (bash 48).
+        if self.p.dirs.make_dir(&verify_work).is_err() {
+            return Err(refuse(VerifyRefusal::CannotCreateVerifyWork {
+                verify_work: verify_work.display().to_string(),
+            }));
+        }
         let work = self.p.sandbox.scratch_dir(&verify_work).map_err(|_| {
             refuse(VerifyRefusal::CannotCreateScratch {
                 verify_work: verify_work.display().to_string(),
