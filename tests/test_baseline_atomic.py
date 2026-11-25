@@ -75,6 +75,9 @@ class BaselineAtomic(unittest.TestCase):
         self.assertTrue(rep.called, "finish never used os.replace for the baseline")
         self.assertEqual(rep.call_args[0][1], self.baseline,
                          "os.replace did not target last-review.json")
+        # An atomic replace needs the temp file on the same filesystem as the target.
+        self.assertEqual(Path(rep.call_args[0][0]).parent, self.baseline.parent,
+                         "the temp file is not beside last-review.json")
 
 
 if __name__ == "__main__":

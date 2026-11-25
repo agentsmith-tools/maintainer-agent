@@ -72,9 +72,20 @@ pub enum SandboxError {
     // bash: die "cannot create $VERIFY_WORK" / "cannot create a scratch directory in $VERIFY_WORK"
     #[error("cannot create a scratch directory in {}", dir.display())]
     ScratchDir { dir: PathBuf },
+    /// The parent of the scratch directories could not be made or locked down to mode 700.
+    /// The first of the two bash sentences above; the interface had only the second.
+    /// Added by the sandbox agent (P3A-3); additive.
+    // bash: mkdir -p "$VERIFY_WORK" && chmod 700 "$VERIFY_WORK" || die "cannot create $VERIFY_WORK"
+    #[error("cannot create {}", dir.display())]
+    ScratchParent { dir: PathBuf },
     /// `git init` or `git add -A -f` failed in the extracted tree, so a test that asks git
     /// what is tracked will fail for that reason (the gate prints a note and goes on).
-    #[error("could not seed a git index in the extracted tree")]
+    // bash: say "note: could not seed a git index in the extracted tree; a test that
+    //   asks git what is tracked will fail for that reason and not for the code's."
+    // `say` indents the first line by two spaces; the second line carries its own.
+    #[error(
+        "note: could not seed a git index in the extracted tree; a test that\n  asks git what is tracked will fail for that reason and not for the code's."
+    )]
     IndexNotSeeded,
     /// `find` or `sed --sandbox` failed, or the expression used `e`, `w` or `r`.
     // bash: die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
@@ -83,7 +94,36 @@ pub enum SandboxError {
     /// The sed expression is empty (bash: `${4:?sed expression}`) or has a NUL, which no argument can hold.
     #[error("the sed expression is empty or contains a NUL byte")]
     BadSedExpression,
+    /// A name for a staged executable that is not one plain file name. Added by the sandbox
+    /// agent (P3A-4).
+    #[error(
+        "'{name}' is not a name for a staged file: use letters, digits, '.', '_' and '-', not starting with '.' or '-'"
+    )]
+    BadStageName { name: String },
+    /// A file could not be staged into the tree. Added by the sandbox agent (P3A-4).
+    #[error("cannot stage {}: {reason}", path.display())]
+    Stage { path: PathBuf, reason: String },
+    /// A staged executable is not the file that was staged: its hash changed, or it is gone or
+    /// no longer a regular file. A container of an earlier run could have overwritten it.
+    /// Added by the sandbox agent (P3A-18).
+    #[error("the staged file {} is not the one that was staged; stage it again before this run", path.display())]
+    StagedChanged { path: PathBuf },
     /// The runtime or one of its helpers could not be started or did not finish.
     #[error("the container run did not finish: {reason}")]
     Run { reason: String },
+}
+
+impl SandboxError {
+    /// The text the bash `cmd_verify` prints for this error when it has more to say than
+    /// [`std::fmt::Display`] holds: the refusal for a mutation that changed nothing names the
+    /// pull request, so it needs `pr`. Every other variant prints as it displays.
+    #[must_use]
+    pub fn message(&self, pr: &str) -> String {
+        match self {
+            Self::NothingChanged { globs } => {
+                crate::NothingChanged { globs: globs.clone() }.message(pr)
+            }
+            other => other.to_string(),
+        }
+    }
 }

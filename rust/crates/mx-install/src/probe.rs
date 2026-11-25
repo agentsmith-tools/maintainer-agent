@@ -5,7 +5,7 @@ use crate::env::Env;
 use crate::machine::{Machine, glob_affixes, glob_children};
 use crate::plan::{
     COMMANDS, InstallFacts, Layout, RollbackFacts, RollbackItem, RustProgram, Timer,
-    UninstallFacts, kept_line, timer_profile,
+    UninstallFacts, kept_line, link_detail, timer_profile,
 };
 use crate::refusal::Refusal;
 use crate::tools::{self, QUICK};
@@ -342,6 +342,10 @@ pub fn rollback_facts(
         Vec::new()
     };
     let stamp_path = layout.share.join("RUST_STAMP");
+    // The stamp says which paths are moved. A link in its place is not followed (decision P6A-1).
+    if machine.is_symlink(&stamp_path) {
+        return Err(Refusal::RollbackBlocked { detail: OsString::from(link_detail(&stamp_path)) });
+    }
     let stamped = match machine.read(&stamp_path) {
         Err(_) if !machine.lexists(&stamp_path) => None,
         Err(error) => {
@@ -356,6 +360,8 @@ pub fn rollback_facts(
                 .map(|(installed, backup, stamp_hash)| RollbackItem {
                     installed_hash: machine.sha256(&installed).ok(),
                     backup_hash: machine.sha256(&backup).ok(),
+                    installed_is_link: machine.is_symlink(&installed),
+                    backup_is_link: machine.is_symlink(&backup),
                     installed,
                     backup,
                     stamp_hash,
@@ -394,6 +400,11 @@ pub fn parse_rust_stamp(
                 path.display()
             )));
         };
+        // Two lines for one program would move its saved original twice, and the second move
+        // would fail with the first already done (decision P6A-1).
+        if pairs.iter().any(|(installed, _, _)| *installed == program.installed) {
+            return Err(blocked(format!("RUST_STAMP lists {} twice", path.display())));
+        }
         pairs.push((
             program.installed.clone(),
             program.backup.clone(),

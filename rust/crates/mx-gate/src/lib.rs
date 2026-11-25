@@ -54,24 +54,41 @@
 
 #[cfg(test)]
 mod anchor;
+pub mod app;
 mod cli;
 mod decision;
 pub mod deps;
+mod engine;
+#[cfg(test)]
+mod engine_tests;
 mod facts;
 mod gh;
 mod helper;
 mod identity;
 mod ids;
 mod logs;
+mod pending;
 mod ports;
 mod pr;
 mod progress;
+pub mod real;
+#[cfg(test)]
+mod real_tests;
 mod staleness;
+#[cfg(test)]
+mod testkit;
 mod update;
 mod verify;
+mod verify_run;
+#[cfg(test)]
+mod verify_tests;
 
 pub use cli::{Command, CommandError, Exit, USAGE, parse_command};
 pub use decision::{Action, GateDecision, PROGRAM};
+pub use engine::{
+    Dirs, Gate, GateConfig, NO_SUITE_HOST, Ports, Printed, RuntimeProbe, StampSource,
+    UNATTENDED_ASSERT,
+};
 pub use facts::{
     Approved, Check, CheckBoard, GreenBoard, MergeState, PrFacts, PrState, StateClear,
 };
@@ -90,9 +107,10 @@ pub use ports::{
 };
 pub use pr::{
     ClaimsClear, Conditions, Evidence, Mergeable, Merged, Merger, Posting, Pr, Receipted,
-    Unverified, Verified,
+    SpendToken, Unverified, Verified,
 };
 pub use progress::Progress;
 pub use staleness::{DiffFailure, Fresh, ProductionDiff};
 pub use update::UpdateRefusal;
 pub use verify::VerifyRefusal;
+pub use verify_run::VerifySettings;

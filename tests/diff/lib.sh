@@ -93,6 +93,12 @@ mx_env() {
     done
     MX_ENVV=(${kept[@]+"${kept[@]}"} "$1=$2")
 }
+# mx_env_bytes NAME ESCAPED: a variable whose value is not UTF-8. `env` may refuse such an
+# argument (coreutils in Rust does), so the value reaches the program through a bash that
+# exports it just before it execs the program; ESCAPED is the text printf %b turns into the
+# bytes, for example 'o\xff'. The same bash stands in front of both trees.
+MX_BYTES=()
+mx_env_bytes() { MX_BYTES+=("$1=$2"); }
 # mx_path_add DIR: directory searched after the stubs and before the real tools.
 mx_path_add() { MX_PATH_EXTRA="$MX_PATH_EXTRA:$1"; }
 
@@ -284,8 +290,13 @@ mx_run() {
     )
     mkdir -p "$MX_CWD" "$MX_TMP"
     local rc=0 t0=$SECONDS
+    local with_bytes=() script='' pair
+    for pair in ${MX_BYTES[@]+"${MX_BYTES[@]}"}; do
+        script+="export ${pair%%=*}=\"\$(printf '%b' '${pair#*=}')\"; "
+    done
+    if [ -n "$script" ]; then with_bytes=("$MX_REALBIN/bash" -c "${script}exec \"\$@\"" bash); fi
     ( cd "$MX_CWD" && exec timeout -k 5 "$MX_TIMEOUT" \
-          env -i "${base[@]}" ${MX_ENVV[@]+"${MX_ENVV[@]}"} "$MX_TREE/$prog" "$@" \
+          env -i "${base[@]}" ${MX_ENVV[@]+"${MX_ENVV[@]}"} ${with_bytes[@]+"${with_bytes[@]}"} "$MX_TREE/$prog" "$@" \
     ) >"$MX_RAW/stdout" 2>"$MX_RAW/stderr" </dev/null || rc=$?
     if [ "$rc" = 124 ] && [ $((SECONDS - t0)) -ge "$MX_TIMEOUT" ]; then
         mx_die "$prog timed out after ${MX_TIMEOUT}s; this is a hang, not a result"

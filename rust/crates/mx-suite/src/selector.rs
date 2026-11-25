@@ -47,6 +47,11 @@ impl CoverageFailure {
     /// `receipt_covers` dies. The text is indented two spaces, as the `printf`s write it.
     #[must_use]
     pub fn stderr_lines(&self) -> String {
+        // The bash prints nothing before it returns when `suite_dir` finds no directory
+        // (`dir="$(suite_dir)" || return 1`), and its caller dies with its own sentence.
+        if matches!(self, Self::Suite(SuiteError::NoSuiteDir)) {
+            return String::new();
+        }
         format!("  {self}\n")
     }
 }
@@ -231,6 +236,17 @@ mod tests {
             CoverageFailure::Uncovered { paths: vec!["bin/a".into(), "bin/b".into()] }
                 .stderr_lines(),
             "  no suite this receipt was earned by runs these production path(s):\n    bin/a\n    bin/b\n  Naming more suites does not help unless one of them runs the file.\n"
+        );
+    }
+
+    #[test]
+    fn a_missing_verify_d_prints_no_line_before_the_caller_dies_as_the_bash_does() {
+        // bash: local dir; dir="$(suite_dir)" || return 1   (nothing is printed)
+        assert_eq!(CoverageFailure::Suite(SuiteError::NoSuiteDir).stderr_lines(), "");
+        assert_eq!(
+            CoverageFailure::Suite(SuiteError::Bash { reason: "bash is gone".into() })
+                .stderr_lines(),
+            "  bash could not answer for the suite: bash is gone\n"
         );
     }
 

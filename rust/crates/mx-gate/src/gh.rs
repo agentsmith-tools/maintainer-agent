@@ -1,6 +1,6 @@
 //! The `gh` port of the merge gate, and its fake.
 
-use crate::{CommitId, IssueNumber, MergeState, PrFacts, PrNumber};
+use crate::{CommitId, IssueNumber, MergeState, PrFacts, PrNumber, SpendToken};
 use mx_core::Fact;
 use mx_ports::Script;
 use mx_suite::Recorder;
@@ -125,7 +125,9 @@ pub trait GhPort {
     /// Pinned to the head that was checked: without it a push landing between the
     /// production diff and this line is merged unchecked. The head is a
     /// [`CommitId`], so an unreadable head cannot reach here as an empty pin.
-    fn merge(&self, pr: &PrNumber, head: &CommitId) -> Result<(), GhFailure>;
+    /// `gh pr merge`. Spending: it takes a [`SpendToken`], which only `Merger::merge` can make, so
+    /// no code holding a port can merge without a `Pr<Mergeable>` (review rv271 F3).
+    fn merge(&self, pr: &PrNumber, head: &CommitId, spend: SpendToken) -> Result<(), GhFailure>;
 
     /// `gh pr diff N --repo R` with `2>&1`: the net diff, never `--patch`. An mbox
     /// carries each commit message, which the author writes, and a message can
@@ -424,7 +426,7 @@ impl GhPort for FakeGh {
         self.update_branch.next("GhPort::update_branch")
     }
 
-    fn merge(&self, pr: &PrNumber, head: &CommitId) -> Answer<()> {
+    fn merge(&self, pr: &PrNumber, head: &CommitId, _spend: SpendToken) -> Answer<()> {
         self.calls.push(GhCall::Merge { pr: pr.clone(), head: head.clone() });
         self.merge.next("GhPort::merge")
     }
@@ -510,7 +512,7 @@ mod tests {
     fn the_merge_call_records_the_head_it_is_pinned_to() {
         let gh = FakeGh::new();
         gh.script_merge(Script::always(Ok(())));
-        gh.merge(&pr("7"), &sha()).unwrap();
+        gh.merge(&pr("7"), &sha(), SpendToken::new()).unwrap();
         assert_eq!(gh.calls(), vec![GhCall::Merge { pr: pr("7"), head: sha() }]);
     }
 
@@ -618,7 +620,7 @@ mod tests {
     fn from_facts_leaves_the_write_calls_unscripted() {
         let gh = FakeGh::from_facts(&facts());
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            drop(gh.merge(&pr("7"), &sha()));
+            drop(gh.merge(&pr("7"), &sha(), SpendToken::new()));
         }));
         assert!(caught.is_err(), "a merge nobody scripted must not succeed in silence");
     }

@@ -1,7 +1,8 @@
 //! `shellcheck-sweep`: lint every shell script of the checkout, one linter process per script, in
 //! a memory-capped scope when the host has one.
 //!
-//! One `shellcheck` over `tests/run-tests.sh` peaks near 8 GB. Two sweeps at once, or one beside
+//! One `shellcheck` over the old single-file `tests/run-tests.sh` peaked near 8 GB (it is now a
+//! driver and parts under `tests/suites/`, each below 0.5 GB). Two sweeps at once, or one beside
 //! a build, took a laptop to a global out-of-memory kill. So the program waits until the free
 //! memory covers the job and refuses (75) when it never does, runs each linter in a `systemd-run`
 //! scope with `MemoryMax` and no swap so an overrun kills the linter and nothing else, and runs

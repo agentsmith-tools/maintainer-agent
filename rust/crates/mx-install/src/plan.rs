@@ -576,6 +576,10 @@ pub struct RollbackItem {
     pub stamp_hash: String,
     pub installed_hash: Option<String>,
     pub backup_hash: Option<String>,
+    /// The installed path is a symbolic link (decision P6A-1).
+    pub installed_is_link: bool,
+    /// The saved original is a symbolic link, dangling or not (decision P6A-1).
+    pub backup_is_link: bool,
 }
 
 /// What `--rollback` reads.
@@ -609,13 +613,23 @@ pub fn decide_rollback(f: &RollbackFacts) -> Decision {
     // build is restored from its saved original. One that does not and has no saved original
     // was restored already (a rollback that failed part way can run again). One whose saved
     // original is the very file installed never started its swap, and the copy is dropped.
-    // Anything else is a file this installer did not write, and the run refuses.
+    // Anything else is a file this installer did not write, and the run refuses. A link at either
+    // path is refused first, whatever it points at: a rollback never follows one and never
+    // replaces one (decision P6A-1), and a link to a file with the stamped hash passes every
+    // hash check below.
     let refuse = |detail: String| {
         Decision::Refuse(Refusal::RollbackBlocked { detail: OsString::from(detail) })
     };
     let mut steps = vec![Step::Say(cat(&[b"rolling back from ", raw(f.layout.share.as_os_str())]))];
     let mut restored = 0;
     for item in stamped {
+        for (path, is_link) in
+            [(&item.installed, item.installed_is_link), (&item.backup, item.backup_is_link)]
+        {
+            if is_link {
+                return refuse(link_detail(path));
+            }
+        }
         if item.installed_hash.as_deref() == Some(item.stamp_hash.as_str()) {
             if item.backup_hash.is_none() {
                 return refuse(format!("{} is missing", item.backup.display()));
@@ -638,6 +652,12 @@ pub fn decide_rollback(f: &RollbackFacts) -> Decision {
         format!("rolled back {restored} program(s) to the bash originals").into_bytes(),
     ));
     Decision::Proceed(Plan { steps, exit: 0 })
+}
+
+/// Why a rollback will not touch a path that is a symbolic link.
+#[must_use]
+pub fn link_detail(path: &Path) -> String {
+    format!("{} is a symbolic link; rollback never follows or replaces one", path.display())
 }
 
 /// The "kept" line for one checkout profile: what `grep -m1 '^STATE_DIR=' | sed ...`

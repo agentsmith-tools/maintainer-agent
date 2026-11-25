@@ -10,12 +10,24 @@ middle digit.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tests/run-tests.sh` is a driver plus eleven part files in `tests/suites/`.** One
+  `shellcheck` over the 12,260 line file peaked at 9.2 GB resident (14.4 GB in one run). The sweep
+  reached 9 to 10 GB three times in one day, and systemd-oomd killed the terminal scope once.
+  The cases are the same cases in the same order, run in the same shell: the suite still prints
+  1851 passed, 0 failed (260 source-coupled cases) and the same lines. The driver sources the
+  parts from an explicit list and fails naming any part that is missing, listed twice, without a
+  bash shebang, empty of cases or unlisted, and fails the run if a part ends the shell before the
+  summary. The exact total stays pinned by the `tests` figure in `check_claims.sh`. The largest file now lints at 484 MB.
+  A new case goes into the part that fits its topic. The skip line for a source-coupled block now names the part file and the line in it.
+
 ### Fixed
 
 - **The shellcheck sweep cap moves from 12G to 18G.** `shellcheck` on `tests/run-tests.sh`
   (12,260 lines) peaks at 14.4 GB resident, so the 12G scope killed the linter and every
-  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. Splitting the
-  file so no single lint needs this much is the follow-up.
+  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. The split above
+  is the follow-up that makes no single lint need this much.
 
 ### Security
 
@@ -52,6 +64,26 @@ middle digit.
   prove a change to the orchestrator, backends, classifier, installers, doctor or
   repo tool. A suite that defines `suite_named_only` is never inferred by
   `pick_suite`, so shell and docs pull requests keep their suites.
+- **`scripts/cutover.sh` moves a machine to the Rust programs and back.**
+  `build` makes a path-free release build of every shipped Rust program with a
+  sha256 table, `shadow` compares the deployed bash programs with the build on the
+  machine's own profiles (prompts, doctor, repo, merge verbs, installers, the five
+  checks) behind shims that refuse every write, `live` installs the build only when
+  `shadow-ok` holds the table of what is in the directory and reads the machine
+  back, `status` says which programs are bash or Rust by sha256 against
+  `RUST_STAMP`, and `rollback` puts the saved bash originals back from the stamp
+  alone, with no Rust binary. 252 cases in `tests/characterization/cutover-*.sh`,
+  128 mutants in `mutants-cutover.py`, and a differential of `rollback` against
+  `install --rollback` over 32 states
+  (`rust/crates/mx-install/tests/cutover-rollback.sh`). See
+  `docs/deploy/cutover.md`.
+
+### Fixed
+
+- **`install --rollback` no longer follows or replaces a symbolic link.** A link
+  where an installed program, its saved original or `RUST_STAMP` sits is refused
+  before anything moves, and a stamp that lists a program twice is refused
+  instead of failing half way through.
 
 ## [0.11.0] — 2026-11-09
 

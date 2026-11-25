@@ -104,6 +104,22 @@
 //!     let _ = mx_gate::ClaimsClear::new(todo!());
 //! }
 //! ```
+//!
+//! The spending call of the GitHub port is sealed the same way: it asks for a [`SpendToken`] only
+//! [`Merger::merge`] can make, so code that holds a port and a pull request number still cannot
+//! merge without a `Pr<Mergeable>` (review rv271 F3):
+//!
+//! ```compile_fail,E0061
+//! fn shortcut(gh: &dyn mx_gate::GhPort, pr: &mx_gate::PrNumber, head: &mx_gate::CommitId) {
+//!     let _ = gh.merge(pr, head);
+//! }
+//! ```
+//!
+//! ```compile_fail,E0624
+//! fn forge_the_token() {
+//!     let _ = mx_gate::SpendToken::new();
+//! }
+//! ```
 
 use crate::{
     Approved, CommitId, Confirmed, Fresh, GateDecision, GhPort, GreenBoard, LeaseFree, PrNumber,
@@ -430,6 +446,17 @@ impl Posting {
     }
 }
 
+/// The right to call [`GhPort::merge`]. Only [`Merger::merge`] makes one, from a `Pr<Mergeable>`.
+#[derive(Debug)]
+pub struct SpendToken(());
+
+impl SpendToken {
+    #[cfg_attr(not(test), allow(dead_code, reason = "made by Merger::merge only"))]
+    pub(crate) fn new() -> Self {
+        Self(())
+    }
+}
+
 /// What a merge did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
@@ -473,7 +500,7 @@ impl<'a> Merger<'a> {
     pub fn merge(&self, pr: Pr<Mergeable>) -> Result<Merged, GateDecision> {
         let Pr { number, state } = pr;
         self.gh
-            .merge(&number, &state.head)
+            .merge(&number, &state.head, SpendToken::new())
             .map_err(|failure| GateDecision::MergeFailed { output: failure.output })?;
         Ok(Merged { number, head: state.head })
     }

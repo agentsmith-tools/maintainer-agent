@@ -7,8 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "mx_gate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "maintainer-merge"
+path = "src/main.rs"
+
 [dependencies]
 mx-core.workspace = true
+mx-profile.workspace = true
 mx-ports.workspace = true
 mx-receipt.workspace = true
 mx-sandbox.workspace = true

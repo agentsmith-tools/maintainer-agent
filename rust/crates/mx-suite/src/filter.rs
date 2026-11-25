@@ -39,7 +39,7 @@ impl TestFilter {
         }
         let allowed =
             |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | ' ' | '-');
-        if text.starts_with('-') || !text.chars().all(allowed) {
+        if text.trim_start_matches(' ').starts_with('-') || !text.chars().all(allowed) {
             return Err(TestFilterError::Rejected { filter: text.to_string() });
         }
         Ok(Self(text.to_string()))
@@ -61,6 +61,19 @@ mod tests {
         for text in ["x", "a::b", "guard_bites", "tests/a.rs", "a b-c", "x-y"] {
             assert_eq!(TestFilter::parse(text).unwrap().as_str(), text);
         }
+    }
+
+    #[test]
+    fn a_filter_whose_first_word_is_an_option_is_refused_even_after_blanks_p3b_14() {
+        // The bash allow-list accepts ' -x' (its leading-dash test looks at the first character
+        // only); the runner would read it as an option (review rv271 F6).
+        for text in [" -x", "  --help", "\t-x", " -"] {
+            assert!(
+                matches!(TestFilter::parse(text), Err(TestFilterError::Rejected { .. })),
+                "{text:?}"
+            );
+        }
+        assert_eq!(TestFilter::parse("a -b").unwrap().as_str(), "a -b", "only the first word");
     }
 
     #[test]

@@ -587,6 +587,8 @@ fn item(installed: &str) -> RollbackItem {
         stamp_hash: "a".repeat(64),
         installed_hash: Some("a".repeat(64)),
         backup_hash: Some("b".repeat(64)),
+        installed_is_link: false,
+        backup_is_link: false,
     }
 }
 
@@ -690,4 +692,49 @@ fn a_rollback_refuses_an_installed_file_that_no_longer_matches_the_stamp() {
     let refusal = refusal(decide_rollback(&f));
     assert_eq!(refusal.exit_code(), 1);
     assert!(String::from_utf8(refusal.stderr()).unwrap().contains("no longer matches the stamp"));
+}
+
+// --- links (decision P6A-1) -----------------------------------------------------------
+
+#[test]
+fn a_rollback_refuses_an_installed_file_that_is_a_link_before_it_judges_its_hash() {
+    let mut f = rfacts();
+    // The link points at a file with the stamped hash, which is what a plain hash check accepts.
+    f.stamped.as_mut().unwrap()[1].installed_is_link = true;
+    let refusal = refusal(decide_rollback(&f));
+    assert_eq!(refusal.exit_code(), 1);
+    assert_eq!(
+        String::from_utf8(refusal.stderr()).unwrap(),
+        "install.sh: cannot roll back: /h/.local/share/maintainer/run.sh is a symbolic link; rollback never follows or replaces one\n"
+    );
+}
+
+#[test]
+fn a_rollback_refuses_a_saved_original_that_is_a_link_even_when_it_has_a_hash() {
+    let mut f = rfacts();
+    f.stamped.as_mut().unwrap()[0].backup_is_link = true;
+    let refusal = refusal(decide_rollback(&f));
+    assert_eq!(
+        String::from_utf8(refusal.stderr()).unwrap(),
+        "install.sh: cannot roll back: /h/.local/bin/maintainer-doctor.sh is a symbolic link; rollback never follows or replaces one\n"
+    );
+}
+
+#[test]
+fn a_dangling_link_at_a_saved_original_is_a_link_and_not_a_missing_file() {
+    let mut f = rfacts();
+    let second = &mut f.stamped.as_mut().unwrap()[1];
+    second.backup_hash = None;
+    second.backup_is_link = true;
+    let text = String::from_utf8(refusal(decide_rollback(&f)).stderr()).unwrap();
+    assert!(text.contains("run.sh.sh is a symbolic link"), "{text}");
+}
+
+#[test]
+fn the_first_problem_in_stamp_order_is_the_one_that_is_named() {
+    let mut f = rfacts();
+    f.stamped.as_mut().unwrap()[0].installed_hash = Some("d".repeat(64));
+    f.stamped.as_mut().unwrap()[1].installed_is_link = true;
+    let text = String::from_utf8(refusal(decide_rollback(&f)).stderr()).unwrap();
+    assert!(text.contains("maintainer-doctor no longer matches the stamp"), "{text}");
 }

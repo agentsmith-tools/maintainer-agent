@@ -7,6 +7,8 @@ Runs one set of scenarios against two trees (the bash tree today, a Rust tree la
     selftest.sh                          normaliser rules, compare exit codes, record guards, blind spots, determinism
     prove.sh <tree>                      detection mutants, the normaliser bite, and a mutant of every recorder guard
 
+`generate-gate-scenarios.py <out-dir> [seed [count]]` writes a seeded set of `maintainer-merge` scenarios (merge, update, receipt, show, usage; 330 by default) for the same two recordings.
+
 A scenario is one bash file in `scenarios/` with a shebang and no `. lib.sh` line. `record.sh` sources `lib.sh`, then the file, under `env -i`. The file builds stubs and state with the `mx_*` helpers and ends with exactly one `mx_run <program-in-tree> [args]`. PATH holds the stubs and symlinks to real tools only, so a tree may be bash or Rust.
 
 Each result directory holds:

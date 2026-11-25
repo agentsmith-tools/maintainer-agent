@@ -9,9 +9,10 @@
 # cases while suite_covers listed none of them, so a receipt for a change to one of them could not
 # be earned from the suite that runs it.
 #
-# It is a file of its own because tests/run-tests.sh is large enough that shellcheck needs about
-# 9 GB for it, and 45 more lines of data flow took that past the 12 GB cap of the lint sweep.
-# tests/run-tests.sh runs this file and counts one case for it. MX_TREE names the tree under test,
+# It is a file of its own because tests/run-tests.sh was one 12,000 line file that shellcheck
+# needed about 9 GB for, and 45 more lines of data flow took that past the 12 GB cap of the lint
+# sweep. The cases now live in tests/suites/, a part lints in under 0.5 GB, and this file stays
+# separate. tests/run-tests.sh runs this file and counts one case for it. MX_TREE names the tree under test,
 # as for the rest of the suite; the case files are read from this checkout.
 set -uo pipefail
 suite_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
