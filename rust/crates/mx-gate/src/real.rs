@@ -6,14 +6,15 @@
 //! because the black-box suites record the argv of every stub.
 
 use crate::{
-    Account, CommitId, DiffFailure, Dirs, GateGit, GhFailure, GhPort, Helper, HelperMissing,
-    HoldersFailure, IdentityPort, IssueNumber, LeaseAnswer, LockError, LockGuard, LockPort,
-    MergeState, PrNumber, Progress, Review, RuntimeProbe, Say, SpendToken, StampSource,
+    Account, CommitId, DiffFailure, Dirs, GateGit, GateStage, GhFailure, GhPort, Helper,
+    HelperMissing, HoldersFailure, IdentityPort, IssueNumber, LeaseAnswer, LockError, LockGuard,
+    LockPort, MergeState, PrNumber, Progress, Review, RuntimeProbe, Say, SpendToken, StampSource,
     UpdateFacts, WhoAmI,
 };
 use mx_core::Fact;
 use mx_ports::{Clock, Fs, FsError, GitError, Proc, ProcExit, ProcSpec};
 use mx_receipt::{Stamp, iso_with_offset};
+use mx_sandbox::{ContainedTree, RealSandbox, SandboxError};
 use mx_suite::Runtime;
 use serde_json::Value;
 use std::fs::OpenOptions;
@@ -741,6 +742,31 @@ impl RuntimeProbe for PathRuntime {
         } else {
             None
         }
+    }
+}
+
+/// The name the gate's executable has inside a tree a container mounts: a suite runs it as
+/// `/repo/.container-target/stage/maintainer-merge`.
+pub const STAGED_NAME: &str = "maintainer-merge";
+
+/// Stages the running gate binary into the tree through the sandbox that will run the container,
+/// so the hash the sandbox records is the one it checks before the run.
+pub struct RealStage<'a> {
+    sandbox: &'a RealSandbox,
+    exe: PathBuf,
+}
+
+impl<'a> RealStage<'a> {
+    /// A stage that copies `exe` for `sandbox`.
+    #[must_use]
+    pub fn new(sandbox: &'a RealSandbox, exe: &Path) -> Self {
+        Self { sandbox, exe: exe.to_path_buf() }
+    }
+}
+
+impl GateStage for RealStage<'_> {
+    fn stage(&self, tree: &ContainedTree) -> Result<(), SandboxError> {
+        self.sandbox.stage_executable(tree, &self.exe, STAGED_NAME).map(drop)
     }
 }
 

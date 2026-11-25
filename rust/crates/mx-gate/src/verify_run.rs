@@ -16,7 +16,7 @@ use mx_sandbox::{
     ContainedTree, ContainerInputs, ContainerSpec, ExtraArgs, LimitSource, Limits, SandboxError,
     SedExpression, Timeout,
 };
-use mx_suite::{LimitKey, ProdGlobs, SuiteName, TestFilter};
+use mx_suite::{LimitKey, ProdGlobs, Runtime, SuiteName, TestFilter};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -106,6 +106,12 @@ impl Gate<'_> {
         self.lease_gate(pr, Action::Verify)?;
         let runtime =
             self.p.runtime.runtime().ok_or_else(|| refuse(VerifyRefusal::NoContainerRuntime))?;
+        // `docker run` has no `--timeout`, and the bash passes it: a docker run failed at the
+        // clean run and read as "the test does not pass unmutated". Refused here by name
+        // (decision P3W-3); the sandbox refuses a docker runtime as well (P3A-13).
+        if runtime == Runtime::Docker {
+            return Err(die(&SandboxError::RuntimeHasNoRunTimeout.to_string()));
+        }
 
         let receipts = self.cfg.receipts();
         drop(self.p.dirs.make_dir(&receipts));
@@ -188,6 +194,9 @@ impl Gate<'_> {
             })
         })?;
         scratch.paths.borrow_mut().push(work.clone());
+        // The bash suite functions read `work`, a local of `cmd_verify` set by the line above
+        // (the characterization suite finds its case files through it).
+        self.p.suites.set_work(&work);
         let scratch_dir = self.p.sandbox.scratch_dir(&verify_work).map_err(|_| {
             refuse(VerifyRefusal::CannotCreateScratch {
                 verify_work: verify_work.display().to_string(),
@@ -267,6 +276,7 @@ impl Gate<'_> {
             let run = ContainerSpec::prefetch(inputs(prefetch.command.clone(), timeout))
                 .map_err(|e| die(&e.to_string()))?;
             let log = work.join("prefetch.log");
+            self.stage_gate(&tree)?;
             let code = self
                 .p
                 .sandbox
@@ -285,7 +295,7 @@ impl Gate<'_> {
         let clean_log = work.join("clean.log");
         let mut_log = work.join("mutated.log");
         self.p.say.say(&Progress::RunningUnmutated { filter: filter.as_str().to_string() });
-        let clean_rc = self.run_container(&run_spec, &clean_log)?;
+        let clean_rc = self.run_container(&tree, &run_spec, &clean_log)?;
         if clean_rc != 0 {
             let text = log_text(self.p.fs, &clean_log);
             if looks_killed(clean_rc) {
@@ -354,7 +364,7 @@ impl Gate<'_> {
             }));
         }
 
-        let mut_rc = self.run_container(&run_spec, &mut_log)?;
+        let mut_rc = self.run_container(&tree, &run_spec, &mut_log)?;
         if mut_rc == 0 {
             return Err(refuse(VerifyRefusal::GuardDoesNotBite {
                 filter: filter.as_str().to_string(),
@@ -417,8 +427,16 @@ impl Gate<'_> {
         Ok(())
     }
 
+    /// Stages the gate's executable into the tree. Called immediately before every container run:
+    /// the tree is mounted writable, so a staged file can change between two runs and the
+    /// sandbox refuses a run over a file that is not the one it staged (decision P3W-1).
+    fn stage_gate(&self, tree: &ContainedTree) -> R<()> {
+        self.p.stage.stage(tree).map_err(|error| die(&error.to_string()))
+    }
+
     /// One container run. A run that never started reads as the runtime's own failure, 125.
-    fn run_container(&self, spec: &ContainerSpec, log: &Path) -> R<i32> {
+    fn run_container(&self, tree: &ContainedTree, spec: &ContainerSpec, log: &Path) -> R<i32> {
+        self.stage_gate(tree)?;
         match self.p.sandbox.run_container(spec, log) {
             Ok(exit) => Ok(exit.code()),
             Err(error) => Err(die(&error.to_string())),

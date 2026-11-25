@@ -67,7 +67,6 @@ mod helper;
 mod identity;
 mod ids;
 mod logs;
-mod pending;
 mod ports;
 mod pr;
 mod progress;
@@ -102,8 +101,8 @@ pub use ids::{
 };
 pub use logs::{first_failure_line, looks_environmental, looks_killed};
 pub use ports::{
-    FakeGateGit, FakeLockPort, FakeSay, GateGit, GitCall, LockError, LockGuard, LockKind, LockPort,
-    Say,
+    FakeGateGit, FakeGateStage, FakeLockPort, FakeSay, GateGit, GateStage, GitCall, LockError,
+    LockGuard, LockKind, LockPort, Say,
 };
 pub use pr::{
     ClaimsClear, Conditions, Evidence, Mergeable, Merged, Merger, Posting, Pr, Receipted,

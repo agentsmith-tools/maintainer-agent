@@ -73,7 +73,8 @@ pub struct GateConfig {
     pub in_run: bool,
     /// Makes the temporary refs of this run its own, so two runs never share one.
     pub run_id: u32,
-    /// False while the suite and sandbox adapters of the p3a lane are not built in.
+    /// True when the ports hold a suite host and a sandbox. False refuses `verify`, `verify-part`
+    /// and a partial receipt with `NO_SUITE_HOST`; the program always sets it, a test turns it off.
     pub has_suite_host: bool,
     /// `UPDATE_READBACK_READS`.
     pub readback_reads: Option<String>,
@@ -123,6 +124,8 @@ pub struct Ports<'a> {
     pub suites: &'a dyn SuiteHost,
     /// Extraction, mutation and the container.
     pub sandbox: &'a dyn mx_sandbox::Sandbox,
+    /// Puts the gate's executable into the tree before each container run.
+    pub stage: &'a dyn crate::GateStage,
     /// The container runtime on this machine.
     pub runtime: &'a dyn RuntimeProbe,
     /// The verify limits and timeouts of the profile (`VERIFY_TIMEOUT` and friends).

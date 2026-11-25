@@ -648,3 +648,192 @@ fn a_scratch_directory_that_cannot_be_made_refuses_by_name_and_removes_the_first
     })));
     refuse(&w, &VerifyRefusal::CannotCreateScratch { verify_work: "/s/verify-work".into() });
 }
+
+// ----- the gate's own executable in the tree, the suite host's `work`, and docker (P3W-1 to P3W-3) --
+
+/// What a sandbox and a stage did, in one list, so the order they ran in can be read.
+struct Order(std::sync::Mutex<Vec<String>>);
+
+impl Order {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn push(&self, line: String) {
+        self.0.lock().unwrap().push(line);
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+struct OrderedSandbox<'a> {
+    inner: &'a mx_sandbox::FakeSandbox,
+    order: &'a Order,
+}
+
+impl mx_sandbox::Sandbox for OrderedSandbox<'_> {
+    fn extract_tree(
+        &self,
+        repo: &std::path::Path,
+        rev: &str,
+        dest: &std::path::Path,
+    ) -> Result<ExtractedTree, SandboxError> {
+        self.inner.extract_tree(repo, rev, dest)
+    }
+
+    fn tree_escapes(&self, tree: &ExtractedTree) -> Result<Vec<Escape>, SandboxError> {
+        self.inner.tree_escapes(tree)
+    }
+
+    fn apply_mutation(
+        &self,
+        tree: &mx_sandbox::ContainedTree,
+        globs: &mx_core::NonEmpty<mx_suite::MutateGlob>,
+        expression: &SedExpression,
+    ) -> Result<mx_sandbox::Mutated, SandboxError> {
+        self.order.push("mutate".into());
+        self.inner.apply_mutation(tree, globs, expression)
+    }
+
+    fn scratch_dir(&self, parent: &std::path::Path) -> Result<PathBuf, SandboxError> {
+        self.inner.scratch_dir(parent)
+    }
+
+    fn seed_index(&self, tree: &mx_sandbox::ContainedTree) -> Result<(), SandboxError> {
+        self.inner.seed_index(tree)
+    }
+
+    fn run_container(
+        &self,
+        spec: &mx_sandbox::ContainerSpec,
+        log: &std::path::Path,
+    ) -> Result<ContainerExit, SandboxError> {
+        let name = log.file_name().unwrap().to_string_lossy().into_owned();
+        self.order.push(format!("run {name}"));
+        self.inner.run_container(spec, log)
+    }
+}
+
+struct OrderedStage<'a> {
+    order: &'a Order,
+}
+
+impl crate::GateStage for OrderedStage<'_> {
+    fn stage(&self, tree: &mx_sandbox::ContainedTree) -> Result<(), SandboxError> {
+        self.order.push(format!("stage {}", tree.root().display()));
+        Ok(())
+    }
+}
+
+fn go_ordered(w: &World, order: &Order) -> Result<crate::Printed, Exit> {
+    let sandbox = OrderedSandbox { inner: &w.sandbox, order };
+    let stage = OrderedStage { order };
+    let ports = crate::Ports { sandbox: &sandbox, stage: &stage, ..w.ports() };
+    crate::Gate::new(&w.cfg, ports).verify(
+        false,
+        &pr("7"),
+        &HeadArg::parse("0123456").unwrap(),
+        &TestFilter::parse("guard").unwrap(),
+        &SedExpression::parse("s/a/b/").unwrap(),
+        None,
+    )
+}
+
+#[test]
+fn the_executable_is_staged_right_before_the_clean_run_and_again_right_before_the_mutated_run() {
+    let w = world();
+    let order = Order::new();
+    go_ordered(&w, &order).unwrap();
+    assert_eq!(
+        order.lines(),
+        [
+            format!("stage {WORK}"),
+            "run clean.log".to_string(),
+            "mutate".to_string(),
+            format!("stage {WORK}"),
+            "run mutated.log".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_suite_with_a_prefetch_stages_before_the_fetch_as_well_so_three_runs_have_three_stagings() {
+    let w = prefetching_world();
+    let order = Order::new();
+    go_ordered(&w, &order).unwrap();
+    let stage = format!("stage {WORK}");
+    assert_eq!(
+        order.lines(),
+        [
+            stage.clone(),
+            "run prefetch.log".to_string(),
+            stage.clone(),
+            "run clean.log".to_string(),
+            "mutate".to_string(),
+            stage,
+            "run mutated.log".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_staging_that_fails_stops_the_verify_before_the_container_starts_and_records_nothing() {
+    let w = world();
+    w.stage.fail_with(SandboxError::Stage {
+        path: PathBuf::from("/w/.container-target/stage/maintainer-merge"),
+        reason: "disk full".into(),
+    });
+    let exit = go(&w, false, None).unwrap_err();
+    assert_eq!(exit.code, 1);
+    assert_eq!(
+        exit.stderr,
+        "maintainer-merge: cannot stage /w/.container-target/stage/maintainer-merge: disk full\n"
+    );
+    assert!(runs(&w).is_empty(), "no container started over an unstaged tree");
+    assert!(w.receipt_on_disk(7).is_none());
+}
+
+#[test]
+fn a_staging_that_fails_before_the_mutated_run_leaves_the_mutated_container_unstarted() {
+    let w = world();
+    w.stage.fail_from(
+        2,
+        SandboxError::Stage { path: PathBuf::from("/w/stage"), reason: "gone".into() },
+    );
+    let exit = go(&w, false, None).unwrap_err();
+    assert!(exit.stderr.contains("gone"), "{exit:?}");
+    assert_eq!(runs(&w).len(), 1, "only the clean run started");
+    assert!(w.receipt_on_disk(7).is_none());
+    assert_eq!(w.stage.calls().len(), 2);
+}
+
+#[test]
+fn the_suite_host_is_told_the_extracted_tree_before_it_is_asked_for_the_command() {
+    let w = world();
+    go(&w, false, None).unwrap();
+    let calls = w.suites.calls();
+    let told = calls
+        .iter()
+        .position(|c| *c == mx_suite::SuiteCall::SetWork(PathBuf::from(WORK)))
+        .expect("set_work was called with the extracted tree");
+    let asked = calls
+        .iter()
+        .position(|c| matches!(c, mx_suite::SuiteCall::Command { .. }))
+        .expect("the command was asked for");
+    assert!(told < asked, "{calls:?}");
+}
+
+#[test]
+fn a_machine_with_only_docker_is_refused_by_name_before_the_tree_is_extracted() {
+    let mut w = world();
+    w.runtime.0 = Some(mx_suite::Runtime::Docker);
+    let exit = go(&w, false, None).unwrap_err();
+    assert_eq!(
+        exit.stderr,
+        "maintainer-merge: docker run has no --timeout, so the verify container cannot be bounded under docker; use podman\n"
+    );
+    assert!(w.sandbox.calls().is_empty(), "nothing was extracted, mutated or run");
+    assert!(w.stage.calls().is_empty());
+}

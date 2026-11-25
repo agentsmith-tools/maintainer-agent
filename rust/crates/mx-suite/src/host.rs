@@ -127,6 +127,12 @@ pub trait SuiteHost {
     fn inferable(&self, name: &SuiteName) -> Result<bool, SuiteError> {
         Ok(!self.load(name)?.spec().named_only)
     }
+
+    /// Tells the host where the verify run extracted the pull request. The bash gate keeps the
+    /// directory in `work`, a local of `cmd_verify` that every suite function can read, and the
+    /// characterization suite reads it to find its case files. A host that has no such variable
+    /// ignores the call. Added by the wiring lane (P3W-2); additive.
+    fn set_work(&self, _work: &Path) {}
 }
 
 /// One call to a fake host or to a suite it loaded.
@@ -142,6 +148,7 @@ pub enum SuiteCall {
     Requires { suite: SuiteName, runtime: Runtime },
     Limit { suite: SuiteName, key: LimitKey },
     PrefetchGuard { suite: SuiteName, tree: PathBuf },
+    SetWork(PathBuf),
 }
 
 /// A suite with scripted answers.
@@ -392,6 +399,10 @@ impl SuiteHost for FakeSuiteHost {
             Some(suite) => Ok(Box::new(suite.clone())),
             None => Err(SuiteError::NotOnDisk { name: name.clone(), dir: dir.clone() }),
         }
+    }
+
+    fn set_work(&self, work: &Path) {
+        self.calls.push(SuiteCall::SetWork(work.to_path_buf()));
     }
 }
 

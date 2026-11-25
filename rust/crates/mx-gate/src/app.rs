@@ -3,19 +3,23 @@
 //! environment and exits with the status this returns.
 
 use crate::real::{
-    FileLocks, PathRuntime, RealGateGit, RealGh, RealHelper, RealIdentity, RealStamps, Runner,
-    StdDirs, StdFs, StdoutSay, SystemClock,
+    FileLocks, PathRuntime, RealGateGit, RealGh, RealHelper, RealIdentity, RealStage, RealStamps,
+    Runner, StdDirs, StdFs, StdoutSay, SystemClock,
 };
 use crate::{
     Account, Command, Exit, Gate, GateConfig, Ports, Posting, StampSource, USAGE, VerifySettings,
     parse_command,
 };
-use mx_ports::{Proc, RealProc};
+use mx_ports::{Proc, RealPipe, RealProc};
 use mx_profile::{LoadEnv, load_profile};
-use mx_suite::{LimitKey, ProdGlobs};
+use mx_sandbox::{RUNTIME_ENV_NAMES, RealSandbox, pick_env};
+use mx_suite::{
+    HostSelector, LimitKey, ProdGlobs, RealSuiteHost, Runtime, SUITE_ENV_NAMES, SuiteDirs,
+};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The search path when the caller has none.
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -73,6 +77,24 @@ pub fn child_env(vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+/// The variables a suite function can read: what a child receives, plus the ones the shipped
+/// suites name ([`SUITE_ENV_NAMES`]), from the profile or the environment as the bash shell
+/// that sources a suite sees them. No credential.
+fn suite_env(
+    vars: &BTreeMap<String, String>,
+    pick: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut env = child_env(vars);
+    for name in SUITE_ENV_NAMES {
+        if env.iter().all(|(have, _)| have != name)
+            && let Some(value) = pick(name)
+        {
+            env.push((name.to_string(), value));
+        }
+    }
+    env
 }
 
 /// Where the program's own files are.
@@ -188,6 +210,9 @@ fn is_read_by_the_gate(name: &str) -> bool {
         || name.starts_with("VERIFY_")
         || name.starts_with("PREFETCH_")
         || matches!(name, "PROD_GLOBS" | "CLAIM_LABEL" | "CLASSIFY_TIMEOUT" | "HOME" | "PATH")
+        // The suites and the container runtime read these (P3W-4).
+        || SUITE_ENV_NAMES.contains(&name)
+        || RUNTIME_ENV_NAMES.contains(&name)
         // Everything a child receives: a value dropped here would run `gh` or `git` without it
         // (review rv271b N2).
         || CHILD_ENV_NAMES.contains(&name)
@@ -316,7 +341,7 @@ fn build_config(
         claim_label: pick("CLAIM_LABEL").unwrap_or_default(),
         receipt_key: PathBuf::from(receipt_key),
         run_id: std::process::id(),
-        has_suite_host: false,
+        has_suite_host: true,
         in_run: vars.get("MAINTAINER_IN_RUN").is_some_and(|v| !v.is_empty()),
         readback_reads: pick("UPDATE_READBACK_READS"),
         readback_wait: pick("UPDATE_READBACK_WAIT"),
@@ -439,7 +464,28 @@ fn run_inner(
         let exit = crate::deps::run(&env_map, pr, sha, &wiring);
         return if exit.code == 0 { Ok(0) } else { Err(exit) };
     }
-    let pending = crate::pending::Pending;
+    // The suites and the sandbox start their own processes through a `Proc` each, with the
+    // variables they read and no credential (decision P3W-4).
+    let host = RealSuiteHost::new(
+        Arc::new(RealProc::new(search_path, suite_env(vars, &pick))),
+        SuiteDirs {
+            profile_dir: pick("PROFILE_DIR").unwrap_or_default(),
+            home: vars.get("HOME").cloned().unwrap_or_default(),
+            profile: pick("MAINTAINER_PROFILE").unwrap_or_default(),
+            here: tree.bin_dir.clone(),
+        },
+    );
+    let selector = HostSelector::new(&host);
+    // A docker machine is refused by name before the sandbox is used (P3W-3), so the sandbox is
+    // always made for podman; the runtime of each run is in its own spec.
+    let sandbox = RealSandbox::new(
+        Arc::new(RealProc::new(search_path, child_env(vars))),
+        Arc::new(RealPipe::new(search_path, None)),
+        Runtime::Podman,
+        pick_env(&RUNTIME_ENV_NAMES, |name| vars.get(name).cloned()),
+    )
+    .map_err(|error| Exit::die(1, &error.to_string()))?;
+    let stage = RealStage::new(&sandbox, exe);
     let gate = Gate::new(
         &cfg,
         Ports {
@@ -453,9 +499,10 @@ fn run_inner(
             say: &StdoutSay,
             clock: &SystemClock,
             stamps: &stamps,
-            selector: &pending,
-            suites: &pending,
-            sandbox: &pending,
+            selector: &selector,
+            suites: &host,
+            sandbox: &sandbox,
+            stage: &stage,
             runtime: &runtime,
             verify: &settings,
         },
@@ -507,6 +554,33 @@ mod tests {
     fn a_credential_is_kept_out_of_the_base_environment_so_only_gh_and_git_get_it() {
         let env = child_env(&vars(&[("GH_TOKEN", "t"), ("GITHUB_TOKEN", "t"), ("GH_HOST", "h")]));
         assert_eq!(names(&env), ["GH_HOST"]);
+    }
+
+    #[test]
+    fn a_suite_gets_what_a_child_gets_plus_the_variables_the_shipped_suites_read_and_no_credential()
+    {
+        let env = vars(&[
+            ("HOME", "/h"),
+            ("GH_TOKEN", "t"),
+            ("EDITOR", "vi"),
+            ("MAINTAINER_CARGO_JOBS", "2"),
+        ]);
+        let from_profile = vars(&[("CHARACTERIZATION_DIR", "/c"), ("MAINTAINER_SHELL_IMAGE", "i")]);
+        let pick = |name: &str| env.get(name).or_else(|| from_profile.get(name)).cloned();
+        let seen = suite_env(&env, &pick);
+        assert_eq!(
+            names(&seen),
+            ["HOME", "MAINTAINER_CARGO_JOBS", "MAINTAINER_SHELL_IMAGE", "CHARACTERIZATION_DIR"]
+        );
+        assert!(seen.contains(&("CHARACTERIZATION_DIR".to_string(), "/c".to_string())));
+    }
+
+    #[test]
+    fn a_suite_variable_that_the_environment_holds_is_not_added_twice() {
+        let env = vars(&[("HOME", "/h"), ("MAINTAINER_SHELL_IMAGE", "i")]);
+        let pick = |name: &str| env.get(name).cloned();
+        let seen = suite_env(&env, &pick);
+        assert_eq!(seen.iter().filter(|(n, _)| n == "MAINTAINER_SHELL_IMAGE").count(), 1);
     }
 
     #[test]
@@ -803,6 +877,27 @@ mod run_tests {
             "an unrelated name is ignored"
         );
         assert!(refuse_non_utf8(&[]).is_ok());
+    }
+
+    #[test]
+    fn a_non_text_value_of_a_name_a_suite_or_the_container_runtime_reads_refuses_too_p3w_4() {
+        for name in [
+            "CHARACTERIZATION_DIR",
+            "MAINTAINER_SHELL_IMAGE",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "CONTAINERS_CONF",
+            "CONTAINERS_STORAGE_CONF",
+            "XDG_RUNTIME_DIR",
+        ] {
+            let exit = refuse_non_utf8(&[name.to_string()]).unwrap_err();
+            assert_eq!(exit.code, 64, "{name}");
+            assert!(exit.stderr.contains(name), "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn the_program_is_built_with_a_suite_host_and_a_sandbox_p3w_4() {
+        assert!(config(&[]).has_suite_host);
     }
 
     #[test]

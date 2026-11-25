@@ -2,6 +2,7 @@
 
 use crate::{DiffFailure, PrNumber, Progress};
 use mx_ports::{GitError, Script};
+use mx_sandbox::{ContainedTree, SandboxError};
 use mx_suite::Recorder;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -182,6 +183,61 @@ impl GateGit for FakeGateGit {
 
     fn delete_branch(&self, repo: &Path, name: &str) {
         self.calls.push(GitCall::DeleteBranch { repo: repo.into(), name: name.into() });
+    }
+}
+
+/// Puts the gate's own executable into the tree a container mounts, so a suite that tests the gate
+/// can run it from inside the container (the host path of the binary does not exist there).
+///
+/// The sandbox records a hash of every staged file and refuses to start a container when one
+/// changed, and a container of an earlier run has the tree mounted writable. So `verify` calls
+/// this IMMEDIATELY before each container run, the prefetch, the unmutated run and the mutated
+/// run, and never relies on an earlier call (decision P3W-1).
+pub trait GateStage {
+    /// Copies the executable to `.container-target/stage/<name>` in `tree`. An `Err` ends the
+    /// verify: a container must not start over a file that could not be staged.
+    fn stage(&self, tree: &ContainedTree) -> Result<(), SandboxError>;
+}
+
+/// A [`GateStage`] that records the root of every tree it was asked to stage into.
+#[derive(Debug, Default)]
+pub struct FakeGateStage {
+    calls: Recorder<PathBuf>,
+    fail: Mutex<Option<(usize, SandboxError)>>,
+}
+
+impl FakeGateStage {
+    /// A stage that succeeds.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes every call answer `error`.
+    pub fn fail_with(&self, error: SandboxError) {
+        self.fail_from(1, error);
+    }
+
+    /// Makes call number `first` (counted from 1) and every later call answer `error`.
+    pub fn fail_from(&self, first: usize, error: SandboxError) {
+        *self.fail.lock().unwrap_or_else(PoisonError::into_inner) = Some((first, error));
+    }
+
+    /// The tree roots staged into so far, in order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<PathBuf> {
+        self.calls.entries()
+    }
+}
+
+impl GateStage for FakeGateStage {
+    fn stage(&self, tree: &ContainedTree) -> Result<(), SandboxError> {
+        self.calls.push(tree.root().to_path_buf());
+        let number = self.calls.entries().len();
+        match self.fail.lock().unwrap_or_else(PoisonError::into_inner).clone() {
+            Some((first, error)) if number >= first => Err(error),
+            _ => Ok(()),
+        }
     }
 }
 

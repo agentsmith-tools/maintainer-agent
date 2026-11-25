@@ -20,7 +20,7 @@
 //! caller that builds the adapter with [`mx_ports::RealProc::from_process_env`] puts those
 //! names in its allowlist. `work` is the extracted tree: the characterization suite reads
 //! it as a variable of its caller (the bash gate defines it as a local of `cmd_verify`),
-//! so [`RealSuiteHost::set_work`] sets it for every later question.
+//! so [`SuiteHost::set_work`] sets it for every later question.
 
 use crate::{
     ImageRef, LimitKey, MutateGlob, Prefetch, Runtime, Suite, SuiteError, SuiteHost, SuiteName,
@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// The variables the shipped `verify.d` suites read, besides the ones every shell has.
-/// `work` is not here: it is set by [`RealSuiteHost::set_work`].
+/// `work` is not here: it is set by [`SuiteHost::set_work`].
 pub const SUITE_ENV_NAMES: [&str; 4] =
     ["HOME", "MAINTAINER_CARGO_JOBS", "MAINTAINER_SHELL_IMAGE", "CHARACTERIZATION_DIR"];
 
@@ -209,11 +209,6 @@ impl RealSuiteHost {
         Self { shared: Arc::new(Shared { proc, work: Mutex::new(None) }), dirs }
     }
 
-    /// Sets the `work` variable every later question sees: the extracted tree.
-    pub fn set_work(&self, work: &Path) {
-        *self.shared.work.lock().unwrap_or_else(PoisonError::into_inner) = Some(work.to_path_buf());
-    }
-
     fn file(&self, name: &SuiteName) -> Result<(PathBuf, PathBuf), SuiteError> {
         let dir = self.dirs.find()?;
         let file = dir.join(name.file_name());
@@ -279,6 +274,11 @@ impl SuiteHost for RealSuiteHost {
     fn inferable(&self, name: &SuiteName) -> Result<bool, SuiteError> {
         let (_, file) = self.file(name)?;
         Ok(code(&self.shared.ask("inferable", &file, &[])?) == 0)
+    }
+
+    /// Sets the `work` variable every later question sees: the extracted tree.
+    fn set_work(&self, work: &Path) {
+        *self.shared.work.lock().unwrap_or_else(PoisonError::into_inner) = Some(work.to_path_buf());
     }
 }
 

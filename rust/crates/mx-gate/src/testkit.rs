@@ -3,9 +3,9 @@
 //! the gate then does.
 
 use crate::{
-    Account, Dirs, Exit, FakeGateGit, FakeGh, FakeHelper, FakeIdentity, FakeLockPort, FakeSay,
-    Gate, GateConfig, LeaseAnswer, Ports, Posting, PrNumber, RuntimeProbe, StampSource,
-    VerifySettings, WhoAmI,
+    Account, Dirs, Exit, FakeGateGit, FakeGateStage, FakeGh, FakeHelper, FakeIdentity,
+    FakeLockPort, FakeSay, Gate, GateConfig, LeaseAnswer, Ports, Posting, PrNumber, RuntimeProbe,
+    StampSource, VerifySettings, WhoAmI,
 };
 use mx_ports::{EffectLog, FakeClock, FakeFs, Script};
 use mx_receipt::{DependencyFacts, FoldBase, Key, Part, Receipt, Signed, Stamp};
@@ -73,6 +73,7 @@ pub struct World {
     pub selector: FakeSelector,
     pub suites: FakeSuiteHost,
     pub sandbox: FakeSandbox,
+    pub stage: FakeGateStage,
     pub runtime: FixedRuntime,
     pub verify: VerifySettings,
 }
@@ -150,6 +151,7 @@ impl World {
             selector: FakeSelector::new(),
             suites: FakeSuiteHost::new("/verify.d", Vec::new()),
             sandbox: FakeSandbox::new(),
+            stage: FakeGateStage::new(),
             runtime: FixedRuntime(Some(Runtime::Podman)),
             verify: VerifySettings {
                 verify_timeout: "600".into(),
@@ -206,6 +208,7 @@ impl World {
                 selector: &self.selector,
                 suites: &self.suites,
                 sandbox: &self.sandbox,
+                stage: &self.stage,
                 runtime: &self.runtime,
                 verify: &self.verify,
             }
