@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the characterization tests (tests/characterization/{gate,run,doctor,repo,install,checks}-*.sh)
+# Runs the characterization tests (tests/characterization/{gate,run,doctor,repo,install,checks,cutover}-*.sh)
 # and prints "N cases, P passed, F failed".
 #
 # These cases record what the bash programs do today, odd
@@ -25,8 +25,9 @@ printf 'tree under test: %s\n' "$MX_TREE"
 
 # Arguments name case files to run (gate-usage.sh, ...). With none, every file of
 # a known family runs: gate (the merge gate), run (the orchestrator), doctor,
-# repo, install and checks (the repository checks: claims, action pins, the
-# linter sweep, the eval rules and the containment probe). Helpers (lib*.sh)
+# repo, install, checks (the repository checks: claims, action pins, the
+# linter sweep, the eval rules and the containment probe) and cutover (the
+# tooling that moves a machine to the Rust programs and back). Helpers (lib*.sh)
 # never run. A name that matches no file is
 # an error, not an empty run.
 shopt -s nullglob
@@ -40,7 +41,7 @@ if [ "$#" -gt 0 ]; then
         files+=("$here/characterization/$want")
     done
 else
-    files=("$here"/characterization/{gate,run,doctor,repo,install,checks}-*.sh)
+    files=("$here"/characterization/{gate,run,doctor,repo,install,checks,cutover}-*.sh)
 fi
 if [ "${#files[@]}" -eq 0 ]; then
     echo "run-characterization: no case files found; this run inspected nothing" >&2
