@@ -147,7 +147,7 @@ m("sweep-meminfo-unreadable", SW, "is not readable here; not checking free memor
 m("sweep-ci-empty", SW, "if [ -z \"${CI:-}\" ]; then\n    if [ -r \"$meminfo\" ]; then", "if [ -z \"${CI+x}\" ]; then\n    if [ -r \"$meminfo\" ]; then", SWC)
 m("sweep-ci-cap", SW, "if [ -z \"${CI:-}\" ] && [ -z \"${MAGENT_SWEEP_NO_CAP:-}\" ]; then", "if [ -z \"${MAGENT_SWEEP_NO_CAP:-}\" ]; then", SWC)
 m("sweep-no-cap-empty", SW, "[ -z \"${MAGENT_SWEEP_NO_CAP:-}\" ]; then", "[ -z \"${MAGENT_SWEEP_NO_CAP+x}\" ]; then", SWC)
-m("sweep-cap-default", SW, "${MAGENT_SWEEP_MEM_MAX:-12G}", "${MAGENT_SWEEP_MEM_MAX:-13G}", SWC)
+m("sweep-cap-default", SW, "${MAGENT_SWEEP_MEM_MAX:-18G}", "${MAGENT_SWEEP_MEM_MAX:-19G}", SWC)
 m("sweep-probe-swap", SW, "-p \"MemoryMax=$cap\" -p MemorySwapMax=0 true", "-p \"MemoryMax=$cap\" true", SWC)
 m("sweep-runner-swap", SW, "runner=(systemd-run --user --scope --quiet -p \"MemoryMax=$cap\" -p MemorySwapMax=0)", "runner=(systemd-run --user --scope --quiet -p \"MemoryMax=$cap\")", SWC)
 m("sweep-no-cap-text", SW, "relying on the free-memory check.", "relying on the memory check.", SWC)

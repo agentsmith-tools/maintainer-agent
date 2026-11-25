@@ -23,11 +23,20 @@ suite_named_only() { return 0; }
 # orchestrator, the doctor, the repo tool, the MCP server), everything under
 # lib/ (run.sh, the classifier's failure-shapes.json, the profile loader and
 # every backend in lib/backends/), the installers, the platform units the
-# installer cases read, and the evals the doctor cases run. A path outside this
+# installer cases read, the evals the doctor cases run, and the other four
+# repository checks (check_claims.sh, shellcheck-sweep.sh, verify-action-pins.sh
+# and containment-probe.sh), which the checks-*.sh cases run. A path outside this
 # list is not run by any case, so a receipt for it would prove nothing.
+#
+# Each check is listed by name and not by directory: scripts/ and tests/ hold
+# files no case runs (the hook lock, the suite itself). tests/run-tests.sh checks
+# this list against the tree: every path named in the opening sentence of a case
+# file must be accepted here.
 suite_covers() {
     case "$1" in
         bin/*|lib/*|install.sh|new-profile.sh|platform/*|evals/*) return 0 ;;
+        scripts/check_claims.sh|scripts/shellcheck-sweep.sh|scripts/verify-action-pins.sh) return 0 ;;
+        tests/containment-probe.sh) return 0 ;;
     esac
     return 1
 }

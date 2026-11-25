@@ -25,6 +25,7 @@ A binary's `main` deals with `SIGPIPE`, because Rust ignores it. Restoring the d
 `crates/mx-doctor` is `bin/maintainer-doctor` in Rust: the library holds every check as a decision over facts read through the ports, and the binary is named `maintainer-doctor`. Its tests are in `crates/mx-doctor/tests/`:
 
 - `blackbox.sh`: the doctor characterization cases of `tests/characterization/` run against an assembled tree (`rust/scripts/assemble-tree.sh`), three times, with the four pinned differences named in the script.
+- `flock.rs`: the flock check on a real search path. The check is `command -v flock`, so bash decides: a flock file without the execute bit still counts as on `PATH`, a directory or a dangling link named flock does not, and a flock that exits non-zero counts and is never run. `doctor-core.sh` pins the same five cases for both builds.
 - `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit code, the order of every external call and the state tree.
 - `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
 
@@ -43,7 +44,7 @@ The plan names the opencode key only when the backend read it from `~/.groq-stag
 
 `crates/mx-checks` is the five repository checks in Rust: `check-claims` (`scripts/check_claims.sh`), `shellcheck-sweep` (`scripts/shellcheck-sweep.sh`), `verify-action-pins` (`scripts/verify-action-pins.sh`), `run-evals` (`evals/run-evals.sh`) and `containment-probe` (`tests/containment-probe.sh`). Each is a library function over facts read through two ports, the process port of `mx-ports` and the `Host` trait of this crate (the file system and `command -v`), plus a binary of three lines. `scripts/with-hook-lock.sh` and `.githooks/pre-commit` stay bash: the gate that tests the Rust build must not depend on it.
 
-The sweep keeps the memory cap: the program waits for `MemAvailable`, probes `systemd-run --user --scope`, and runs each linter as `systemd-run ... -p MemoryMax=12G -p MemorySwapMax=0 nice -n 15 shellcheck --severity=warning FILE`. A test pins that chain, in that order, for the probe and for every run.
+The sweep keeps the memory cap: the program waits for `MemAvailable`, probes `systemd-run --user --scope`, and runs each linter as `systemd-run ... -p MemoryMax=18G -p MemorySwapMax=0 nice -n 15 shellcheck --severity=warning FILE`. A test pins that chain, in that order, for the probe and for every run.
 
 `verify-action-pins` is the one program that does not repeat its script on a hostile input (decision `P4B-16`). The script puts the repository and the tag of a pin, text from a workflow file, into the path of `gh api` as they are, so `uses: o/..@SHA # v1` or a tag of `v1?x=1` changes the request. The port refuses such a pin without a call, names it on a `FAIL` line, exits 1, and percent-encodes a tag byte that a URL path does not take. Tests, a differential group of twelve explained cases and twenty-three mutants pin it. A lone `.` segment in a tag is refused too.
 
@@ -71,7 +72,7 @@ Tests in `crates/mx-install/tests/`:
 
 - `plan.rs`, `apply_fake.rs`: the decisions and the sinks, with no machine and with a machine that records every change (and panics on one when a test forbids them).
 - `install_flow.rs`, `uninstall_flow.rs`, `scaffold_flow.rs`, `scheduler_flow.rs`, `coreutils.rs`, `umask.rs`: each program against real files in a scratch directory, with every tool (`systemctl`, `flock`, `git`, `date`, `python3`, `crontab`, `notify-send`) scripted. `scaffold_flow.rs` compares its output with the golden files of the characterization suite.
-- `blackbox.sh`: the install characterization cases against an assembled tree, three runs, with the two pinned differences named in the script.
+- `blackbox.sh`: the install characterization cases against an assembled tree, three runs, with the two pinned differences named in the script. Every list of failing cases is sorted under the C locale before `comm` reads it, and every difference is printed, not only the first. `blackbox.sh --self-test` builds no tree: it runs a stand-in suite with the real `find` and with a `find` that reverses its NUL-separated records, and checks that the verdict and the report do not move. `tests/run-tests.sh` runs it.
 - `differential.sh`: generated hosts run through both programs, comparing standard output, standard error, exit status, the order of every external call and the state of HOME and of the tree.
 - `mutants.py`: the mutation table. Each mutant changes one guard in a copy of the tree and must turn a named test red.
 
