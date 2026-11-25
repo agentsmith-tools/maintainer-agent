@@ -131,7 +131,18 @@ mkdir -p "$MAINTAINER_STATE_DIR/state"
 # a key of their own.
 export MAINTAINER_RECEIPT_KEY="$stub_dir/receipt.key"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MAINTAINER_RECEIPT_KEY"
-trap 'rm -rf "$stub_dir"' EXIT
+# The EXIT trap also fails the suite when the shell ends before the summary: a part that
+# runs `exit 0` would otherwise end the run green with most of the cases never run.
+mx_done=0
+mx_exit() {
+    local rc=$?
+    rm -rf "$stub_dir"
+    if [ "$mx_done" != 1 ]; then
+        printf '  FAIL  the suite ended before its summary (exit %s), so the cases after that point never ran\n' "$rc" >&2
+        [ "$rc" -ne 0 ] || exit 1
+    fi
+}
+trap mx_exit EXIT
 make_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$stub_dir/$1"; chmod +x "$stub_dir/$1"; }
 # No case may reach the real desktop. The notify-send stub below only helps a
 # case whose PATH includes $stub_dir, and two of them deliberately build a
@@ -183,50 +194,65 @@ PYEOF
 # one file. The reason for the split is the linter: one shellcheck over a single
 # 12,000 line file peaked near 10 GB, and each part stays far below that.
 #
-# The list is explicit, never a glob, and each entry carries the number of cases the
-# part records (passes, failures and skips together, so the number does not move with
-# MX_SKIP_SOURCE_COUPLED or a missing container runtime). A part that is missing, a
-# part that is empty, a part that is left out of the list and a part whose case count
-# moved each fail the suite and name the part. Adding or removing a case in a part
-# means changing its number here; the failure prints the number the part recorded.
+# The list is explicit, never a glob. The driver fails the suite, naming the part, when a
+# listed part is missing, is listed twice, does not start with a bash shebang (the shell
+# sweeps select files by it, so a part without one is never linted), records no case, or
+# when a file in tests/suites/ is not listed. The order the parts ran in must equal the
+# list. A part that ends the shell (`exit`, in any form) never reaches the summary, and the
+# EXIT trap set above turns that into a failure. How many cases a part records is not
+# pinned here, because loops over profiles, suites and programs change it whenever that
+# data changes; the exact total is pinned by the `tests` figure that check_claims.sh derives.
 mx_parts=(
-    "01-run-identity-gate.sh 100"
-    "02-setup-walls-merge-gate.sh 236"
-    "03-prompts-installers-walls.sh 198"
-    "04-timers-status-screen.sh 167"
-    "05-merge-gate-dependency-bump.sh 132"
-    "06-verify-receipts-mcp.sh 142"
-    "07-trust-offers-budgets.sh 111"
-    "08-issue-claims.sh 102"
-    "09-audit-trail-tree-under-test.sh 146"
-    "10-tunables-docs-stalled.sh 234"
-    "11-leases-deps-characterization.sh 289"
+    01-run-identity-gate.sh
+    02-setup-walls-merge-gate.sh
+    03-prompts-installers-walls.sh
+    04-timers-status-screen.sh
+    05-merge-gate-dependency-bump.sh
+    06-verify-receipts-mcp.sh
+    07-trust-offers-budgets.sh
+    08-issue-claims.sh
+    09-audit-trail-tree-under-test.sh
+    10-tunables-docs-stalled.sh
+    11-leases-deps-characterization.sh
 )
 # Every file whose text the suite reads about itself: this driver and each part.
 suite_files=("$suite_root/tests/run-tests.sh")
-for _mxp_entry in "${mx_parts[@]}"; do suite_files+=("$suite_root/tests/suites/${_mxp_entry% *}"); done
+for _mxp_name in "${mx_parts[@]}"; do suite_files+=("$suite_root/tests/suites/$_mxp_name"); done
 
 # A file in tests/suites/ that the list does not name never runs, so it is a failure.
 for _mxp_file in "$suite_root"/tests/suites/*.sh; do
     _mxp_known=0
-    for _mxp_entry in "${mx_parts[@]}"; do [ "${_mxp_file##*/}" = "${_mxp_entry% *}" ] && _mxp_known=1; done
+    for _mxp_name in "${mx_parts[@]}"; do [ "${_mxp_file##*/}" = "$_mxp_name" ] && _mxp_known=1; done
     [ "$_mxp_known" = 1 ] || bad "tests/suites/${_mxp_file##*/} is not in the part list of run-tests.sh, so none of its cases would run"
 done
 
-for _mxp_entry in "${mx_parts[@]}"; do
-    _mxp_name="${_mxp_entry% *}"; _mxp_want="${_mxp_entry##* }"
+mx_ran=(); mx_seen=" "
+for _mxp_name in "${mx_parts[@]}"; do
+    case "$mx_seen" in
+        *" $_mxp_name "*) bad "the suite part tests/suites/$_mxp_name is listed twice in run-tests.sh, and a second run of it proves nothing"; continue ;;
+    esac
+    mx_seen="$mx_seen$_mxp_name "
     if [ ! -f "$suite_root/tests/suites/$_mxp_name" ]; then
-        bad "the suite part tests/suites/$_mxp_name is missing, so its $_mxp_want case(s) did not run"
+        bad "the suite part tests/suites/$_mxp_name is missing, so its cases did not run"
         continue
     fi
+    case "$(head -c 19 "$suite_root/tests/suites/$_mxp_name")" in
+        '#!/usr/bin/env bash'|'#!/bin/bash'*) ;;
+        *) bad "the suite part tests/suites/$_mxp_name does not start with a bash shebang, so the shell sweeps skip it" ;;
+    esac
     _mxp_before=$((pass+fail+skip))
     # shellcheck source=/dev/null
     . "$suite_root/tests/suites/$_mxp_name"
-    _mxp_got=$((pass+fail+skip-_mxp_before))
-    [ "$_mxp_got" = "$_mxp_want" ] \
-        || bad "the suite part tests/suites/$_mxp_name recorded $_mxp_got case(s) and run-tests.sh lists $_mxp_want"
+    mx_ran+=("$_mxp_name")
+    [ $((pass+fail+skip-_mxp_before)) -ge 1 ] \
+        || bad "the suite part tests/suites/$_mxp_name recorded no case"
 done
-unset _mxp_entry _mxp_file _mxp_known _mxp_name _mxp_want _mxp_before _mxp_got
+_mxp_a="${mx_ran[*]}"; _mxp_b="${mx_parts[*]}"
+if [ "$_mxp_a" != "$_mxp_b" ] && [ "${#mx_ran[@]}" -eq "${#mx_parts[@]}" ]; then
+    bad "the suite parts ran in a different order than run-tests.sh lists them"
+fi
+unset _mxp_a _mxp_b _mxp_file _mxp_known _mxp_name _mxp_before
+mx_done=1
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"

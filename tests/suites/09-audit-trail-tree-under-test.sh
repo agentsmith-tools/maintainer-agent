@@ -610,55 +610,58 @@ stray="$(grep -nE '^[^#]*\$\{?suite_roo[t]\}?/(bin|lib|profiles|platform|scripts
     || bad "a case runs or reads a program from the suite's own checkout: $(printf '%s' "$stray" | head -1 | cut -c1-120)"
 
 echo "== a part of the suite cannot be dropped without the suite going red and naming it =="
-# run-tests.sh sources its parts from an explicit list that carries each part's case
-# count. Each case below copies the driver next to stand-in parts that record the listed
-# number of cases, damages one thing, and runs the copy against the real tree under test.
-# The first case is the control: the undamaged copy must pass and report the listed total,
-# so the damaged runs below fail for the damage and not for the harness.
+# run-tests.sh sources its parts from an explicit list. Each case below copies the driver next
+# to stand-in parts, damages one thing, and runs the copy against the real tree under test.
+# The first case is the control: the undamaged copy must pass and report its total, so the
+# damaged runs below fail for the damage and not for the harness.
 pg="$stub_dir/part-guard"
-pg_list="$(grep -E '^    "[0-9][0-9]-[a-z0-9-]+\.sh [0-9]+"$' "$suite_root/tests/run-tests.sh" | tr -d ' "' | sed 's/\.sh/.sh /')"
-pg_total=0; pg_n=0
-while read -r pg_name pg_want; do
-    [ -n "$pg_name" ] || continue
-    pg_n=$((pg_n+1)); pg_total=$((pg_total+pg_want))
-done <<<"$pg_list"
-pg_first="$(head -n 1 <<<"$pg_list" | cut -d' ' -f1)"
-pg_build() {  # a fresh copy of the driver with a stand-in part for every listed part
+pg_list="$(grep -E '^    [0-9][0-9]-[a-z0-9-]+\.sh$' "$suite_root/tests/run-tests.sh" | tr -d ' ')"
+pg_n="$(grep -c . <<<"$pg_list")"
+pg_first="$(head -n 1 <<<"$pg_list")"
+pg_second="$(sed -n 2p <<<"$pg_list")"
+pg_build() {  # a fresh copy of the driver with a stand-in part of three cases for every listed part
     rm -rf "$pg"; mkdir -p "$pg/tests/suites"
     cp "$suite_root/tests/run-tests.sh" "$pg/tests/run-tests.sh"
-    local name want
-    while read -r name want; do
+    local name
+    while read -r name; do
         [ -n "$name" ] || continue
-        printf '#!/usr/bin/env bash\nfor _i in $(seq %d); do ok "stand-in case"; done\n' "$want" > "$pg/tests/suites/$name"
+        printf '#!/usr/bin/env bash\nfor _i in 1 2 3; do ok "stand-in case"; done\n' > "$pg/tests/suites/$name"
     done <<<"$pg_list"
 }
 pg_run() { env -u MX_SKIP_SOURCE_COUPLED MX_TREE="$root" bash "$pg/tests/run-tests.sh" 2>&1; }
+pg_expect() {  # $1 = case title, $2 = fixed text the output must carry, with a nonzero exit
+    [ "$rc" != 0 ] && grep -qF -- "$2" <<<"$out" \
+        && ok "$1" \
+        || bad "$1: not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+}
 pg_build; out="$(pg_run)"; rc=$?
-[ "${pg_n:-0}" -ge 2 ] && [ "$rc" = 0 ] && grep -qE "^ +$pg_total passed, 0 failed" <<<"$out" \
-    && ok "an undamaged copy of the driver with stand-in parts passes and reports the listed total ($pg_n parts, $pg_total cases)" \
-    || bad "the stand-in copy did not pass with $pg_total cases from $pg_n parts (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+[ "${pg_n:-0}" -ge 2 ] && [ "$rc" = 0 ] && grep -qE "^ +$((pg_n*3)) passed, 0 failed" <<<"$out" \
+    && ok "an undamaged copy of the driver with stand-in parts passes and reports its total ($pg_n parts)" \
+    || bad "the stand-in copy did not pass with $pg_n parts (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
 pg_build; rm "$pg/tests/suites/$pg_first"; out="$(pg_run)"; rc=$?
-[ "$rc" != 0 ] && grep -qF "tests/suites/$pg_first is missing" <<<"$out" \
-    && ok "a deleted part fails the suite and names it" \
-    || bad "a deleted part was not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+pg_expect "a deleted part fails the suite and names it" "tests/suites/$pg_first is missing"
 pg_build; : > "$pg/tests/suites/$pg_first"; out="$(pg_run)"; rc=$?
-[ "$rc" != 0 ] && grep -qF "tests/suites/$pg_first recorded 0 case(s)" <<<"$out" \
-    && ok "an emptied part fails the suite and names it" \
-    || bad "an emptied part was not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+pg_expect "an emptied part fails the suite and names it" "tests/suites/$pg_first does not start with a bash shebang"
+pg_build; printf '#!/usr/bin/env bash\n' > "$pg/tests/suites/$pg_first"; out="$(pg_run)"; rc=$?
+pg_expect "a part that records no case fails the suite and names it" "tests/suites/$pg_first recorded no case"
 pg_build; mv "$pg/tests/suites/$pg_first" "$pg/tests/suites/99-renamed.sh"; out="$(pg_run)"; rc=$?
 [ "$rc" != 0 ] && grep -qF "tests/suites/$pg_first is missing" <<<"$out" && grep -qF 'tests/suites/99-renamed.sh is not in the part list' <<<"$out" \
     && ok "a renamed part fails the suite and names both the old and the new file" \
     || bad "a renamed part was not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
-pg_build; sed -i "/^    \"$pg_first [0-9]*\"\$/d" "$pg/tests/run-tests.sh"
-grep -qF "\"$pg_first " "$pg/tests/run-tests.sh" && bad "the list entry for $pg_first was not removed from the copy"
+pg_build; sed -i "/^    $pg_first\$/d" "$pg/tests/run-tests.sh"
 out="$(pg_run)"; rc=$?
-[ "$rc" != 0 ] && grep -qF "tests/suites/$pg_first is not in the part list" <<<"$out" \
-    && ok "a part left out of the list fails the suite and names it" \
-    || bad "a part left out of the list was not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
-pg_build; printf 'ok "one more"\n' >> "$pg/tests/suites/$pg_first"; out="$(pg_run)"; rc=$?
-[ "$rc" != 0 ] && grep -qE "tests/suites/$pg_first recorded [0-9]+ case\(s\) and run-tests.sh lists [0-9]+" <<<"$out" \
-    && ok "a part whose case count moved fails the suite and names it" \
-    || bad "a moved case count was not refused by name (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+pg_expect "a part left out of the list fails the suite and names it" "tests/suites/$pg_first is not in the part list"
+pg_build; sed -i "s/^    $pg_first\$/    $pg_first\n    $pg_first/" "$pg/tests/run-tests.sh"
+out="$(pg_run)"; rc=$?
+pg_expect "a part listed twice fails the suite and names it" "tests/suites/$pg_first is listed twice"
+pg_build; printf '# no shebang here\nok "stand-in case"\n' > "$pg/tests/suites/$pg_first"; out="$(pg_run)"; rc=$?
+pg_expect "a part with no bash shebang fails the suite and names it (the sweeps would never lint it)" "tests/suites/$pg_first does not start with a bash shebang"
+pg_build; printf 'ok "one"\nexit 0\n' >> "$pg/tests/suites/$pg_second"; out="$(pg_run)"; rc=$?
+pg_expect "a part that ends the shell with exit 0 fails the suite instead of ending it green" "the suite ended before its summary"
+pg_build; printf 'for _i in 1 2 3 4; do ok "extra"; done\n' >> "$pg/tests/suites/$pg_second"; out="$(pg_run)"; rc=$?
+[ "$rc" = 0 ] && grep -qE "^ +$((pg_n*3+4)) passed, 0 failed" <<<"$out" \
+    && ok "a part that records more cases than before does not trip the guard, so data-driven loops can grow" \
+    || bad "a part with extra cases was refused (rc=$rc): $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
 rm -rf "$pg"
 
 echo "== the gate needs nothing that is not already required =="

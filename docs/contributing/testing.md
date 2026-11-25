@@ -51,6 +51,7 @@ end="$(awk -v s="$start" 'NR>s && /^echo "== /{print NR-1; exit}' "$part")"
 { sed -n '1,/^mx_parts=(/p' tests/run-tests.sh | sed '$d'
   printf 'suite_files=(tests/run-tests.sh tests/suites/*.sh)\n'
   sed -n "${start},${end:-\$}p" "$part"
+  printf 'mx_done=1\n'
   sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' tests/run-tests.sh; } > tests/probe.sh
 bash -n tests/probe.sh && bash tests/probe.sh; rm -f tests/probe.sh
 ```
@@ -131,7 +132,7 @@ A scenario is one bash file in `tests/diff/scenarios/` with a shebang and no `. 
 
 ## 2. Anatomy of a case in `run-tests.sh`
 
-The top of `tests/run-tests.sh` sets up everything a case may use. Read its first 180 lines once; everything a case may use is there. A new case goes into the part under `tests/suites/` whose topic fits, after the last case of its section or in a new section of its own. Then change that part's number in the `mx_parts` list of the driver: the driver counts the cases each part records and fails naming the part when the count differs from the list, or when a part is missing, empty or not listed. A new part file needs a `#!/usr/bin/env bash` first line, so the shell sweep lints it, an entry in `mx_parts`, and a `declare` line for each driver or earlier-part variable it reads, so `shellcheck --severity=warning` on the file alone stays clean.
+The top of `tests/run-tests.sh` sets up everything a case may use. Read its first 180 lines once; everything a case may use is there. A new case goes into the part under `tests/suites/` whose topic fits, after the last case of its section or in a new section of its own. The driver fails naming the part when a listed part is missing, listed twice, has no bash shebang, records no case, or is not listed, and when a part ends the shell with `exit` before the summary. It does not pin how many cases a part records, because loops over profiles and programs change that; `check_claims.sh` pins the total. A new part file needs a `#!/usr/bin/env bash` first line, so the shell sweep lints it (the driver refuses a part without one), an entry in `mx_parts`, and a `declare` line for each driver or earlier-part variable it reads, so `shellcheck --severity=warning` on the file alone stays clean.
 
 - `ok "name"`, `bad "name"` record a pass or a failure. `check "name" "$actual" "$expected"` compares two strings and reports both on failure. `noenv "name"` records a skip.
 - `stub_dir="$(mktemp -d)"` is a scratch directory removed on exit. It holds the stubs, and cases that need files build them under it. Put it first on `PATH` for the call that needs the stubs: `PATH="$stub_dir:$PATH" bash "$root/..."`.

@@ -17,10 +17,10 @@ middle digit.
   reached 9 to 10 GB three times in one day, and systemd-oomd killed the terminal scope once.
   The cases are the same cases in the same order, run in the same shell: the suite still prints
   1851 passed, 0 failed (260 source-coupled cases) and the same lines. The driver sources the
-  parts from an explicit list that carries each part's case count, and fails naming any part
-  that is missing, empty, unlisted or whose count moved. The largest file now lints at 484 MB.
-  A new case goes into the part that fits its topic, and that part's count in the list moves
-  with it. The skip line for a source-coupled block now names the part file and the line in it.
+  parts from an explicit list and fails naming any part that is missing, listed twice, without a
+  bash shebang, empty of cases or unlisted, and fails the run if a part ends the shell before the
+  summary. The exact total stays pinned by the `tests` figure in `check_claims.sh`. The largest file now lints at 484 MB.
+  A new case goes into the part that fits its topic. The skip line for a source-coupled block now names the part file and the line in it.
 
 ### Fixed
 
