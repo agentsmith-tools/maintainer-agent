@@ -42,8 +42,9 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     exit 127
 fi
 
-# Memory. One shellcheck over tests/run-tests.sh peaks near 8 GB (8.2 GB RSS,
-# 21 s, measured 2026-11-09). Two sweeps at once, or one beside a build, took the
+# Memory. One shellcheck over the old single-file tests/run-tests.sh peaked near 8 GB
+# (8.2 GB RSS, 21 s, measured 2026-11-09; the file is now a driver and parts in
+# tests/suites/, the largest lints at 0.5 GB). Two sweeps at once, or one beside a build, took the
 # laptop to a global OOM that killed the terminal. An address-space `ulimit -v`
 # does not bound it: the linter exits 251 on that file at 6 GB and at 12 GB,
 # because its runtime reserves more than it uses. So the sweep does three things:
@@ -106,7 +107,7 @@ if command -v nice >/dev/null 2>&1; then runner+=(nice -n 15); fi
 
 # One linter process per script. Without -x it analyses each file on its own, so
 # the diagnostics are the same as one run over all of them, but the peak memory
-# is the largest single file (tests/run-tests.sh, 8.7 GB) instead of the sum:
+# is the largest single file (it was tests/run-tests.sh, 8.7 GB) instead of the sum:
 # one process over 39 scripts grew past the 12 GB cap and was killed.
 rc=0
 for f in "${files[@]}"; do

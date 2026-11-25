@@ -21,7 +21,7 @@ If you read one section, read [Writing a test that can fail](#3-writing-a-test-t
 
 | layer | what it proves | add a case when | run it | time |
 |---|---|---|---|---|
-| `tests/run-tests.sh` | The black-box oracle. Every program, profile, script and document refuses what it must and says so. Cases that read program text carry an `sc_case` tag. | You add or change a guard, a prompt rule, a profile file, a script or a doc claim. This is the default home for a new case. | `bash tests/run-tests.sh` | about 4 minutes on a loaded laptop |
+| `tests/run-tests.sh` and `tests/suites/` | The black-box oracle. Every program, profile, script and document refuses what it must and says so. Cases that read program text carry an `sc_case` tag. | You add or change a guard, a prompt rule, a profile file, a script or a doc claim. This is the default home for a new case. | `bash tests/run-tests.sh` | about 4 minutes on a loaded laptop |
 | `tests/characterization/` | What `bin/maintainer-merge`, `bin/maintainer-doctor`, `bin/maintainer-repo`, the orchestrator, the installers and the five repository checks (`scripts/check_claims.sh`, `scripts/verify-action-pins.sh`, `scripts/shellcheck-sweep.sh`, `evals/run-evals.sh`, `tests/containment-probe.sh`) do today, odd behaviour included, by exit code, stream and tool argv, so a port can be held to it. | You change the merge gate's observable behaviour: its argv, its exit codes, its messages, its order of calls. | `bash tests/run-characterization.sh` | about 2.5 to 4 minutes |
 | `tests/diff/` | That two program trees (the bash tree and a Rust tree) behave the same on the scenarios in `tests/diff/scenarios/`: argv per stub tool, exit code, stdout, stderr, state tree. | You add a scenario for a program that a port will replace. | `bash tests/diff/record.sh`, `compare.sh`; the recorder's own checks are `selftest.sh` and `prove.sh` | `selftest.sh` about 25 s, `prove.sh` under 2 minutes |
 | `scripts/rust-gate.sh` | The Rust workspace formats, lints clean, passes its tests, keeps process spawning inside `mx-ports`, and exchanges receipts with the bash gate. | You touch anything under `rust/`. | `scripts/rust-gate.sh` | about 30 s once built |
@@ -30,7 +30,7 @@ Counts of cases are not typed here. The suite prints its own total, and the figu
 
 ### `tests/run-tests.sh`
 
-One bash file of several thousand lines, organised in sections that each open with `echo "== what this section proves =="`. A run prints one line per case, then a summary:
+A driver, `tests/run-tests.sh`, and eleven part files in `tests/suites/` (`01-run-identity-gate.sh` to `11-leases-deps-characterization.sh`). The driver holds the preamble: strict mode, the tree under test, the helpers, the counters and the stubs. It then sources each part, in a fixed order, in its own shell, so every part sees the helpers, the counters and the variables that the parts before it left. The parts are organised in sections that each open with `echo "== what this section proves =="`. The split exists for the linter: one `shellcheck` over the former single file peaked at 9.2 GB, and the largest file now lints in 0.5 GB. A run prints one line per case, then a summary:
 
 ```
   PASS  unknown profile is rejected
@@ -39,23 +39,25 @@ One bash file of several thousand lines, organised in sections that each open wi
   N passed, F failed (K source-coupled cases)
 ```
 
-The exit code is 0 only when `F` is 0. The file has no section filter: it takes no arguments. To run one section while you iterate, build a probe from the file's head, the section and the file's tail, the way the suite tests itself (`mx_probe` in the suite):
+The exit code is 0 only when `F` is 0. The suite has no section filter: it takes no arguments. To run one section while you iterate, build a probe from the driver's head, the section and the driver's tail, the way the suite tests itself (`mx_probe` in the suite):
 
 ```sh
 cd ~/code/maintainer-agent                    # your worktree
 sect='a verdict is read from output'          # the words after "== " in the header
-start="$(grep -n "^echo \"== $sect" tests/run-tests.sh | cut -d: -f1)"
-[ -n "$start" ] || { echo "no such section"; exit 1; }
-end="$(awk -v s="$start" 'NR>s && /^echo "== /{print NR-1; exit}' tests/run-tests.sh)"
-{ sed -n '1,/^echo "== argument handling =="/p' tests/run-tests.sh | sed '$d'
-  sed -n "${start},${end}p" tests/run-tests.sh
+part="$(grep -l "^echo \"== $sect" tests/suites/*.sh | head -n 1)"
+[ -n "$part" ] || { echo "no such section"; exit 1; }
+start="$(grep -n "^echo \"== $sect" "$part" | head -n 1 | cut -d: -f1)"
+end="$(awk -v s="$start" 'NR>s && /^echo "== /{print NR-1; exit}' "$part")"
+{ sed -n '1,/^mx_parts=(/p' tests/run-tests.sh | sed '$d'
+  printf 'suite_files=(tests/run-tests.sh tests/suites/*.sh)\n'
+  sed -n "${start},${end:-\$}p" "$part"
   sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' tests/run-tests.sh; } > tests/probe.sh
 bash -n tests/probe.sh && bash tests/probe.sh; rm -f tests/probe.sh
 ```
 
-A section often reads a variable an earlier section set (`$mg`, `$md`, a stub). `unbound variable` in the output means the probe left that setup out: copy the line that defines it, or run the whole suite. Read the summary line either way: a probe that ran zero cases prints `0 passed, 0 failed` and exits 0.
+A section often reads a variable an earlier section or part set (`$mg`, `$md`, a stub); each part opens with a `declare` list of the names it reads from the driver or an earlier part. `unbound variable` in the output means the probe left that setup out: copy the line that defines it, or run the whole suite. Read the summary line either way: a probe that ran zero cases prints `0 passed, 0 failed` and exits 0.
 
-**`MX_TREE`** points the suite at another tree with the repository layout, for a build whose programs are not shell. The first output line names the tree under test. A tree without `bin/maintainer-merge`, `lib/run.sh` or `profiles/` exits 2 before any case runs, so a wrong path cannot read as a tree that fails. The suite's own text always comes from the checkout that holds the file (`suite_root`); the programs, profiles and docs the cases run or read come from the tree under test (`root`). Two guard cases grep the suite for a case that mixes them up.
+**`MX_TREE`** points the suite at another tree with the repository layout, for a build whose programs are not shell. The first output line names the tree under test. A tree without `bin/maintainer-merge`, `lib/run.sh` or `profiles/` exits 2 before any case runs, so a wrong path cannot read as a tree that fails. The suite's own text always comes from the checkout that holds the file (`suite_root`); the programs, profiles and docs the cases run or read come from the tree under test (`root`). Two guard cases grep the driver and every part for a case that mixes them up.
 
 **`sc_case` and `MX_SKIP_SOURCE_COUPLED`.** A case is source-coupled when its verdict depends on the text of a shell program: it greps the program, sources it and calls an internal function, or runs a checker that scans program text. A compiled tree has no text to grep, so those cases are wrapped:
 
@@ -129,7 +131,7 @@ A scenario is one bash file in `tests/diff/scenarios/` with a shebang and no `. 
 
 ## 2. Anatomy of a case in `run-tests.sh`
 
-The top of the file sets up everything a case may use. Read the first 170 lines once; everything a case may use is there.
+The top of `tests/run-tests.sh` sets up everything a case may use. Read its first 180 lines once; everything a case may use is there. A new case goes into the part under `tests/suites/` whose topic fits, after the last case of its section or in a new section of its own. Then change that part's number in the `mx_parts` list of the driver: the driver counts the cases each part records and fails naming the part when the count differs from the list, or when a part is missing, empty or not listed. A new part file needs a `#!/usr/bin/env bash` first line, so the shell sweep lints it, an entry in `mx_parts`, and a `declare` line for each driver or earlier-part variable it reads, so `shellcheck --severity=warning` on the file alone stays clean.
 
 - `ok "name"`, `bad "name"` record a pass or a failure. `check "name" "$actual" "$expected"` compares two strings and reports both on failure. `noenv "name"` records a skip.
 - `stub_dir="$(mktemp -d)"` is a scratch directory removed on exit. It holds the stubs, and cases that need files build them under it. Put it first on `PATH` for the call that needs the stubs: `PATH="$stub_dir:$PATH" bash "$root/..."`.
@@ -137,7 +139,7 @@ The top of the file sets up everything a case may use. Read the first 170 lines 
 - `MAINTAINER_STATE_DIR` and `MAINTAINER_RECEIPT_KEY` point into `stub_dir`, so a run cannot append to the real audit trail or sign with a developer's real key. A case that runs a program that reads `MAINTAINER_STATE` (without `_DIR`) sets it itself, as the example below does. The suite unsets every `MAINTAINER_*` variable at the top, so the answer never depends on who called it.
 - `MAINTAINER_NOTIFY=off` is exported once, so a case with a minimal `PATH` cannot raise a desktop popup. `MAINTAINER_REPO_ORIGIN` is a bare repository in `stub_dir`, so a case that provisions a checkout clones from it and never from github.com. `MAINTAINER_SHELL_IMAGE` is a registry image so the container cases run on a runner with no locally built image.
 - Every scratch git repository a case builds runs under the unset at the top of the suite, `unset $(git rev-parse --local-env-vars)`. A pre-commit hook runs the suite with `GIT_DIR` and `GIT_INDEX_FILE` set for the commit in progress, and a scratch repository that inherits them writes into the real index (lesson 110). A later case asserts that none of those variables reaches the cases.
-- `root` is the tree under test and `suite_root` is the checkout that holds the suite. A case that runs or reads a program uses `$root`; only the suite's own text goes through `$suite_root`. Both directions are pinned by cases near the end of the file.
+- `root` is the tree under test and `suite_root` is the checkout that holds the suite. A case that runs or reads a program uses `$root`; only the suite's own text goes through `$suite_root`. Both directions are pinned by cases in `09-audit-trail-tree-under-test.sh`.
 
 A complete case, run against the repository as it stands:
 
@@ -338,7 +340,7 @@ A local commit runs the suite twice (the suite step and `check_claims.sh`). CI r
 
 ### The machine lock and the memory gate
 
-The suite and the sweep are heavy: `shellcheck` on `tests/run-tests.sh` alone peaked near 8 GB. On 2026-11-09 four worktrees committed at once, two sweeps overlapped, the kernel hit a global out-of-memory and killed the terminal (the 0.11.0 CHANGELOG entry has the story). Two mechanisms stop a repeat:
+The suite and the sweep are heavy: `shellcheck` on the former single-file `tests/run-tests.sh` alone peaked near 8 GB (the largest file under `tests/suites/` lints in 0.5 GB). On 2026-11-09 four worktrees committed at once, two sweeps overlapped, the kernel hit a global out-of-memory and killed the terminal (the 0.11.0 CHANGELOG entry has the story). Two mechanisms stop a repeat:
 
 - **`scripts/with-hook-lock.sh`** serialises the whole hook per machine, across every worktree, with one `flock`. The lock file is `<XDG_RUNTIME_DIR or XDG_CACHE_HOME or ~/.cache>/magent/hook.lock`, in a directory mode 0700 that you own; the script refuses a symlink or a file owned by someone else. It waits silently. `MAGENT_HOOK_LOCK` moves the lock file and `MAGENT_HOOK_LOCK_WAIT` sets the wait in seconds (default 1800). When the wait runs out it exits 75, and any other exit code is the command's own.
 - **`scripts/shellcheck-sweep.sh`** waits until `MemAvailable` covers the job (`MAGENT_SWEEP_MIN_AVAIL_KB`, default 10485760 KB, 10 GiB), polling every `MAGENT_SWEEP_POLL` seconds for at most `MAGENT_SWEEP_WAIT` (default 300), and exits 75 if it never does. It then runs one `shellcheck` per script in a systemd user scope with `MemoryMax=18G` (`MAGENT_SWEEP_MEM_MAX`) and no swap, at nice 15, so an overrun kills the linter and nothing else. `MAGENT_SWEEP_NO_CAP` skips the scope. Under `CI` the gate and the cap stand down: a runner is its own sandbox.
@@ -378,7 +380,7 @@ These are the questions a reviewer asks, and a contributor can ask them first.
 - **Revert the production hunk. Does this test go red?** If it stays green, it is decorative. The reviewer applies a mutation and so should you (section 4).
 - **Which line of the output proves the behaviour?** A test that reads a log should read the line that only the claimed behaviour writes. If a probe logs the same flags as the real call, the test cannot see a missing real call.
 - **Is the assertion as strong as the title?** Code and message, by value. Not `!= 0`.
-- **Is the new script wired into the suite?** A test file nothing runs is the same as no test. The characterization runner globs five families by file name; a new test of another shape must be called from `run-tests.sh` or the hook.
+- **Is the new script wired into the suite?** A test file nothing runs is the same as no test. The characterization runner globs five families by file name; a new test of another shape must be called from a part under `tests/suites/` or from the hook.
 - **Does it select anything?** A filter, a glob or a loop over a list must assert it matched something.
 - **Does it fail for the right reason?** Run it once against the unfixed tree. The failure message should name the missing behaviour, not an unrelated setup error. A test written after the fix that has never been red has not been seen to work.
 - **Does it measure the repository or the machine?** Run it with `HOME="$(mktemp -d)"` and, for cases that read the tree, as `MX_TREE=<an exported copy> bash tests/run-tests.sh`.
