@@ -35,7 +35,7 @@ suite_named_only() { return 0; }
 suite_covers() {
     case "$1" in
         bin/*|lib/*|install.sh|new-profile.sh|platform/*|evals/*) return 0 ;;
-        scripts/check_claims.sh|scripts/shellcheck-sweep.sh|scripts/verify-action-pins.sh) return 0 ;;
+        scripts/check_claims.sh|scripts/shellcheck-sweep.sh|scripts/verify-action-pins.sh|scripts/cutover.sh) return 0 ;;
         tests/containment-probe.sh) return 0 ;;
     esac
     return 1

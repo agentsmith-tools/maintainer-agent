@@ -123,6 +123,12 @@ MUTANTS = [
     ("M83", S + "plan.rs", "        } else {\n            return refuse(format!(\n                \"{} no longer matches the stamp", "        } else if false {\n            return refuse(format!(\n                \"{} no longer matches the stamp", "a rollback ignores the stamped sha256"),
     ("M84", S + "probe.rs", "        if machine.lexists(backup) && !ours {", "        if machine.lexists(backup) && false && !ours {", "a link or a user file at a backup name is overwritten"),
     ("M85", S + "probe.rs", "let ours = rust_stamp.is_some() && machine.is_file(backup) && !machine.is_symlink(backup);", "let ours = rust_stamp.is_some() && machine.is_file(backup);", "a link left at a backup name after a stamped install is followed"),
+    # --- a rollback never follows or replaces a link (decision P6A-1) ------------------------------
+    ("M86", S + "plan.rs", "            if is_link {\n                return refuse(link_detail(path));\n            }", "            if false {\n                return refuse(link_detail(path));\n            }", "a rollback accepts a link at an installed program or a saved original"),
+    ("M87", S + "probe.rs", "                    installed_is_link: machine.is_symlink(&installed),", "                    installed_is_link: false,", "a link at an installed program is not seen, so a link to the stamped build is replaced"),
+    ("M88", S + "probe.rs", "                    backup_is_link: machine.is_symlink(&backup),", "                    backup_is_link: false,", "a link at a saved original is not seen, so it is moved into place"),
+    ("M89", S + "probe.rs", "    if machine.is_symlink(&stamp_path) {", "    if false {", "a stamp that is a link is followed"),
+    ("M90", S + "probe.rs", "        if pairs.iter().any(|(installed, _, _)| *installed == program.installed) {", "        if false {", "a stamp that lists a program twice moves its saved original twice"),
     # --- probes ----------------------------------------------------------------------------------
     ("M67", S + "probe.rs", "        if ran.succeeded() {\n            continue;\n        }\n        busy.push(", "        if true {\n            continue;\n        }\n        busy.push(", "a held lock is never reported"),
     ("M68", S + "probe.rs", "        if !machine.exists(&lock) {\n            continue;\n        }", "", "the lock is asked for a profile that has no lock file"),

@@ -52,6 +52,26 @@ middle digit.
   prove a change to the orchestrator, backends, classifier, installers, doctor or
   repo tool. A suite that defines `suite_named_only` is never inferred by
   `pick_suite`, so shell and docs pull requests keep their suites.
+- **`scripts/cutover.sh` moves a machine to the Rust programs and back.**
+  `build` makes a path-free release build of every shipped Rust program with a
+  sha256 table, `shadow` compares the deployed bash programs with the build on the
+  machine's own profiles (prompts, doctor, repo, merge verbs, installers, the five
+  checks) behind shims that refuse every write, `live` installs the build only when
+  `shadow-ok` holds the table of what is in the directory and reads the machine
+  back, `status` says which programs are bash or Rust by sha256 against
+  `RUST_STAMP`, and `rollback` puts the saved bash originals back from the stamp
+  alone, with no Rust binary. 252 cases in `tests/characterization/cutover-*.sh`,
+  128 mutants in `mutants-cutover.py`, and a differential of `rollback` against
+  `install --rollback` over 32 states
+  (`rust/crates/mx-install/tests/cutover-rollback.sh`). See
+  `docs/deploy/cutover.md`.
+
+### Fixed
+
+- **`install --rollback` no longer follows or replaces a symbolic link.** A link
+  where an installed program, its saved original or `RUST_STAMP` sits is refused
+  before anything moves, and a stamp that lists a program twice is refused
+  instead of failing half way through.
 
 ## [0.11.0] — 2026-11-09
 

@@ -12,6 +12,9 @@ subscription.
 **Trust:** total. It is your machine and your token. This is why `POST=off` is
 the default for a new profile and why the deny wall exists.
 
+Moving such a machine from the bash programs to their Rust builds, and back,
+has its own page: [Moving a machine to the Rust programs](cutover.md).
+
 **Best for:** one maintainer, one or two repositories, work that needs a real
 checkout and a container.
 

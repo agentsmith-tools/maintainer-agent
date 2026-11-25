@@ -661,3 +661,101 @@ fn a_rollback_refuses_when_a_newer_bash_install_replaced_the_stamped_build() {
     assert!(out.err.contains("no longer matches the stamp"), "{}", out.err);
     assert_eq!(fs::read(sb.share().join("run.sh")).unwrap(), b"# newer bash\n");
 }
+
+// --- a rollback never follows or replaces a link (decision P6A-1) ----------------------------------
+
+fn link_refusal(path: &Path) -> String {
+    format!(
+        "install.sh: cannot roll back: {} is a symbolic link; rollback never follows or replaces one\n",
+        path.display()
+    )
+}
+
+#[test]
+fn a_rollback_refuses_a_link_where_an_installed_program_sits_even_when_it_points_at_the_stamped_build()
+ {
+    let sb = Sandbox::new("rblinkinstalled");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "run"]);
+    rust_run(&sb, &dir, &[]);
+    let doctor = sb.bin().join("maintainer-doctor");
+    let copy = sb.dir.join("copy-of-the-build");
+    fs::copy(&doctor, &copy).unwrap();
+    fs::remove_file(&doctor).unwrap();
+    std::os::unix::fs::symlink(&copy, &doctor).unwrap();
+    let before = sb.listing(&sb.home);
+    let copy_before = fs::read(&copy).unwrap();
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.out, "");
+    assert_eq!(out.err, link_refusal(&doctor));
+    assert_eq!(sb.listing(&sb.home), before, "nothing was moved");
+    assert_eq!(fs::read(&copy).unwrap(), copy_before, "the link target was left alone");
+}
+
+#[test]
+fn a_rollback_refuses_a_link_where_a_saved_original_sits_and_does_not_move_it_into_place() {
+    let sb = Sandbox::new("rblinkbackup");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "run"]);
+    rust_run(&sb, &dir, &[]);
+    let backup = sb.share().join("run.sh.sh");
+    let real = sb.dir.join("real-original");
+    fs::rename(&backup, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &backup).unwrap();
+    let before = sb.listing(&sb.home);
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.err, link_refusal(&backup));
+    assert_eq!(sb.listing(&sb.home), before, "nothing was moved");
+}
+
+#[test]
+fn a_rollback_refuses_a_dangling_link_at_a_saved_original_as_a_link_and_not_as_missing() {
+    let sb = Sandbox::new("rblinkdangling");
+    let dir = rust_dir(&sb, &["maintainer-doctor"]);
+    rust_run(&sb, &dir, &[]);
+    let backup = sb.bin().join("maintainer-doctor.sh");
+    fs::remove_file(&backup).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/original", &backup).unwrap();
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.err, link_refusal(&backup));
+}
+
+#[test]
+fn a_rollback_refuses_a_stamp_that_is_a_link_and_keeps_what_it_points_at() {
+    let sb = Sandbox::new("rblinkstamp");
+    let dir = rust_dir(&sb, &["maintainer-doctor"]);
+    rust_run(&sb, &dir, &[]);
+    let stamp = sb.share().join("RUST_STAMP");
+    let real = sb.dir.join("stamp-copy");
+    fs::rename(&stamp, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &stamp).unwrap();
+    let before = sb.listing(&sb.home);
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.err, link_refusal(&stamp));
+    assert_eq!(sb.listing(&sb.home), before);
+    assert!(real.exists());
+}
+
+#[test]
+fn a_rollback_refuses_a_stamp_that_lists_a_program_twice_before_it_moves_anything() {
+    let sb = Sandbox::new("rbduplicate");
+    let dir = rust_dir(&sb, &["maintainer-doctor", "run"]);
+    rust_run(&sb, &dir, &[]);
+    let stamp = sb.share().join("RUST_STAMP");
+    let text = fs::read_to_string(&stamp).unwrap();
+    let first = text.lines().next().unwrap().to_string();
+    fs::write(&stamp, format!("{text}{first}\n")).unwrap();
+    let before = sb.listing(&sb.home);
+    let out = run(&sb, &ScriptedProc::new(), &["--rollback"], &[]);
+    assert_eq!(out.code, 1);
+    assert_eq!(
+        out.err,
+        format!(
+            "install.sh: cannot roll back: RUST_STAMP lists {} twice\n",
+            sb.bin().join("maintainer-doctor").display()
+        )
+    );
+    assert_eq!(sb.listing(&sb.home), before, "nothing was moved");
+}
