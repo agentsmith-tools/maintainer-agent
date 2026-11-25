@@ -535,6 +535,15 @@ case_no_deployed_version() {
 }
 cu_case "shadow: a deployed tree with no VERSION withholds the marker" case_no_deployed_version
 
+case_empty_deployed_commit() {
+    ready; printf 'version=x\ncommit=\n' > "$CU_SHARE/VERSION"
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: the deployed tree is from  and the checkout is at"
+}
+cu_case "shadow: a VERSION with an empty commit is an unknown deployed tree and withholds the marker" case_empty_deployed_commit
+
 case_dirty_checkout_withholds_marker() {
     ready; echo x > "$CU_FX/stray-file"
     cu_shadow

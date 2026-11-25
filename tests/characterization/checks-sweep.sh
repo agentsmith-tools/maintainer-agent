@@ -15,7 +15,7 @@ cc_init
 SELF=scripts/shellcheck-sweep.sh
 SC="shellcheck --severity=warning"
 NO_CAP_MSG="sweep: no memory cap (no systemd user scope on this host); relying on the free-memory check."
-SD_PROBE="systemd-run --user --scope --quiet -p MemoryMax=12G -p MemorySwapMax=0 true"
+SD_PROBE="systemd-run --user --scope --quiet -p MemoryMax=18G -p MemorySwapMax=0 true"
 SHEBANG='#!/usr/bin/env bash\necho hi\n'
 
 # sw_base [systemd]: the tree, the stubs, plenty of memory, no waiting.
@@ -352,7 +352,7 @@ case_capped() {
     cz_expect_rc 0
     cz_expect_stdout "checking 2 scripts"
     cz_expect_stderr_empty
-    cc_expect_calls "$(sw_capped 12G a.sh "$SELF")"
+    cc_expect_calls "$(sw_capped 18G a.sh "$SELF")"
 }
 cc_case "with a user scope the host is probed once with 'true', then every linter run goes systemd-run, nice, shellcheck" case_capped
 
@@ -394,7 +394,7 @@ case_no_cap_variable_empty() {
     cc_sweep_commit
     cc_sweep
     cz_expect_rc 0
-    cc_expect_calls "$(sw_capped 12G "$SELF")"
+    cc_expect_calls "$(sw_capped 18G "$SELF")"
 }
 cc_case "MAGENT_SWEEP_NO_CAP set to the empty string leaves the cap on (pins current behaviour)" case_no_cap_variable_empty
 
@@ -404,7 +404,7 @@ case_no_nice() {
     cc_sweep_commit
     cc_sweep
     cz_expect_rc 0
-    cc_expect_calls "$SD_PROBE" "systemd-run --user --scope --quiet -p MemoryMax=12G -p MemorySwapMax=0 $SC $SELF" "$SC $SELF"
+    cc_expect_calls "$SD_PROBE" "systemd-run --user --scope --quiet -p MemoryMax=18G -p MemorySwapMax=0 $SC $SELF" "$SC $SELF"
 }
 cc_case "with no nice on PATH the linter runs without it" case_no_nice
 
@@ -450,8 +450,8 @@ case_killed_stops_the_sweep() {
     printf 1 > "$CZ_CASE/sc.rc.a.sh"; printf 137 > "$CZ_CASE/sc.rc.b.sh"
     cc_sweep
     cz_expect_rc 137
-    cz_expect_stderr "sweep: shellcheck was killed (rc=137) on b.sh, most likely by the MemoryMax=12G cap. Raise MAGENT_SWEEP_MEM_MAX."
-    cc_expect_calls "$(sw_capped 12G a.sh b.sh)"
+    cz_expect_stderr "sweep: shellcheck was killed (rc=137) on b.sh, most likely by the MemoryMax=18G cap. Raise MAGENT_SWEEP_MEM_MAX."
+    cc_expect_calls "$(sw_capped 18G a.sh b.sh)"
 }
 cc_case "a linter killed with status 137 stops the sweep after that script, names it and the cap, and exits 137" case_killed_stops_the_sweep
 
@@ -462,7 +462,7 @@ case_killed_message_without_cap() {
     printf 137 > "$CZ_CASE/sc.rc"
     cc_sweep
     cz_expect_rc 137
-    cz_expect_stderr "sweep: shellcheck was killed (rc=137) on $SELF, most likely by the MemoryMax=12G cap. Raise MAGENT_SWEEP_MEM_MAX."
+    cz_expect_stderr "sweep: shellcheck was killed (rc=137) on $SELF, most likely by the MemoryMax=18G cap. Raise MAGENT_SWEEP_MEM_MAX."
 }
 cc_case "the kill message names the default cap even when no cap was applied (pins current behaviour)" case_killed_message_without_cap
 

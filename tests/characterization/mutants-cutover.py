@@ -67,7 +67,7 @@ MUTANTS = [
     ("quote-allowed", "        *\\'*) die \"$1 holds a single quote; refused\" ;;", "", U, "single quote"),
     ("marker-report-link-followed", 'if [ ! -f "$rep" ] || [ -L "$rep" ]; then MARK_ERR=', 'if [ ! -f "$rep" ]; then MARK_ERR=', L, "report that is a symbolic link"),
     ("marker-report-checkout-header-unchecked", '|| [ -z "$hdr_chk" ] || [ "${head:0:${#hdr_chk}}" != "$hdr_chk" ]; then', '|| false; then', L, "header names another checkout"),
-    ("shadow-unknown-deployed-allowed", 'if [ "$deployed_commit" = unknown ] || [ -z "$head_full" ] ||', 'if [ -z "$head_full" ] ||', SH, "no VERSION"),
+    ("shadow-unknown-deployed-allowed", 'if [ -z "$deployed_commit" ] || [ -z "$head_full" ] ||', 'if [ -z "$head_full" ] ||', SH, "empty commit"),
     ("shadow-git-dir-two-words-safe", '--git-dir|--work-tree) skip=1; unsafe=1 ;;', '--git-dir|--work-tree) skip=1 ;;', SH, "git changes nothing outside TMPDIR"),
     ("build-shadow-scratch-foreign", 'case "$name" in .stage.*|.shadow.*|.shadow-ok.*) continue ;; esac\n            has_name', 'case "$name" in .stage.*) continue ;; esac\n            has_name', B, "scratch of a killed shadow"),
     ("build-shadow-scratch-removal-refused", 'case "$old" in .stage.*|.shadow.*|.shadow-ok.*) continue ;; esac', 'case "$old" in .stage.*) continue ;; esac', B, "scratch of a killed shadow"),

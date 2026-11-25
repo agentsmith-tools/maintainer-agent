@@ -159,7 +159,8 @@ bin/maintainer-doctor   check the install by running it
 lib/run.sh              orchestrator, platform-independent
 lib/preamble-core.md    the doctrine, shared by every profile, injected first
 lib/prose-style.md      injected into every prompt unless PROSE_STYLE=raw
-lib/backends/*.sh       claude | opencode | codex | cursor
+lib/backends/*.sh       claude | opencode | codex | cursor (the bash twins)
+rust/crates/mx-backends/  the same four in Rust; a fifth backend is a change here
 scripts/render-settings.py  generates the deny walls from a profile's deny.json
 scripts/transcript.py   turns stream-json into a log and a list of commands run
 profiles/_template/     what new-profile.sh copies
@@ -218,14 +219,56 @@ Three things in the generated output look like mistakes and are not:
 
 ## Adding a backend
 
-Implement `backend_name`, `backend_check` and `backend_run` in
-`lib/backends/<name>.sh`. If the backend cannot express a per-command deny list,
-also implement `backend_allowed_tasks` returning only the tasks it is fit for;
-`run.sh` enforces it and exits 78 otherwise. Say what the containment actually
-is in a comment at the top, and add a test that pins the claim. `cursor.sh` is
-the worked example of a weak backend done honestly.
+The set of backends is closed. The Rust orchestrator has four built in, `claude`,
+`codex`, `cursor` and `opencode`, and a fifth is a Rust code change in
+`rust/crates/mx-backends`. A bash file in `lib/backends/` or in a profile does not
+add one. The Rust `run` matches `BACKEND` against the four names and stops with
+exit 64 and the alert `no backend '<name>'` for any other value, before it opens a
+file. A name with a slash or a dot-dot gets the same refusal (decision D18, checked
+in `rust/crates/mx-run/src/pass/setup.rs`), so `BACKEND=../backends/codex` reaches
+nothing. The files in `lib/backends/*.sh` are the bash twins that the differential
+compares the four Rust backends against.
 
-Implement `backend_rehearsal` only if the backend can actually be handed a
-config that blocks every GitHub write verb. `run.sh` refuses `POST=off` on a
-backend that does not declare it, because a rehearsal that silently posts is
-worse than no rehearsal.
+To add a backend:
+
+1. Write `rust/crates/mx-backends/src/<name>.rs`. It implements the `Backend`
+   trait of `src/lib.rs`, which asks six questions:
+   - `name` is what `BACKEND` selects and the provenance line prints.
+   - `declares_rehearsal` is true only if the backend can be handed a config that
+     blocks every GitHub write verb, and `rehearsal_wall` says where that config
+     is (`None` when it is not rendered). `run` refuses `POST=off` on a backend
+     that does not declare it, with exit 78, because a rehearsal that silently
+     posts is worse than no rehearsal.
+   - `allowed_tasks` is `None` for no restriction. A backend that cannot express a
+     per-command deny list returns only the tasks it is fit for, and `run` refuses
+     every other task with exit 78.
+   - `check` is `Ok` when the backend can run, and otherwise the message `run`
+     prints.
+   - `plan` returns a `RunPlan`: the programs to run, their arguments and
+     environment, the file each reads and the log each appends to. A backend
+     starts no process and reads only what `BackendCtx` and `Host` hand it, because
+     only `mx-ports` starts processes.
+
+   Say what the containment is in a doc comment at the top of the module, and add
+   a test that pins the claim. `cursor.rs` is the worked example of a weak backend
+   done honestly.
+2. Register it: add `mod <name>;` and one arm to `backend_by_name` in
+   `rust/crates/mx-backends/src/lib.rs`. That match is the registry, and it takes
+   exact names only.
+3. Test it. `rust/crates/mx-backends/tests/<name>.rs` pins what the plan runs, the
+   variables it names, what `check` says and when `plan` refuses; `claude.rs`,
+   `codex.rs`, `cursor.rs` and `opencode.rs` are the models. Add the name to
+   `NAMES` in `tests/names.rs` and update the counts beside it, so the registry
+   test holds the fifth name and still refuses every near miss. Add a row to
+   `tests/mutants.py` for each guard, so that deleting the guard turns a named
+   test red.
+4. Know what the differential covers. `tests/differential.sh` runs the four
+   shipped backends against their bash twins and expects exactly four summary
+   lines. A fifth backend has no bash twin, so its own tests carry the proof.
+5. Teach the doctor about it: add an arm to `backend` in
+   `rust/crates/mx-doctor/src/install.rs` for the program the backend runs. The
+   doctor prints no CLI check for a name it does not list. It also fails
+   `backend '<name>' not installed` unless `<share>/backends/<name>.sh` exists, and
+   `install.sh` deploys only `lib/backends/*.sh`, so a backend with no bash file
+   reads red in the doctor until that check changes.
+6. Run `scripts/rust-gate.sh` before you commit.

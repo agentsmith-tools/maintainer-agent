@@ -56,7 +56,7 @@ fi
 need_kb="${MAGENT_SWEEP_MIN_AVAIL_KB:-10485760}"
 wait_s="${MAGENT_SWEEP_WAIT:-300}"
 poll_s="${MAGENT_SWEEP_POLL:-10}"
-cap="${MAGENT_SWEEP_MEM_MAX:-12G}"
+cap="${MAGENT_SWEEP_MEM_MAX:-18G}"
 meminfo="${MAGENT_MEMINFO:-/proc/meminfo}"
 
 avail_kb() {

@@ -78,6 +78,10 @@ Use it for a change to the orchestrator, the backends, the failure-shape
 classifier, the installers, the doctor or the repo tool, which
 `tests/run-tests.sh` does not pin. CI runs the characterization runner as
 its own job; the pre-commit hook does not, because the cases take about 155 s.
+The suite also covers the five repository checks (`scripts/check_claims.sh`,
+`scripts/shellcheck-sweep.sh`, `scripts/verify-action-pins.sh`,
+`evals/run-evals.sh` and `tests/containment-probe.sh`), because the
+`checks-*.sh` cases run them.
 
 `suite_ran` cannot be generic: cargo prints `test result: ok. N passed`, and a
 shell test prints whatever its author chose. A suite that cannot say how many

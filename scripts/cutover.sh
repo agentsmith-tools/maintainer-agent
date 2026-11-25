@@ -1281,7 +1281,8 @@ cmd_shadow() {
     local why_not="" left=0 skipped_used=() n head_full
     head_full="$(git -C "$root" rev-parse HEAD 2>/dev/null)" || head_full=""
     [ -z "$(git -C "$root" status --porcelain 2>/dev/null)" ] || why_not="the checkout is dirty, so shadow compared nothing that install would deploy"
-    if [ "$deployed_commit" = unknown ] || [ -z "$head_full" ] || [ "${head_full:0:${#deployed_commit}}" != "$deployed_commit" ]; then
+    # "unknown" (no VERSION) never prefixes a commit, so only an empty commit needs a test of its own.
+    if [ -z "$deployed_commit" ] || [ -z "$head_full" ] || [ "${head_full:0:${#deployed_commit}}" != "$deployed_commit" ]; then
         why_not="${why_not:+$why_not; }the deployed tree is from $deployed_commit and the checkout is at ${head_full:0:7}; run ./install.sh first, because live installs the checkout"
     fi
     if [ "$SH_DIFF" != 0 ]; then why_not="${why_not:+$why_not; }$SH_DIFF comparison(s) differ"; fi

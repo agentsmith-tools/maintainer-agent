@@ -10,6 +10,13 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The shellcheck sweep cap moves from 12G to 18G.** `shellcheck` on `tests/run-tests.sh`
+  (12,260 lines) peaks at 14.4 GB resident, so the 12G scope killed the linter and every
+  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. Splitting the
+  file so no single lint needs this much is the follow-up.
+
 ### Security
 
 - **`maintainer-merge` hardening, found by the review of the Rust port.**
@@ -53,7 +60,7 @@ middle digit.
   `shadow-ok` holds the table of what is in the directory and reads the machine
   back, `status` says which programs are bash or Rust by sha256 against
   `RUST_STAMP`, and `rollback` puts the saved bash originals back from the stamp
-  alone, with no Rust binary. 251 cases in `tests/characterization/cutover-*.sh`,
+  alone, with no Rust binary. 252 cases in `tests/characterization/cutover-*.sh`,
   128 mutants in `mutants-cutover.py`, and a differential of `rollback` against
   `install --rollback` over 32 states
   (`rust/crates/mx-install/tests/cutover-rollback.sh`). See

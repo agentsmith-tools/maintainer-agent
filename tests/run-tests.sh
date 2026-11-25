@@ -11881,7 +11881,7 @@ sweep_run "$p_plain" "$hk/nomem"
 sweep_run "$p_cap" "$(meminfo 20000000)"
 # The scope probe logs the same flags (it ends in `true`), so the case reads the
 # line that carries the linter: that is the one proving the linter ran inside it.
-[ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=12G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
+[ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=18G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
     && swept_all \
     && ok "the linter runs inside a memory-capped scope with no swap" \
     || bad "the linter ran uncapped (rc=$rc): $(cat "$hk/sd.log")"
@@ -12070,6 +12070,15 @@ for cp in docs/verifying.md README.md CHANGELOG.md; do
         || ok "the characterization suite does not cover $cp"
 done
 
+# The characterization suite lists every path its cases characterize (FU1-2). The check reads the
+# case files and suite_covers; it is a file of its own so that shellcheck does not need more memory
+# for this one.
+chc_out="$(MX_TREE="$root" bash "$suite_root/tests/characterization-covers.sh" 2>&1)"; chc_rc=$?
+chc_n="$(sed -n 's/^\([0-9][0-9]*\) passed, 0 failed$/\1/p' <<<"$chc_out")"
+[ "$chc_rc" = 0 ] && [ "${chc_n:-0}" -gt 0 ] \
+    && ok "the characterization suite lists every path its cases characterize ($chc_n checks)" \
+    || bad "tests/characterization-covers.sh failed (rc=$chc_rc): $(grep -E '^  FAIL' <<<"$chc_out" | head -3 | tr '\n' ' ' | cut -c1-300)"
+
 # suite_ran counts PASSED cases, and 0 whenever the summary line is missing.
 chl="$stub_dir/chlog"; rm -rf "$chl"; mkdir -p "$chl"
 printf '== run-backends.sh: 52 cases\nPASS  one\n52 cases, 50 passed, 2 failed\nfiles run: 1\n' > "$chl/with"
@@ -12226,6 +12235,19 @@ else
     noenv "verify refuses a path as the filter and the log names the filter rule (needs podman or docker)"
 fi
 rm -f "$stub_dir/gh"
+
+echo "== the install black-box comparison does not depend on the order a suite lists its failures in =="
+# rust/crates/mx-install/tests/blackbox.sh --with-suite compares the FAIL lines of two suite runs
+# with `comm`. A directory listing is in one order on tmpfs and in another on ext4, so the order of
+# those lines is not the same on every machine (FU1-5). --self-test runs a stand-in suite twice,
+# once with the real `find` and once with a `find` that reverses its NUL-separated records, and
+# checks that the verdict and the report do not move and that every difference is listed. Its
+# scratch directory is inside this suite's own, so nothing lands in the caller's home.
+bb_out="$(MX_SCRATCH="$stub_dir/bb-scratch" bash "$suite_root/rust/crates/mx-install/tests/blackbox.sh" --self-test 2>&1)"; bb_rc=$?
+bb_n="$(sed -n 's/^self-test: \([0-9][0-9]*\) checks passed, 0 failed$/\1/p' <<<"$bb_out")"
+[ "$bb_rc" = 0 ] && [ "${bb_n:-0}" -gt 0 ] \
+    && ok "the install black-box comparison gives one verdict for both directory orders ($bb_n checks)" \
+    || bad "blackbox.sh --self-test failed or ran no check (rc=$bb_rc): $(tail -n 3 <<<"$bb_out" | tr '\n' ' ' | cut -c1-300)"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
