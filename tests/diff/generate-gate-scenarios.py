@@ -138,6 +138,23 @@ def update_scenario(i):
     if rnd.random() < 0.85:
         lines.append(f'mx_receipt {pr} "$MX_UPDATE_HEAD" observed "guard mutated, went red"')
     lines.append(f'mx_update_gh {pr} {state} {decision} "{author}"')
+    # a quarter of the scenarios answer `gh pr view` with a mistyped or missing fact, which the
+    # python helper of the bash gate refuses and the Rust gate must refuse too
+    if rnd.random() < 0.25:
+        author_json, cross_json = rnd.choice([
+            ('{"login":"alice"}', "true"), ('"dependabot"', "false"), ('{"login":5}', "false"),
+            ('{"login":true}', "false"), ('{"login":[1]}', "false"), ('{"login":0}', "false"),
+            ('{"login":{}}', "false"), ('null', "false"), ('{"login":"alice"}', '"false"'),
+            ('{"login":"alice"}', "null"), ('{"login":"alice"}', "1"), ('{"login":"alice"}', None),
+            ('[]', "false"), ('{"login":"app/dependabot"}', "false"),
+        ])
+        fields = [f'"headRefOid":"$MX_UPDATE_HEAD"', f'"mergeStateStatus":"{state}"',
+                  '"reviewDecision":' + ('null' if decision == "-" else f'"{decision}"'),
+                  f'"author":{author_json}']
+        if cross_json is not None:
+            fields.append(f'"isCrossRepository":{cross_json}')
+        fields.append('"maintainerCanModify":false')
+        lines.append("printf '%s\\n' \"{" + ",".join(f.replace('"', '\\"') for f in fields) + "}\" > \"$MX_WORK/gh-answers/pr-view.json\"")
     lines.append(f"mx_run bin/maintainer-merge update {pr}")
     return "\n".join(lines) + "\n"
 
@@ -163,13 +180,25 @@ def receipt_scenario(i):
     return "\n".join(lines) + "\n"
 
 
+def badenv_scenario(i):
+    """A gate variable whose value is not UTF-8: bash reads the bytes, the Rust gate refuses."""
+    name, value, args = rnd.choice([
+        ("MAINTAINER_IN_RUN", "'\\xff'", "receipt 7 abcdef1 'a proof'"),
+        ("MAINTAINER_POST", "'o\\xff'", "show"),
+        ("PROD_GLOBS", "'bin/*\\xff'", "show"),
+        ("CLAIM_LABEL", "'\\xfe'", "show"),
+    ])
+    return ("#!/usr/bin/env bash\n# generated non-UTF-8 environment scenario %d\nmx_merge_env\nmx_env_bytes %s %s\n"
+            "mx_run bin/maintainer-merge %s\n" % (i, name, value, args))
+
+
 def usage_scenario(i):
     arg = rnd.choice(["", "frobnicate", "--help", "Merge 7", "merge", "update", "merge abc", "update 7x", "receipt 7", "verify 7 1234567"])
     return "#!/usr/bin/env bash\n# generated usage scenario %d\nmx_merge_env\nmx_run bin/maintainer-merge %s\n" % (i, arg)
 
 
 makers = [(merge_scenario, "merge", 60), (update_scenario, "update", 20), (show_scenario, "show", 8),
-          (receipt_scenario, "receipt", 6), (usage_scenario, "usage", 6)]
+          (receipt_scenario, "receipt", 6), (usage_scenario, "usage", 6), (badenv_scenario, "badenv", 4)]
 weights = [w for _, _, w in makers]
 for i in range(count):
     fn, name, _ = rnd.choices(makers, weights)[0]

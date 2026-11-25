@@ -335,9 +335,16 @@ impl GhPort for RealGh<'_> {
         // type is unreadable here too, never the safe value (review rv271 F1).
         let author_login = match value.get("author") {
             None | Some(Value::Null) => "",
-            Some(Value::Object(object)) => {
-                object.get("login").and_then(Value::as_str).unwrap_or("")
-            }
+            Some(Value::Object(object)) => match object.get("login") {
+                Some(Value::String(login)) => login.as_str(),
+                // python: `a.get("login") or ""`, so a falsy login is empty and a truthy one that
+                // is not text fails the helper's `isinstance(v, str)` (review rv271b N1).
+                None | Some(Value::Null | Value::Bool(false)) => "",
+                Some(Value::Number(n)) if n.as_f64() == Some(0.0) => "",
+                Some(Value::Array(items)) if items.is_empty() => "",
+                Some(Value::Object(fields)) if fields.is_empty() => "",
+                Some(_) => return Err(unreadable("author")),
+            },
             Some(_) => return Err(unreadable("head")),
         };
         // Every value must be text without a newline, as the python helper insists, so a null

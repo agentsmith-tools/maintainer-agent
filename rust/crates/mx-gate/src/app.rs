@@ -188,6 +188,10 @@ fn is_read_by_the_gate(name: &str) -> bool {
         || name.starts_with("VERIFY_")
         || name.starts_with("PREFETCH_")
         || matches!(name, "PROD_GLOBS" | "CLAIM_LABEL" | "CLASSIFY_TIMEOUT" | "HOME" | "PATH")
+        // Everything a child receives: a value dropped here would run `gh` or `git` without it
+        // (review rv271b N2).
+        || CHILD_ENV_NAMES.contains(&name)
+        || CHILD_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// A present value that is not text is a refusal, exit 64, naming the variable (decision P3B-13).
@@ -199,6 +203,19 @@ fn refuse_non_utf8(bad: &[String]) -> Result<(), Exit> {
         }),
         None => Ok(()),
     }
+}
+
+/// The process entry: splits the environment, then runs. `main` only passes `vars_os` in, so
+/// the refusal of a value that is not text is tested here and not in the binary (rv271b N3).
+#[must_use]
+pub fn run_process(
+    argv0: &str,
+    exe: &Path,
+    args: &[String],
+    environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> i32 {
+    let (vars, bad_env) = split_env(environment);
+    run(argv0, exe, args, &vars, &bad_env)
 }
 
 /// Runs the program. Returns the exit status; everything it prints goes to the real streams.
@@ -786,6 +803,43 @@ mod run_tests {
             "an unrelated name is ignored"
         );
         assert!(refuse_non_utf8(&[]).is_ok());
+    }
+
+    #[test]
+    fn a_non_text_value_of_a_name_a_child_receives_refuses_too_n2() {
+        for name in [
+            "GH_TOKEN",
+            "GH_HOST",
+            "GIT_AUTHOR_NAME",
+            "XDG_CONFIG_HOME",
+            "LC_CTYPE",
+            "TMPDIR",
+            "SSL_CERT_FILE",
+            "HTTPS_PROXY",
+            "PYTHONPATH",
+        ] {
+            let exit = refuse_non_utf8(&[name.to_string()]).unwrap_err();
+            assert_eq!(exit.code, 64, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_process_entry_hands_the_non_text_names_to_run_so_the_guard_cannot_be_dropped_n3() {
+        let s = scratch(&[]);
+        // Every variable the profile load needs, so only the refusal can end the run with 64:
+        // were the unreadable value dropped, the receipt would go on and fail on the missing key
+        // with exit 1.
+        let mut environment: Vec<(OsString, OsString)> =
+            s.vars.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect();
+        environment.push((OsString::from("MAINTAINER_IN_RUN"), OsString::from_vec(vec![0xff])));
+        let code = run_process(
+            &s.dir.join("bin/maintainer-merge").display().to_string(),
+            Path::new("/x"),
+            &["receipt".into(), "7".into(), "abcdef0".into(), "p".into()],
+            environment,
+        );
+        assert_eq!(code, 64);
+        assert!(!s.dir.join("state").exists(), "nothing was read or written");
     }
 
     #[test]

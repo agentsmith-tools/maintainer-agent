@@ -636,3 +636,27 @@ fn a_claim_label_with_a_backslash_a_quote_or_a_newline_never_reaches_gh() {
         assert!(argv_of(&log).is_empty());
     }
 }
+
+#[test]
+fn a_truthy_login_that_is_not_text_is_an_unreadable_author_so_dependabot_cannot_hide_n1() {
+    for bad in ["5", "true", "[1]", r#"{"a":1}"#, "1.5"] {
+        let json = format!(
+            r#"{{{FACTS_OK},"author":{{"login":{bad}}},"isCrossRepository":false,"maintainerCanModify":false}}"#
+        );
+        assert_eq!(facts_of(&json).unwrap_err().output, "author", "{bad}");
+    }
+}
+
+#[test]
+fn a_falsy_login_reads_as_empty_as_python_or_does_n1() {
+    for empty in ["null", "0", "0.0", "false", r#""""#, "{}", "[]"] {
+        let json = format!(
+            r#"{{{FACTS_OK},"author":{{"login":{empty}}},"isCrossRepository":false,"maintainerCanModify":false}}"#
+        );
+        assert_eq!(facts_of(&json).unwrap().author, "", "{empty}");
+    }
+    let json = format!(
+        r#"{{{FACTS_OK},"author":{{"login":"alice"}},"isCrossRepository":false,"maintainerCanModify":false}}"#
+    );
+    assert_eq!(facts_of(&json).unwrap().author, "alice");
+}

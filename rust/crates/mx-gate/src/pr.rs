@@ -446,7 +446,6 @@ impl Posting {
     }
 }
 
-/// What a merge did.
 /// The right to call [`GhPort::merge`]. Only [`Merger::merge`] makes one, from a `Pr<Mergeable>`.
 #[derive(Debug)]
 pub struct SpendToken(());
@@ -458,6 +457,7 @@ impl SpendToken {
     }
 }
 
+/// What a merge did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     number: PrNumber,
