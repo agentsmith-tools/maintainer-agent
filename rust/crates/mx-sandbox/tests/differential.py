@@ -174,6 +174,52 @@ def section_glob_extended(count):
         record("glob-extended", f"{pat!r} vs {path!r}", (a[0], x.encode(), b""), (b[0], y.encode(), b""), explain)
 
 
+def gen_nested():
+    """Nested negation and multibyte atoms, the classes of pattern the first extglob matcher got
+    wrong or could not decide (rv280 round 2)."""
+    atoms = ["a", "b", "é", "?", "*", "[[=a=]]", "[[:alpha:]]", "[!a]", "\\?", ".", "/"]
+
+    def neg(depth):
+        inner = "|".join("".join(RNG.choice(atoms) for _ in range(RNG.randint(0, 2))) for _ in range(RNG.randint(1, 3)))
+        if depth < 2 and RNG.random() < 0.5:
+            inner += RNG.choice(["|", ""]) + RNG.choice("!@?*+") + "(" + neg(depth + 1) + ")"
+        return inner
+    parts = []
+    for _ in range(RNG.randint(1, 4)):
+        r = RNG.random()
+        if r < 0.5:
+            parts.append(RNG.choice("!!@?*+") + "(" + neg(0) + ")")
+        else:
+            parts.append(RNG.choice(atoms))
+    return "".join(parts)
+
+
+def section_glob_nested(count):
+    locales = ["C"] + [l for l in ("en_US.UTF-8", "C.UTF-8") if subprocess.run(["locale", "-a"], capture_output=True).stdout.decode().lower().count(l.lower().replace("-", "")) or l == "C.UTF-8"][:1]
+    for locale in locales:
+        pairs = []
+        for _ in range(count):
+            pat = gen_nested().replace(" ", "_")
+            path = "".join(RNG.choice(list("abé/.?*") + ["aa", "é"]) for _ in range(RNG.randint(0, 6)))
+            pairs.append((pat, path))
+        pairs += [("!(a)*!(a|!(b))", "x"), ("*!(@(a|b))*c\\?", "zz"), ("@(a|b|c)*!(a)*[[=a=]]", "q"), ("??", "é"), ("[!]]", "é"), ("[[:alpha:]]", "é")]
+        stdin = "".join(f"{p_}\t{q}\n" for p_, q in pairs).encode()
+        script = 'while IFS=$\'\\t\' read -r g p; do if [[ "$p" == $g ]]; then echo 1; else echo 0; fi; done'
+        a = bash(script, stdin=stdin, env={"LC_ALL": locale})
+        b = probe(["glob"], stdin=stdin)
+        la, lb = text(a[1]).split("\n"), text(b[1]).split("\n")
+        assert len(la) == len(lb), (len(la), len(lb))
+        for i, (x, y) in enumerate(zip(la, lb)):
+            pat, path = pairs[i] if i < len(pairs) else ("", "")
+
+            def explain(xa, yb):
+                # Fail closed (P3A-16): production where bash says not is allowed, never the reverse.
+                if xa[1] == b"0" and yb[1] == b"1":
+                    return "P3A-16: the matcher answers production where it cannot be sure"
+                return None
+            record("glob-nested", f"[{locale}] {pat!r} vs {path!r}", (a[0], x.encode(), b""), (b[0], y.encode(), b""), explain)
+
+
 def section_glob(count):
     pairs = []
     for _ in range(count):
@@ -582,6 +628,7 @@ def main():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     plan = [("glob", lambda: section_glob(int(os.environ.get("N_GLOB", "1500")))),
             ("glob-extended", lambda: section_glob_extended(int(os.environ.get("N_GLOBX", "600")))),
+            ("glob-nested", lambda: section_glob_nested(int(os.environ.get("N_GLOBN", "700")))),
             ("escapes", lambda: section_escapes(int(os.environ.get("N_ESC", "70")))),
             ("selection", lambda: section_selection(int(os.environ.get("N_SEL", "90")))),
             ("ran", section_ran),

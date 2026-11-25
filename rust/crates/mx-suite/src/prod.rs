@@ -59,8 +59,17 @@ impl ProdGlobs {
 
     /// bash `is_production`: does `path` match any pattern, as `[[ "$p" == $g ]]` matches it?
     /// `*` matches any run of characters including `/`, `?` one character, `[...]` a class
-    /// (with `!` or `^` to negate and `a-z` ranges), and `\x` the character `x`. There is no
-    /// extended globbing, and a leading `.` is an ordinary character.
+    /// (ranges, `!` or `^` negation, `[:alpha:]` and the other POSIX classes, `[=a=]`,
+    /// `[.a.]`), `\x` the character `x`, and the extended patterns `?(..)`, `*(..)`, `+(..)`,
+    /// `@(..)` and `!(..)` that `[[ ]]` reads whatever `shopt extglob` says. A leading `.` is an
+    /// ordinary character.
+    ///
+    /// The answer errs toward "production" and never away from it (P3A-16): a construct this
+    /// matcher cannot decide exactly, a matcher that ran past its step or depth bound, a
+    /// `?` or bracket against a path that is not ASCII (bash counts characters in a UTF-8
+    /// locale, this counts bytes), and a negation that bash may read differently, all answer
+    /// yes. A profile that sets `nocasematch` or another `shopt` that changes `[[ == ]]` is not
+    /// supported (P3A-19): the profile file is shell and can change anything.
     #[must_use]
     pub fn matches(&self, path: &str) -> bool {
         self.0.iter().any(|glob| glob_match(glob.as_bytes(), path.as_bytes()))
@@ -74,46 +83,105 @@ impl ProdGlobs {
 /// `@(..)` and `!(..)` with `|` alternatives, nested. The matcher decides on bytes, the way
 /// bash does in the C locale.
 ///
-/// A construct this matcher does not understand answers YES, "this is a production path":
-/// the unsafe error here is calling a production path ordinary, because the receipt then
-/// speaks for less than the profile asked (decision P3A-16). An unknown `[:name:]` is the
-/// one such construct.
+/// Whatever it cannot be sure of answers YES, "this is a production path": calling a
+/// production path ordinary is the unsafe error, because the receipt then speaks for less than
+/// the profile asked (P3A-16). That covers an unknown `[:name:]`, a negation that bash may read
+/// differently ([`unsure`]), a `?` or bracket against text that is not ASCII, and a match that
+/// ran past [`STEP_LIMIT`] steps or [`DEPTH_LIMIT`] nested calls.
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    full(pattern, text, &mut 0)
-}
-
-/// Pattern work done so far, to bound a pattern that backtracks without end. Past the limit the
-/// answer is yes, for the reason above.
-const STEP_LIMIT: u64 = 2_000_000;
-
-fn full(pattern: &[u8], text: &[u8], steps: &mut u64) -> bool {
-    *steps += 1;
-    if *steps > STEP_LIMIT {
+    if unsure(pattern, text) {
         return true;
     }
+    let mut m = Bounds { steps: 0, depth: 0, tripped: false };
+    let hit = full(pattern, text, &mut m);
+    hit || m.tripped
+}
+
+/// Pattern work done so far and how deep it recursed. Past a limit the answer is yes.
+struct Bounds {
+    steps: u64,
+    depth: u32,
+    tripped: bool,
+}
+
+/// The most steps one match may take before it answers yes.
+const STEP_LIMIT: u64 = 2_000_000;
+/// The deepest the matcher recurses before it answers yes. A text of 60 000 bytes against
+/// `*(a)` recursed once per byte and overflowed the stack.
+const DEPTH_LIMIT: u32 = 1_000;
+
+/// Cases the matcher refuses to decide, because bash and this code may disagree.
+fn unsure(pattern: &[u8], text: &[u8]) -> bool {
+    // bash counts characters under a UTF-8 locale and this matcher counts bytes, so a
+    // single-character wildcard or a class against non-ASCII text can differ.
+    if !text.is_ascii() && pattern.iter().any(|b| matches!(b, b'?' | b'[')) {
+        return true;
+    }
+    // Negation: `!(..)` is exact only when it is the one wildcard group of the pattern and no
+    // star stands outside it. Two of them, one inside another, or one beside a `*` is where
+    // bash answers differently from the straightforward reading (found by differential).
+    let negations = pattern.windows(2).filter(|w| w == b"!(").count();
+    if negations >= 2 {
+        return true;
+    }
+    negations == 1 && outside_group_has_star(pattern)
+}
+
+/// Does a `*` stand outside every `(..)` of the pattern?
+fn outside_group_has_star(pattern: &[u8]) -> bool {
+    let mut depth = 0_usize;
+    let mut i = 0;
+    while i < pattern.len() {
+        match pattern[i] {
+            b'\\' => i += 1,
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b'*' if depth == 0 && pattern.get(i + 1) != Some(&b'(') => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn full(pattern: &[u8], text: &[u8], m: &mut Bounds) -> bool {
+    m.steps += 1;
+    if m.steps > STEP_LIMIT || m.depth >= DEPTH_LIMIT {
+        m.tripped = true;
+        return true;
+    }
+    m.depth += 1;
+    let hit = step(pattern, text, m);
+    m.depth -= 1;
+    hit
+}
+
+fn step(pattern: &[u8], text: &[u8], m: &mut Bounds) -> bool {
     let Some(&first) = pattern.first() else { return text.is_empty() };
     // An extended pattern: one of ?*+@! right before a `(` that closes.
-    if matches!(first, b'?' | b'*' | b'+' | b'@' | b'!') && pattern.get(1) == Some(&b'(') {
-        if let Some((alts, after)) = group(pattern, 1) {
-            return extended(first, &alts, &pattern[after..], text, steps);
-        }
+    if matches!(first, b'?' | b'*' | b'+' | b'@' | b'!')
+        && pattern.get(1) == Some(&b'(')
+        && let Some((alts, after)) = group(pattern, 1)
+    {
+        return extended(first, &alts, &pattern[after..], text, m);
     }
     match first {
-        b'*' => (0..=text.len()).any(|k| full(&pattern[1..], &text[k..], steps)),
-        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps),
+        b'*' => (0..=text.len()).any(|k| full(&pattern[1..], &text[k..], m)),
+        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], m),
         b'[' => match class(pattern, text.first().copied()) {
-            Class::Hit(width) => !text.is_empty() && full(&pattern[width..], &text[1..], steps),
+            Class::Hit(width) => !text.is_empty() && full(&pattern[width..], &text[1..], m),
             Class::Miss => false,
             // bash reads a `[` that never closes as a plain `[`.
-            Class::Unclosed => {
-                text.first() == Some(&b'[') && full(&pattern[1..], &text[1..], steps)
+            Class::Unclosed => text.first() == Some(&b'[') && full(&pattern[1..], &text[1..], m),
+            Class::Unknown => {
+                m.tripped = true;
+                true
             }
-            Class::Unknown => true,
         },
         b'\\' if pattern.len() > 1 => {
-            text.first() == Some(&pattern[1]) && full(&pattern[2..], &text[1..], steps)
+            text.first() == Some(&pattern[1]) && full(&pattern[2..], &text[1..], m)
         }
-        c => text.first() == Some(&c) && full(&pattern[1..], &text[1..], steps),
+        c => text.first() == Some(&c) && full(&pattern[1..], &text[1..], m),
     }
 }
 
@@ -152,35 +220,51 @@ fn group(pattern: &[u8], open: usize) -> Option<(Vec<&[u8]>, usize)> {
     None
 }
 
-fn extended(op: u8, alts: &[&[u8]], rest: &[u8], text: &[u8], steps: &mut u64) -> bool {
-    let one = |span: &[u8], steps: &mut u64| alts.iter().any(|alt| full(alt, span, steps));
+fn extended(op: u8, alts: &[&[u8]], rest: &[u8], text: &[u8], m: &mut Bounds) -> bool {
+    let one = |span: &[u8], m: &mut Bounds| alts.iter().any(|alt| full(alt, span, m));
     match op {
-        b'@' => (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps)),
+        b'@' => (0..=text.len()).any(|k| one(&text[..k], m) && full(rest, &text[k..], m)),
         b'?' => {
-            full(rest, text, steps)
-                || (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps))
+            full(rest, text, m)
+                || (0..=text.len()).any(|k| one(&text[..k], m) && full(rest, &text[k..], m))
         }
-        b'*' | b'+' => repeat(op == b'+', alts, rest, text, steps),
-        _ => (0..=text.len()).any(|k| !one(&text[..k], steps) && full(rest, &text[k..], steps)),
+        b'*' | b'+' => repeat(op == b'+', alts, rest, text, m),
+        _ => (0..=text.len()).any(|k| !one(&text[..k], m) && full(rest, &text[k..], m)),
     }
 }
 
 /// `*(..)` (zero or more) and `+(..)` (one or more) followed by `rest`.
-fn repeat(at_least_one: bool, alts: &[&[u8]], rest: &[u8], text: &[u8], steps: &mut u64) -> bool {
+fn repeat(at_least_one: bool, alts: &[&[u8]], rest: &[u8], text: &[u8], m: &mut Bounds) -> bool {
+    if m.depth >= DEPTH_LIMIT {
+        m.tripped = true;
+        return true;
+    }
+    m.depth += 1;
+    let hit = repeat_inner(at_least_one, alts, rest, text, m);
+    m.depth -= 1;
+    hit
+}
+
+fn repeat_inner(
+    at_least_one: bool,
+    alts: &[&[u8]],
+    rest: &[u8],
+    text: &[u8],
+    m: &mut Bounds,
+) -> bool {
     if at_least_one {
         // One round, which may be empty when an alternative is, then any number more.
         return (0..=text.len()).any(|k| {
-            alts.iter().any(|alt| full(alt, &text[..k], steps))
-                && repeat(false, alts, rest, &text[k..], steps)
+            alts.iter().any(|alt| full(alt, &text[..k], m))
+                && repeat(false, alts, rest, &text[k..], m)
         });
     }
-    if full(rest, text, steps) {
+    if full(rest, text, m) {
         return true;
     }
     // A further round must take at least one byte, or the recursion never ends.
     (1..=text.len()).any(|k| {
-        alts.iter().any(|alt| full(alt, &text[..k], steps))
-            && repeat(false, alts, rest, &text[k..], steps)
+        alts.iter().any(|alt| full(alt, &text[..k], m)) && repeat(false, alts, rest, &text[k..], m)
     })
 }
 
@@ -452,6 +536,107 @@ mod tests {
         assert!(matches("[[=a=]]", "a") && !matches("[[=a=]]", "b"));
         assert!(matches("[[.a.]]", "a"));
         assert!(matches("[]a]", "]") && matches("[!]a]", "b"));
+    }
+
+    #[test]
+    fn every_member_of_every_posix_class_is_pinned_at_its_edges() {
+        // (class, bytes that are in it, bytes that are not)
+        let table: [(&str, &str, &str); 14] = [
+            ("alpha", "azAZ", "09_ -"),
+            ("digit", "09", "aA_ /"),
+            ("alnum", "az09AZ", "_ -/"),
+            ("upper", "AZ", "az09_"),
+            ("lower", "az", "AZ09_"),
+            ("space", " \t\n\x0b\x0c\r", "a0_"),
+            ("blank", " \t", "\n\r\x0b\x0ca"),
+            ("punct", "!/_-~[]@", "az09 \t"),
+            ("print", " a~09", "\x1f\x7f\t"),
+            ("graph", "!a~09", " \x1f\x7f"),
+            ("cntrl", "\x00\x1f\x7f\t", " a09~"),
+            ("xdigit", "09afAF", "gG_ -"),
+            ("ascii", "a\x00\x7f", ""),
+            ("word", "az09AZ_", "- /."),
+        ];
+        for (name, inside, outside) in table {
+            let class = format!("[[:{name}:]]");
+            for c in inside.chars() {
+                assert!(
+                    glob_match(class.as_bytes(), c.to_string().as_bytes()),
+                    "{class} holds {c:?}"
+                );
+            }
+            for c in outside.chars() {
+                assert!(
+                    !glob_match(class.as_bytes(), c.to_string().as_bytes()),
+                    "{class} lacks {c:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_backslash_inside_an_extglob_group_protects_the_next_byte() {
+        assert!(matches("@(a\\)b)", "a)b"));
+        assert!(!matches("@(a\\)b)", "a"));
+        assert!(
+            matches("@(a\\|b)", "a|b") && !matches("@(a\\|b)", "a") && !matches("@(a\\|b)", "b")
+        );
+        assert!(matches("@([)]|x)", ")"), "a bracket expression inside a group may hold a paren");
+    }
+
+    #[test]
+    fn a_question_mark_is_exactly_one_byte_of_ascii_text() {
+        assert!(matches("?", "a") && !matches("?", "") && !matches("?", "ab"));
+        assert!(matches("a?c", "abc") && !matches("a?c", "ac") && !matches("a?c", "abbc"));
+        assert!(!matches("??", "a") && matches("??", "ab"));
+    }
+
+    #[test]
+    fn a_wildcard_or_class_against_text_that_is_not_ascii_answers_production() {
+        // bash counts characters under a UTF-8 locale and this matcher counts bytes (P3A-16).
+        assert!(matches("?", "é") && matches("??", "é") && matches("[!x]", "é"));
+        assert!(
+            matches("[[:alpha:]]", "é") && matches("a?c", "aéc") && matches("src/?.rs", "src/é.rs")
+        );
+        // a literal and a star decide exactly on bytes
+        assert!(matches("é*", "ébc") && !matches("é*", "ebc") && matches("*é", "aé"));
+        assert!(!matches("src/*", "lib/é.rs"));
+    }
+
+    #[test]
+    fn a_negation_that_bash_may_read_differently_answers_production() {
+        // Found by differential: bash says production for these and the straightforward
+        // reading says no. Answering yes is the safe direction (P3A-16).
+        assert!(matches("!(a)*!(a|!(b))", "x"));
+        assert!(matches("*!(@(a|b))*c\\?", "zz"));
+        assert!(matches("@(a|b|c)*!(a)*[[=a=]]", "q"));
+        // two negations and no star: `!(*)` matches nothing, so the plain reading says no
+        assert!(matches("!(*)!(*)", "x"));
+        // a lone negation is still exact
+        assert!(!matches("bin/!(*.md)", "bin/a.md") && matches("bin/!(*.md)", "bin/run"));
+    }
+
+    #[test]
+    fn a_match_that_runs_past_the_step_limit_answers_production() {
+        // Nothing here can match (no `b` in the text), and the nested repeats take exponential
+        // time, so the step limit ends it. The answer is yes, never no (P3A-16, N01).
+        let pattern = "*(a|aa)*(a|aa)*(a|aa)*(a|aa)*(a|aa)*(a|aa)b";
+        let text = "a".repeat(60);
+        assert!(matches(pattern, &text));
+        let mut m = Bounds { steps: 0, depth: 0, tripped: false };
+        assert!(!full(pattern.as_bytes(), text.as_bytes(), &mut m) || m.tripped);
+        assert!(m.tripped, "the limit, not the pattern, ended the match");
+    }
+
+    #[test]
+    fn a_path_of_a_million_bytes_against_a_repeat_answers_production_without_overflowing() {
+        // 60 000 bytes against `*(a)` overflowed the stack when the matcher recursed per byte.
+        let text = "a".repeat(1_000_000);
+        assert!(matches("*(a)", &text));
+        assert!(matches("*(a)b", &text), "depth bound: yes, not no and not a crash");
+        assert!(matches("+(a)", &text));
+        let long_path = format!("{}x", "a/".repeat(500_000));
+        assert!(matches("*x", &long_path), "a star over a long path is still decided");
     }
 
     #[test]

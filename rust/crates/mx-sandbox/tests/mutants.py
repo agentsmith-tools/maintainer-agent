@@ -96,12 +96,23 @@ MUTANTS = [
  ("M67", B+"real.rs", "        changed.sort();\n", "", "changed paths are in find order"),
  ("M68", B+"real.rs", '.field("runtime_env_names", &names)', '.field("runtime_env", &self.runtime_env)', "Debug prints the values of the runtime environment"),
  ("M69", B+"error.rs", "that\\n  asks git what is tracked will fail for that reason and not for the code's.\"", "that\\n  asks git what is tracked will fail for that reason.\"", "the index note loses its end"),
- ("M70", S+"prod.rs", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps),", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], steps) && false,", "? never matches"),
+ ("M70", S+"prod.rs", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], m),", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], m) && false,", "? never matches"),
  ("M71", S+"prod.rs", '        b"alpha" => byte.is_ascii_alphabetic(),', '        b"alpha" => byte.is_ascii_alphanumeric(),', "[:alpha:] holds digits"),
- ("M72", S+"prod.rs", '        _ => (0..=text.len()).any(|k| !one(&text[..k], steps) && full(rest, &text[k..], steps)),', '        _ => (0..=text.len()).any(|k| one(&text[..k], steps) && full(rest, &text[k..], steps)),', "!(..) matches what the group matches"),
- ("M73", S+"prod.rs", "    if !at_least_one && full(rest, text, steps) {", "    if full(rest, text, steps) {", "+(..) matches zero rounds"),
+ ("M72", S+"prod.rs", "        _ => (0..=text.len()).any(|k| !one(&text[..k], m) && full(rest, &text[k..], m)),", "        _ => (0..=text.len()).any(|k| one(&text[..k], m) && full(rest, &text[k..], m)),", "!(..) matches what the group matches"),
+ ("M73", S+"prod.rs", "    if at_least_one {\n        // One round", "    if false {\n        // One round", "+(..) matches zero rounds"),
  ("M74", S+"prod.rs", "                        None => return Class::Unknown,", "                        None => return Class::Miss,", "an unknown class name answers not production"),
  ("M75", S+"prod.rs", "            .split([' ', '\\t', '\\n', '\\x0b', '\\x0c', '\\r'])", "            .split([' ', '\\t'])", "only blanks separate patterns"),
+ ("M76", S+"prod.rs", "    m.steps += 1;\n    if m.steps > STEP_LIMIT || m.depth >= DEPTH_LIMIT {\n        m.tripped = true;\n        return true;", "    m.steps += 1;\n    if m.steps > STEP_LIMIT || m.depth >= DEPTH_LIMIT {\n        return false;", "a match past the step limit answers not production"),
+ ("M77", S+"prod.rs", "    negations == 1 && outside_group_has_star(pattern)", "    false", "a negation beside a star is decided"),
+ ("M78", S+"prod.rs", "    if negations >= 2 {", "    if negations >= 3 {", "two negations are decided"),
+ ("M79", S+"prod.rs", "    if !text.is_ascii() && pattern.iter()", "    if false && pattern.iter()", "a wildcard against non-ASCII text is decided on bytes"),
+ ("M80", S+"prod.rs", "        b\"blank\" => matches!(byte, b' ' | b'\\t'),", "        b\"blank\" => matches!(byte, b' '),", "[:blank:] loses the tab"),
+ ("M81", S+"prod.rs", "        b\"word\" => byte.is_ascii_alphanumeric() || byte == b'_',", "        b\"word\" => byte.is_ascii_alphanumeric(),", "[:word:] loses the underscore"),
+ ("M82", S+"prod.rs", "        b\"xdigit\" => byte.is_ascii_hexdigit(),", "        b\"xdigit\" => byte.is_ascii_digit(),", "[:xdigit:] is digits only"),
+ ("M83", S+"prod.rs", "        b\"punct\" => byte.is_ascii_punctuation(),", "        b\"punct\" => byte.is_ascii_graphic(),", "[:punct:] holds letters"),
+ ("M84", S+"prod.rs", "            b'\\\\' => i += 1,\n            b'[' => {\n                // a bracket expression inside the group", "            b'[' => {\n                // a bracket expression inside the group", "a backslash does not protect the next byte inside a group"),
+ ("M85", S+"prod.rs", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], m),", "        b'?' => text.len() > 1 && full(&pattern[1..], &text[1..], m),", "? needs two bytes"),
+ ("M86", S+"prod.rs", "        b\"cntrl\" => byte < 0x20 || byte == 0x7f,", "        b\"cntrl\" => byte < 0x20,", "[:cntrl:] loses DEL"),
  ("M60", B+"real.rs", "let mut bytes = [0_u8; 8];", "let mut bytes = [0_u8; 7];", "scratch names are 7 characters"),
 ]
 
@@ -124,6 +135,8 @@ def copy_workspace(dest):
         shutil.rmtree(dest)
     shutil.copytree(RUST, dest / "rust", ignore=shutil.ignore_patterns("target", "__pycache__"), symlinks=True)
     shutil.copytree(RUST.parent / "profiles", dest / "profiles", symlinks=True)
+    (dest / "bin").mkdir()
+    shutil.copy2(RUST.parent / "bin" / "maintainer-merge", dest / "bin" / "maintainer-merge")
 
 
 def touch_all(root):

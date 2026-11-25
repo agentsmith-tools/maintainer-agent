@@ -1072,11 +1072,11 @@ fn staged_fixture(name: &str) -> (Scratch, Scratch, ContainedTree, RealSandbox, 
     let scratch = Scratch::new(name);
     let bin = scratch.path("gate");
     std::fs::write(&bin, "#!/bin/sh\necho gate\n").unwrap();
-    let (_s, tree) = mutable(&format!("{name}-tree"), &[("a.rs", "x")]);
+    let (tree_dir, tree) = mutable(&format!("{name}-tree"), &[("a.rs", "x")]);
     let path = stub_runtime(&scratch, "echo ran");
     let sandbox = sandbox_with(&path, Vec::new(), Duration::from_secs(30));
     let relative = sandbox.stage_executable(&tree, &bin, "gate").unwrap();
-    (scratch, _s, tree, sandbox, relative, bin)
+    (scratch, tree_dir, tree, sandbox, relative, bin)
 }
 
 #[test]
@@ -1118,4 +1118,28 @@ fn a_staged_binary_replaced_by_a_link_or_removed_blocks_the_run() {
         run_container(&sandbox, &spec(&work, false), &log),
         Err(SandboxError::StagedChanged { .. })
     ));
+}
+
+#[test]
+fn staging_a_changed_binary_again_replaces_the_recorded_hash() {
+    let (scratch, _keep, tree, sandbox, relative, bin) = staged_fixture("restage");
+    let log = scratch.path("log");
+    std::fs::write(&bin, "#!/bin/sh\necho gate-v2\n").unwrap();
+    sandbox.stage_executable(&tree, &bin, "gate").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tree.root().join(&relative)).unwrap(),
+        "#!/bin/sh\necho gate-v2\n"
+    );
+    // Only the second hash is recorded: a leftover record of the first would refuse this run.
+    assert_eq!(run_container(&sandbox, &spec(tree.root(), false), &log), Ok(ContainerExit(0)));
+}
+
+#[test]
+fn a_changed_staged_file_is_refused_with_a_sentence_that_says_what_to_do() {
+    let refused =
+        SandboxError::StagedChanged { path: PathBuf::from("/w/.container-target/stage/gate") };
+    assert_eq!(
+        refused.to_string(),
+        "the staged file /w/.container-target/stage/gate is not the one that was staged; stage it again before this run"
+    );
 }
