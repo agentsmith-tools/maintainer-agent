@@ -1361,6 +1361,7 @@ fn without_a_suite_host() -> World {
 #[test]
 fn a_build_without_a_suite_host_says_so_and_names_no_command_that_refuses_too_f4() {
     let w = without_a_suite_host();
+    w.gh.script_changed_files(Script::always(Ok(vec!["bin/a".into()])));
     let exit = w
         .gate()
         .verify(
@@ -1392,4 +1393,22 @@ fn a_partial_receipt_cannot_be_checked_without_a_suite_host_and_the_text_says_th
 fn a_whole_receipt_merges_without_a_suite_host() {
     let w = without_a_suite_host();
     w.merge().unwrap();
+}
+
+#[test]
+fn a_verify_without_a_suite_host_still_reads_the_changed_files_first_as_the_bash_cases_pin() {
+    let w = without_a_suite_host();
+    w.gh.script_changed_files(Script::always(Ok(Vec::new())));
+    let exit = w
+        .gate()
+        .verify(
+            false,
+            &pr("7"),
+            &crate::HeadArg::parse("0123456").unwrap(),
+            &mx_suite::TestFilter::parse("guard").unwrap(),
+            &mx_sandbox::SedExpression::parse("s/a/b/").unwrap(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(exit, Exit::from(&crate::VerifyRefusal::ChangedFilesUnreadable { pr: pr("7") }));
 }

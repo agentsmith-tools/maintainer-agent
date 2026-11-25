@@ -104,9 +104,6 @@ impl Gate<'_> {
     ) -> R<()> {
         let refuse = |r: VerifyRefusal| Exit::from(&r);
         self.lease_gate(pr, Action::Verify)?;
-        if !self.cfg.has_suite_host {
-            return Err(die(crate::NO_SUITE_HOST));
-        }
         let runtime =
             self.p.runtime.runtime().ok_or_else(|| refuse(VerifyRefusal::NoContainerRuntime))?;
 
@@ -129,6 +126,11 @@ impl Gate<'_> {
         // A profile without PROD_GLOBS cannot be merged on either, so it cannot be verified
         // either (decision P3B-4); the bash verified and refused later, at `merge`.
         let globs: &ProdGlobs = self.prod_globs()?;
+        // The first thing that needs a suite: after the lock and the changed files, which the
+        // bash cases pin as the refusals that come first.
+        if !self.cfg.has_suite_host {
+            return Err(die(crate::NO_SUITE_HOST));
+        }
 
         let suite_name = if part {
             let Some(named) = named else {
