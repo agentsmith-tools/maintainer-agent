@@ -2303,7 +2303,15 @@ def cmd_start(skill: str) -> None:
     before, after, commits, notes = refresh()
 
     state_file = STATE / f"last-{skill}.json"
-    previous = json.loads(state_file.read_text()) if state_file.exists() else None
+    previous = None
+    if state_file.exists():
+        # A truncated baseline (a kill during finish's write, before it was atomic)
+        # must not stop every later run. Diff against nothing and say which file.
+        try:
+            previous = json.loads(state_file.read_text())
+        except ValueError as exc:
+            notes.append(f"{state_file} is unreadable ({exc}); treating this run as having "
+                         "no previous baseline")
     snap = snapshot(after)
     changes = delta(previous, snap)
 
@@ -2396,7 +2404,12 @@ def cmd_finish(run_id: str) -> None:
                   f"the next run will re-review everything since the last good baseline.")
             return
         if same:
-            (STATE / f"last-{skill}.json").write_text(pending.read_text())
+            # Write beside the target and replace, so a kill mid-write leaves the
+            # old baseline in place rather than truncated JSON under the real name.
+            final = STATE / f"last-{skill}.json"
+            tmp = final.with_name(final.name + f".{os.getpid()}.tmp")
+            tmp.write_text(pending.read_text())
+            os.replace(tmp, final)
             pending.unlink()
     # The run got all the way here, so whatever this task failed with last time
     # is resolved. Only this task's marker: a review succeeding says nothing

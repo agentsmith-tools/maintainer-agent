@@ -11974,6 +11974,13 @@ MX_TREE="$root" python3 -B "$suite_root/tests/test_refresh_pr_fetch.py" >/dev/nu
     && ok "refresh() notes a PR head that could not be fetched, and adds no note when it can" \
     || bad "refresh() does not note a stale pN, or notes a fetched head (tests/test_refresh_pr_fetch.py)"
 
+echo "== a truncated last-<task>.json does not stop start; finish promotes atomically =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_baseline_atomic.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_baseline_atomic.py" >/dev/null 2>&1 \
+    && ok "start survives an unreadable baseline and names it, and finish replaces the baseline atomically" \
+    || bad "start dies on a truncated last-<task>.json, or finish writes the baseline in place (tests/test_baseline_atomic.py)"
+
 echo "== claims reports an unreadable comment thread as UNREADABLE and exits 1 =="
 # tests/claims-unreadable.py was written to be run by hand, so nothing ran it: a
 # revert of the fix would have passed CI. MX_TREE makes it judge the tree under test.
