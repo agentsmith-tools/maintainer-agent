@@ -112,6 +112,21 @@ pub trait SuiteHost {
 
     /// Reads one suite's declarations. A file that is not there is `NotOnDisk`.
     fn load(&self, name: &SuiteName) -> Result<Box<dyn Suite>, SuiteError>;
+
+    /// `( . "$dir/$name.sh"; suite_covers "$path" )`, without reading the other declarations.
+    /// A suite whose declarations cannot be read (no `suite_image`) still answers this in
+    /// the bash, because coverage never asks for them; the real host answers it the same
+    /// way. The default asks the loaded suite, which suits a host that loads from memory.
+    /// Added by the suite agent (P3A-2); additive.
+    fn covers(&self, name: &SuiteName, path: &str) -> Result<bool, SuiteError> {
+        self.load(name)?.covers(path)
+    }
+
+    /// `suite_inferable`: the file does not define `suite_named_only`. Same reasoning as
+    /// [`SuiteHost::covers`] for the default. Added by the suite agent (P3A-2); additive.
+    fn inferable(&self, name: &SuiteName) -> Result<bool, SuiteError> {
+        Ok(!self.load(name)?.spec().named_only)
+    }
 }
 
 /// One call to a fake host or to a suite it loaded.

@@ -250,6 +250,7 @@ dependencies = [
  "mx-core",
  "mx-ports",
  "mx-suite",
+ "sha2",
  "thiserror",
 ]
 

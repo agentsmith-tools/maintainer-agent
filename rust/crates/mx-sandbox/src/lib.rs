@@ -34,6 +34,8 @@ mod container;
 mod error;
 mod limits;
 mod mutation;
+mod real;
+mod realpath;
 mod sandbox;
 mod tree;
 
@@ -41,5 +43,7 @@ pub use container::{ContainerInputs, ContainerSpec, LogMode, Purpose};
 pub use error::SandboxError;
 pub use limits::{ExtraArgs, Limit, LimitSource, Limits, Timeout};
 pub use mutation::{Mutated, NothingChanged, SedExpression};
+pub use real::{RUNTIME_ENV_NAMES, RealSandbox, container_runtime, pick_env};
+pub use realpath::realpath;
 pub use sandbox::{ContainerExit, FakeSandbox, Sandbox, SandboxCall};
 pub use tree::{ContainedTree, Escape, EscapingTree, ExtractedTree};
