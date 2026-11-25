@@ -11881,7 +11881,7 @@ sweep_run "$p_plain" "$hk/nomem"
 sweep_run "$p_cap" "$(meminfo 20000000)"
 # The scope probe logs the same flags (it ends in `true`), so the case reads the
 # line that carries the linter: that is the one proving the linter ran inside it.
-[ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=12G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
+[ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=18G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
     && swept_all \
     && ok "the linter runs inside a memory-capped scope with no swap" \
     || bad "the linter ran uncapped (rc=$rc): $(cat "$hk/sd.log")"
