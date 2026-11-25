@@ -84,7 +84,7 @@ impl Settings {
             need_kb: var("MAGENT_SWEEP_MIN_AVAIL_KB", "10485760").into_bytes(),
             wait_s: var("MAGENT_SWEEP_WAIT", "300").into_bytes(),
             poll_s: var("MAGENT_SWEEP_POLL", "10").into_bytes(),
-            cap: var("MAGENT_SWEEP_MEM_MAX", "12G"),
+            cap: var("MAGENT_SWEEP_MEM_MAX", "18G"),
             meminfo: PathBuf::from(var("MAGENT_MEMINFO", "/proc/meminfo")),
             ci: set("CI"),
             no_cap: set("MAGENT_SWEEP_NO_CAP"),
@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn the_scope_words_are_the_probe_and_the_run() {
         assert_eq!(
-            scope_words("12G").join(" "),
-            "systemd-run --user --scope --quiet -p MemoryMax=12G -p MemorySwapMax=0"
+            scope_words("18G").join(" "),
+            "systemd-run --user --scope --quiet -p MemoryMax=18G -p MemorySwapMax=0"
         );
     }
 

@@ -9,7 +9,7 @@ use mx_ports::{ProcError, Script};
 
 const SCRIPT: &str = "/t/scripts/shellcheck-sweep.sh";
 const SC: &str = "shellcheck --severity=warning";
-const SCOPE: &str = "systemd-run --user --scope --quiet -p MemoryMax=12G -p MemorySwapMax=0";
+const SCOPE: &str = "systemd-run --user --scope --quiet -p MemoryMax=18G -p MemorySwapMax=0";
 const ROOMY: &str = "MemTotal: 1 kB\nMemAvailable: 20000000 kB\n";
 
 /// A checkout of one script (the sweep itself), a roomy meminfo and the tools on `PATH`.
@@ -99,7 +99,7 @@ fn every_tool_the_script_starts_after_its_cd_runs_in_the_checkout() {
             "--scope",
             "--quiet",
             "-p",
-            "MemoryMax=12G",
+            "MemoryMax=18G",
             "-p",
             "MemorySwapMax=0",
             "true",
@@ -113,7 +113,7 @@ fn every_tool_the_script_starts_after_its_cd_runs_in_the_checkout() {
             "--scope",
             "--quiet",
             "-p",
-            "MemoryMax=12G",
+            "MemoryMax=18G",
             "-p",
             "MemorySwapMax=0",
             "shellcheck",
@@ -328,7 +328,7 @@ fn with_a_user_scope_the_host_is_probed_once_and_every_run_goes_scope_nice_linte
             "--scope",
             "--quiet",
             "-p",
-            "MemoryMax=12G",
+            "MemoryMax=18G",
             "-p",
             "MemorySwapMax=0",
             "true",
@@ -342,7 +342,7 @@ fn with_a_user_scope_the_host_is_probed_once_and_every_run_goes_scope_nice_linte
             "--scope",
             "--quiet",
             "-p",
-            "MemoryMax=12G",
+            "MemoryMax=18G",
             "-p",
             "MemorySwapMax=0",
             "nice",

@@ -442,6 +442,64 @@ case_flock_missing() {
 }
 dr_case "backend: flock absent from PATH fails with the install fix" case_flock_missing
 
+# The flock check is `command -v flock`, so what it reports is what bash resolves, and the
+# doctor never runs flock. The cases below put each odd file in the case's own bin/, ahead of the
+# tool farm, and pin the answer. A file without the execute bit still counts: bash falls back to
+# it when no executable of that name is on PATH, so the doctor says "flock on PATH" about a
+# program the unit could not start (pins current behaviour, listed under "Found, not fixed" in
+# the pull request that added these cases).
+case_flock_not_executable() {
+    dr_install
+    dr_absent flock
+    : > "$CZ_CASE/bin/flock"; chmod 0644 "$CZ_CASE/bin/flock"
+    dr_doctor
+    cz_expect_rc 0
+    dr_has_finding ok "flock on PATH"
+}
+dr_case "backend: a flock file without execute permission still reads as on PATH (pins current behaviour)" case_flock_not_executable
+
+case_flock_directory() {
+    dr_install
+    dr_absent flock
+    mkdir "$CZ_CASE/bin/flock"
+    dr_doctor
+    cz_expect_rc 1
+    dr_has_finding fail "flock is required to serialize runs and is NOT on PATH" "install flock for this platform"
+}
+dr_case "backend: a directory named flock on PATH fails like a missing flock" case_flock_directory
+
+case_flock_dangling_symlink() {
+    dr_install
+    dr_absent flock
+    ln -s "$CZ_CASE/no-such-flock" "$CZ_CASE/bin/flock"
+    dr_doctor
+    cz_expect_rc 1
+    dr_has_finding fail "flock is required to serialize runs and is NOT on PATH" "install flock for this platform"
+}
+dr_case "backend: a dangling symlink named flock on PATH fails like a missing flock" case_flock_dangling_symlink
+
+case_flock_version_fails() {
+    dr_install
+    dr_absent flock
+    printf '#!/bin/sh\necho "$*" >> "%s/calls/flock"\nexit 3\n' "$CZ_CASE" > "$CZ_CASE/bin/flock"
+    chmod +x "$CZ_CASE/bin/flock"
+    : > "$CZ_CASE/calls/flock"
+    dr_doctor
+    cz_expect_rc 0
+    dr_has_finding ok "flock on PATH"
+    dr_expect_calls flock
+}
+dr_case "backend: a flock that exits non-zero is on PATH, and the doctor never runs it" case_flock_version_fails
+
+case_flock_skips_the_unexecutable() {
+    dr_install
+    : > "$CZ_CASE/bin/flock"; chmod 0644 "$CZ_CASE/bin/flock"
+    dr_doctor
+    cz_expect_rc 0
+    dr_has_finding ok "flock on PATH"
+}
+dr_case "backend: an unexecutable flock ahead of the real one on PATH still passes" case_flock_skips_the_unexecutable
+
 case_claude_version() {
     dr_install
     dr_doctor

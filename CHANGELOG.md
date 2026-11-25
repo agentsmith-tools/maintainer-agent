@@ -10,6 +10,13 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The shellcheck sweep cap moves from 12G to 18G.** `shellcheck` on `tests/run-tests.sh`
+  (12,260 lines) peaks at 14.4 GB resident, so the 12G scope killed the linter and every
+  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. Splitting the
+  file so no single lint needs this much is the follow-up.
+
 ### Security
 
 - **`maintainer-merge` hardening, found by the review of the Rust port.**
