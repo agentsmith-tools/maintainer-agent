@@ -68,8 +68,10 @@ impl ProdGlobs {
     /// matcher cannot decide exactly, a matcher that ran past its step or depth bound, a
     /// `?` or bracket against a path that is not ASCII (bash counts characters in a UTF-8
     /// locale, this counts bytes), and a negation that bash may read differently, all answer
-    /// yes. A profile that sets `nocasematch` or another `shopt` that changes `[[ == ]]` is not
-    /// supported (P3A-19): the profile file is shell and can change anything.
+    /// yes. A pattern also matches when it does so in lower case or in upper case on both sides, because
+    /// a profile can set `nocasematch` and this code cannot see it (P3A-19). A pattern over 512
+    /// bytes or nested over 32 deep answers yes unmatched (P3A-20). Another `shopt` that changes
+    /// `[[ == ]]` is not supported: the profile file is shell and can change anything.
     #[must_use]
     pub fn matches(&self, path: &str) -> bool {
         self.0.iter().any(|glob| glob_match(glob.as_bytes(), path.as_bytes()))
@@ -89,6 +91,71 @@ impl ProdGlobs {
 /// differently ([`unsure`]), a `?` or bracket against text that is not ASCII, and a match that
 /// ran past [`STEP_LIMIT`] steps or [`DEPTH_LIMIT`] nested calls.
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    // A pattern this long or this deeply nested is not a real profile glob. Every step of the
+    // matcher rescans the pattern, so the cost grows with the product; over the cap the answer
+    // is yes without matching (P3A-20).
+    if pattern.len() > PATTERN_LIMIT || nesting(pattern) > NESTING_LIMIT {
+        return true;
+    }
+    // `[[ == ]]` follows `shopt -s nocasematch`, which a sourced profile.env can set, and the
+    // matcher cannot see it. The answer is yes when the pattern matches as written, or with
+    // both sides in lower case, or both in upper case (P3A-19): a path that differs from a
+    // pattern only in case is called production, never ordinary.
+    exact(pattern, text)
+        || exact(&fold(pattern, false), &text.to_ascii_lowercase())
+        || exact(&fold(pattern, true), &text.to_ascii_uppercase())
+}
+
+/// The pattern in one case, with the names inside `[:..:]`, `[=..=]` and `[..]` left alone: the
+/// class `[:upper:]` is not `[:UPPER:]`.
+fn fold(pattern: &[u8], upper: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < pattern.len() {
+        if pattern[i] == b'[' && matches!(pattern.get(i + 1), Some(b':' | b'=' | b'.')) {
+            let kind = pattern[i + 1];
+            let close = (i + 2..pattern.len().saturating_sub(1))
+                .find(|&j| pattern[j] == kind && pattern[j + 1] == b']');
+            if let Some(j) = close {
+                out.extend_from_slice(&pattern[i..j + 2]);
+                i = j + 2;
+                continue;
+            }
+        }
+        out.push(if upper {
+            pattern[i].to_ascii_uppercase()
+        } else {
+            pattern[i].to_ascii_lowercase()
+        });
+        i += 1;
+    }
+    out
+}
+
+/// The longest pattern matched at all, in bytes.
+const PATTERN_LIMIT: usize = 512;
+/// The deepest `(` nesting matched at all.
+const NESTING_LIMIT: usize = 32;
+
+/// How deep the parentheses of the pattern nest.
+fn nesting(pattern: &[u8]) -> usize {
+    let (mut depth, mut deepest, mut i) = (0_usize, 0_usize, 0);
+    while i < pattern.len() {
+        match pattern[i] {
+            b'\\' => i += 1,
+            b'(' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    deepest
+}
+
+fn exact(pattern: &[u8], text: &[u8]) -> bool {
     if unsure(pattern, text) {
         return true;
     }
@@ -560,16 +627,10 @@ mod tests {
         for (name, inside, outside) in table {
             let class = format!("[[:{name}:]]");
             for c in inside.chars() {
-                assert!(
-                    glob_match(class.as_bytes(), c.to_string().as_bytes()),
-                    "{class} holds {c:?}"
-                );
+                assert!(exact(class.as_bytes(), c.to_string().as_bytes()), "{class} holds {c:?}");
             }
             for c in outside.chars() {
-                assert!(
-                    !glob_match(class.as_bytes(), c.to_string().as_bytes()),
-                    "{class} lacks {c:?}"
-                );
+                assert!(!exact(class.as_bytes(), c.to_string().as_bytes()), "{class} lacks {c:?}");
             }
         }
     }
@@ -626,6 +687,48 @@ mod tests {
         let mut m = Bounds { steps: 0, depth: 0, tripped: false };
         assert!(!full(pattern.as_bytes(), text.as_bytes(), &mut m) || m.tripped);
         assert!(m.tripped, "the limit, not the pattern, ended the match");
+    }
+
+    #[test]
+    fn a_step_limit_hit_inside_a_negation_still_answers_production() {
+        // `!(..)` inverts a tripped inner answer, so the limit must be remembered outside the
+        // negation (R3-1). The group cannot match 60 `a`, bash says the negation does, and the
+        // exponential inner pattern ends at the step limit, not by deciding.
+        let pattern = "!(*(a|aa)*(a|aa)*(a|aa)*(a|aa)*(a|aa)*(a|aa)b)";
+        let text = "a".repeat(60);
+        assert!(matches(pattern, &text));
+        let mut m = Bounds { steps: 0, depth: 0, tripped: false };
+        full(pattern.as_bytes(), text.as_bytes(), &mut m);
+        assert!(m.tripped, "the limit, not the pattern, ended the match");
+        assert!(exact(pattern.as_bytes(), text.as_bytes()), "yes comes from the remembered limit");
+    }
+
+    #[test]
+    fn a_pattern_nested_thousands_deep_answers_production_at_once() {
+        let pattern = format!("{}a{}", "+(".repeat(5000), ")".repeat(5000));
+        let started = std::time::Instant::now();
+        assert!(matches(&pattern, &"a".repeat(100)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        let long = "a".repeat(600);
+        assert!(matches(&long, "zzz"), "a pattern over 512 bytes answers yes unmatched");
+        assert!(!matches(&"a".repeat(512), "zzz"), "512 bytes is still matched");
+        let deep = format!("{}a{}", "@(".repeat(33), ")".repeat(33));
+        assert!(
+            matches(&deep, "zzz")
+                && !matches(&format!("{}a{}", "@(".repeat(32), ")".repeat(32)), "zzz")
+        );
+    }
+
+    #[test]
+    fn a_path_that_differs_from_a_pattern_only_in_case_answers_production() {
+        // A profile can set nocasematch and this code cannot see it (P3A-19).
+        assert!(matches("src/*", "SRC/x") && matches("SRC/*", "src/x") && matches("*.rs", "A.RS"));
+        assert!(matches("*[a-c][A-Z]", "acAZ"));
+        assert!(matches("*(!(a))b", "bB"));
+        // each case variant is needed on its own: a class names its case
+        assert!(matches("[[:lower:]]", "A"), "only the lower-case variant matches");
+        assert!(matches("[[:upper:]]", "a"), "only the upper-case variant matches");
+        assert!(!matches("src/*", "lib/x") && !matches("*.rs", "a.md"));
     }
 
     #[test]

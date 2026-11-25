@@ -237,7 +237,12 @@ def section_glob(count):
     assert len(la) == len(lb), (len(la), len(lb), text(b[2])[:300])
     for i, (x, y) in enumerate(zip(la, lb)):
         pat, path = pairs[i] if i < len(pairs) else ("", "")
-        record("glob", f"{pat!r} vs {path!r}", (a[0], x.encode(), b""), (b[0], y.encode(), b""))
+        def closed(xa, yb):
+            # Fail closed (P3A-16, P3A-19): production where bash says not, never the reverse.
+            if xa[1] == b"0" and yb[1] == b"1":
+                return "P3A-16: the matcher answers production where it cannot be sure"
+            return None
+        record("glob", f"{pat!r} vs {path!r}", (a[0], x.encode(), b""), (b[0], y.encode(), b""), closed)
 
 
 # ------------------------------------------------------------------------------------------

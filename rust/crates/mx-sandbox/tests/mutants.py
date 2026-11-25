@@ -113,6 +113,10 @@ MUTANTS = [
  ("M84", S+"prod.rs", "            b'\\\\' => i += 1,\n            b'[' => {\n                // a bracket expression inside the group", "            b'[' => {\n                // a bracket expression inside the group", "a backslash does not protect the next byte inside a group"),
  ("M85", S+"prod.rs", "        b'?' => !text.is_empty() && full(&pattern[1..], &text[1..], m),", "        b'?' => text.len() > 1 && full(&pattern[1..], &text[1..], m),", "? needs two bytes"),
  ("M86", S+"prod.rs", "        b\"cntrl\" => byte < 0x20 || byte == 0x7f,", "        b\"cntrl\" => byte < 0x20,", "[:cntrl:] loses DEL"),
+ ("M87", S+"prod.rs", "    hit || m.tripped\n}", "    hit\n}", "a step limit hit inside a negation is forgotten"),
+ ("M88", S+"prod.rs", "    if pattern.len() > PATTERN_LIMIT || nesting(pattern) > NESTING_LIMIT {", "    if false {", "a huge nested pattern is matched"),
+ ("M89", S+"prod.rs", "        || exact(&fold(pattern, false), &text.to_ascii_lowercase())\n", "", "a lower-case match is missed"),
+ ("M90", S+"prod.rs", "        || exact(&fold(pattern, true), &text.to_ascii_uppercase())", "", "an upper-case match is missed"),
  ("M60", B+"real.rs", "let mut bytes = [0_u8; 8];", "let mut bytes = [0_u8; 7];", "scratch names are 7 characters"),
 ]
 
