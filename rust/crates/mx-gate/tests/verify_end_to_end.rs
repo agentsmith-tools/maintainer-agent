@@ -192,7 +192,7 @@ done
 staged="$work/.container-target/stage/maintainer-merge"
 sum=$(sha256sum "$staged" 2>/dev/null | cut -d' ' -f1)
 echo "call $n staged=${{sum:-none}}" >> "$log"
-echo "xdg=${{XDG_RUNTIME_DIR:-unset}} dbus=${{DBUS_SESSION_BUS_ADDRESS:-unset}} conf=${{CONTAINERS_CONF:-unset}} token=${{GH_TOKEN:-unset}} other=${{LEAKED:-unset}}" >> '{env_log}'
+echo "xdg=${{XDG_RUNTIME_DIR:-unset}} dbus=${{DBUS_SESSION_BUS_ADDRESS:-unset}} conf=${{CONTAINERS_CONF:-unset}} token=${{GH_TOKEN:-unset}} other=${{LEAKED:-unset}} named=${{NAMED_BY_CALLER:-unset}}" >> '{env_log}'
 cd "$work" || exit 125
 sh -c "$cmd"
 rc=$?
@@ -670,12 +670,15 @@ fn the_container_runtime_gets_its_own_variables_and_no_credential() {
         ("CONTAINERS_CONF", "/c.conf"),
         ("GH_TOKEN", "not-a-real-token"),
         ("LEAKED", "1"),
+        ("NAMED_BY_CALLER", "yes"),
+        ("MAINTAINER_CHILD_ENV", "NAMED_BY_CALLER"),
     ] {
         w.extra_env.push((name.to_string(), value.to_string()));
     }
     assert_eq!(w.verify("guard", BITES).code, 0);
     let seen = std::fs::read_to_string(&w.env_log).unwrap();
-    let line = "xdg=/run/user/x dbus=unix:path=/dbus-x conf=/c.conf token=unset other=unset";
+    let line =
+        "xdg=/run/user/x dbus=unix:path=/dbus-x conf=/c.conf token=unset other=unset named=yes";
     assert_eq!(seen, format!("{line}\n{line}\n"), "both container runs");
 }
 

@@ -97,6 +97,19 @@ fn suite_env(
     env
 }
 
+/// What the container runtime is started with: what any child gets (so the variables a caller names
+/// in `MAINTAINER_CHILD_ENV` reach it too), and the variables podman reads for its storage and its
+/// socket ([`RUNTIME_ENV_NAMES`]). No credential (decision P3W-5).
+fn runtime_env(vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut env = child_env(vars);
+    for (name, value) in pick_env(&RUNTIME_ENV_NAMES, |name| vars.get(name).cloned()) {
+        if env.iter().all(|(have, _)| *have != name) {
+            env.push((name, value));
+        }
+    }
+    env
+}
+
 /// Where the program's own files are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tree {
@@ -482,7 +495,7 @@ fn run_inner(
         Arc::new(RealProc::new(search_path, child_env(vars))),
         Arc::new(RealPipe::new(search_path, None)),
         Runtime::Podman,
-        pick_env(&RUNTIME_ENV_NAMES, |name| vars.get(name).cloned()),
+        runtime_env(vars),
     )
     .map_err(|error| Exit::die(1, &error.to_string()))?;
     let stage = RealStage::new(&sandbox, exe);
@@ -573,6 +586,32 @@ mod tests {
             ["HOME", "MAINTAINER_CARGO_JOBS", "MAINTAINER_SHELL_IMAGE", "CHARACTERIZATION_DIR"]
         );
         assert!(seen.contains(&("CHARACTERIZATION_DIR".to_string(), "/c".to_string())));
+    }
+
+    #[test]
+    fn the_container_runtime_gets_what_a_child_gets_and_its_own_variables_and_no_credential() {
+        let env = vars(&[
+            ("HOME", "/h"),
+            ("MAINTAINER_CHILD_ENV", "STUB_LOG"),
+            ("STUB_LOG", "/log"),
+            ("XDG_RUNTIME_DIR", "/run/u"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/d"),
+            ("CONTAINERS_CONF", "/c"),
+            ("GH_TOKEN", "t"),
+            ("EDITOR", "vi"),
+        ]);
+        let seen = runtime_env(&env);
+        assert_eq!(
+            names(&seen),
+            [
+                "HOME",
+                "MAINTAINER_CHILD_ENV",
+                "STUB_LOG",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "CONTAINERS_CONF",
+            ]
+        );
     }
 
     #[test]

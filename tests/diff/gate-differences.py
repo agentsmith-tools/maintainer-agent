@@ -28,13 +28,10 @@ else:
   P3B-W   the assembled Rust tree puts a wrapper in front of the binary, and the wrapper names the
           caller's variables in MAINTAINER_CHILD_ENV: that name is dropped from the env logs.
   N4      a `receipt` that fails on the head leaves no empty receipts directory in Rust (rv271b N4).
-  P3W-5   the container runtime gets only the variables it needs (HOME, USER, LOGNAME, XDG_*,
-          DBUS_SESSION_BUS_ADDRESS, CONTAINERS_*, TMPDIR, LC_ALL), where bash hands it the whole
-          environment: LANG, TZ and the MAINTAINER_* names are dropped from the podman env log.
-          GH_TOKEN, GITHUB_TOKEN, GH_HOST and GH_CONFIG_DIR stay in the comparison.
   P30-12  bash prints the suite's globs with a trailing blank in "sed matched no line"; Rust does not.
   P3A-6   a tool's own stderr (sed's refusal text) is not passed through in Rust.
   P3A-17  the paths a mutation changed are sorted in Rust; bash lists them in the order find walked.
+  P3W-7   an empty verify.d makes bash list a literal `*` where the glob matched no suite file.
 
 Scenario decisions (the Rust recording must show the refusal):
 
@@ -44,6 +41,9 @@ Scenario decisions (the Rust recording must show the refusal):
           ignores the status of that call).
   P3B-13  a gate variable that is not UTF-8 text is a refusal naming it (bash reads the bytes).
   P3B-15  `isCrossRepository` that is null is unreadable (bash reads it as same-repository).
+  P3W-8   the length of the head is checked when the command line is parsed, so when a verify has
+          a head shorter than 7 characters and another fault, Rust names the head; bash checks the
+          filter first, then the lease, then the head (the known ordering of #271, found-not-fixed 2).
 """
 import difflib
 import os
@@ -87,18 +87,6 @@ def drop_empty_receipts_dir(field, ta, tb):
     return ta, tb
 
 
-@rule("P3W-5", "the container runtime gets an allowlist of variables, bash the whole environment")
-def trim_podman_env(field, text):
-    if field != "env.podman.log":
-        return text
-    keep = ("GH_HOST", "GH_CONFIG_DIR", "HOME", "LC_ALL", "GH_TOKEN", "GITHUB_TOKEN")
-    out = []
-    for line in text.splitlines(True):
-        words = re.findall(r"[A-Z_]+=(?:'[^']*'|<[a-z]+>)", line)
-        out.append("env: " + " ".join(w for w in words if w.split("=")[0] in keep) + "\n")
-    return "".join(out)
-
-
 @rule("P30-12", "the globs of the no-op refusal end in a blank in bash")
 def strip_glob_blank(field, text):
     if field != "stderr":
@@ -132,6 +120,13 @@ def sort_changed_paths(field, text):
     return "".join(out)
 
 
+@rule("P3W-7", "bash lists the glob that matched no suite file")
+def drop_unmatched_glob(field, text):
+    if field != "stderr":
+        return text
+    return text.replace("  Suites here: * \n", "  Suites here: \n")
+
+
 def stderr_has(*needles):
     return lambda rc, err: rc == "1" and all(n in err for n in needles)
 
@@ -142,6 +137,7 @@ SCENARIO_DECISIONS = {
     "P3W-6": ("a gh that failed after printing the changed files is an unreadable list", stderr_has("could not read the changed files for #")),
     "P3B-13": ("a gate variable that is not text is a refusal naming it", lambda rc, err: rc == "64" and ("is not valid UTF-8 text" in err or "MAINTAINER_POST must be on or off" in err)),
     "P3B-15": ("a null isCrossRepository is unreadable", stderr_has("could not read 'head' of #")),
+    "P3W-8": ("a head shorter than 7 characters is refused when the command line is parsed", stderr_has("head sha looks truncated: ")),
 }
 
 
@@ -151,6 +147,8 @@ def declared(script):
         found.add("P3B-13")
     if 'isCrossRepository\\":null' in script:
         found.add("P3B-15")
+    if re.search(r"^mx_run .* abc123( |$)", script, re.M):
+        found.add("P3W-8")
     return found
 
 

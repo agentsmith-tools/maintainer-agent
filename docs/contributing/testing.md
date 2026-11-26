@@ -126,6 +126,15 @@ A scenario is one bash file in `tests/diff/scenarios/` with a shebang and no `. 
 
 `tests/diff/normalise.py` rewrites the values that legitimately differ between two runs (temporary paths, timestamps, pids) so the diff shows behaviour. `python3 -I tests/diff/normalise.py rules` lists every rule with its reason, and `... selftest` runs the examples each rule must change and the text it must leave alone. A new rule needs a reason and an example, because a rule that hides a real difference is a hole in the recorder. `prove.sh` removes one rule from a copy and shows that two recordings then differ, and that four one-line mutants of the bash gate (a usage word, an exit code, an argument order, a message) each change the named scenario and field.
 
+The merge gate has a generated set of scenarios on top of the hand-written ones: `generate-gate-scenarios.py` writes `maintainer-merge` merge, update, receipt, show, usage, verify, verify-part and partial-receipt scenarios from a seed (the verify ones run against a `verify.d` the scenario writes and a `podman` stub that logs its whole argv). Record both trees, then let `gate-differences.py` sort what differs into named decisions. It exits 1 when a difference is left unexplained, and a decision explains a scenario only when the Rust recording shows that decision's own refusal.
+
+```sh
+python3 tests/diff/generate-gate-scenarios.py <scenarios> 20261122 330 300
+bash tests/diff/record-parallel.sh 4 <bash-tree> <scenarios> <out-bash>
+bash tests/diff/record-parallel.sh 4 <rust-tree> <scenarios> <out-rust>
+python3 tests/diff/gate-differences.py <out-bash> <out-rust> <scenarios>
+```
+
 ### The Rust gate
 
 `scripts/rust-gate.sh` runs, in order, and stops at the first failure: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked` with a floor on the number of tests that ran; a probe that adds a crate calling `Command::new` and demands clippy refuse it; a scan that no crate but `mx-ports` names the `disallowed_methods` lint; and the receipt interop run. [Rust tests](#8-rust-tests) says what each step protects.

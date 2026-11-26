@@ -349,16 +349,16 @@ def gh_files_stub(paths, rc=0, login="testuser"):
 def suite_dir_lines(where, suites, rnd2, flavours):
     """Writes the suites where the gate looks, in the form `where` says. Returns the lines."""
     lines = []
-    if where == "profile":
+    if where in ("profile", "empty"):
         target = '"$MX_WORK/profile/verify.d"'
     elif where == "home":
         target = '"$MX_HOME/.local/share/maintainer/profiles/magent/verify.d"'
     else:
         return lines
     lines.append("mkdir -p %s" % target)
-    for name in suites:
+    for name in (suites if where != "empty" else []):
         lines.append("cat > %s/%s.sh <<'SUITE'\n%sSUITE" % (target, name, suite_text(name, SUITES[name], rnd2, flavours.get(name, []))))
-    if where == "profile":
+    if where in ("profile", "empty"):
         lines.append('mx_env PROFILE_DIR "$MX_WORK/profile"')
     return lines
 
@@ -418,7 +418,7 @@ def head_expr(kind):
 def verify_scenario(i, rnd2, part):
     pr = rnd2.randint(1, 99)
     deep = rnd2.random() < 0.7
-    where = rnd2.choice(["profile"] * 8 + ["home", "home"]) if deep else rnd2.choice(["profile"] * 6 + ["home", "home", "tree", "none"])
+    where = rnd2.choice(["profile"] * 8 + ["home", "home"]) if deep else rnd2.choice(["profile"] * 6 + ["home", "home", "tree", "none", "empty"])
     if deep:
         paths = rnd2.choice(DEEP_PART_PATHS if part else DEEP_VERIFY_PATHS)
         suite_names = rnd2.choice([["unit", "docs"], ["unit", "lib", "docs"], ["unit", "docs", "named"]])
@@ -526,7 +526,7 @@ def partial_receipt_scenario(i, rnd2):
     """merge on a receipt proved in parts: the suites it names must cover the production paths."""
     pr = rnd2.randint(1, 99)
     deep = rnd2.random() < 0.7
-    where = rnd2.choice(["profile"] * 8 + ["home", "home"]) if deep else rnd2.choice(["profile"] * 6 + ["home", "home", "tree", "none"])
+    where = rnd2.choice(["profile"] * 8 + ["home", "home"]) if deep else rnd2.choice(["profile"] * 6 + ["home", "home", "tree", "none", "empty"])
     suite_names = rnd2.choice([["unit", "docs"], ["unit", "lib", "docs"]] if deep else [["unit", "docs"], ["unit", "lib", "docs"], ["wide", "docs"], ["lib", "docs"], ["unit"]])
     if where == "tree":
         suite_names = ["shell", "docs"]
@@ -578,6 +578,29 @@ def partial_receipt_scenario(i, rnd2):
     return "\n".join(s) + "\n"
 
 
+def directed_scenario(i, kind, rnd2):
+    """One scenario that exists to show one difference the random ones reach only by luck."""
+    pr = 70 + i % 20
+    head = '"$C_HEAD"'
+    calls = [(0, CLEAN_OK), (1, MUT_FAIL)]
+    mutation, verb, named, files = "s/v0/v1/", "verify", "", ["bin/a"]
+    if kind == "empty-part":
+        verb = "verify-part"
+    elif kind.startswith("sed-"):
+        mutation = {"sed-w": "w /tmp/x", "sed-e": "s/v0/v1/e", "sed-open": "s/v0/v1", "sed-r": "r /etc/hostname"}[kind]
+    s = ["#!/usr/bin/env bash", "# generated directed scenario %d (%s)" % (i, kind), "mx_merge_env",
+         "mx_env PROD_GLOBS 'bin/* lib/*'"]
+    s += suite_dir_lines("empty" if kind == "empty-part" else "profile", ["unit"], rnd2, {})
+    s.append("mx_git_repo")
+    s.append('mx_commit "$MX_REPO" base ' + " ".join('%s %s' % (FIXTURE[k], FIXTURE[k + 1]) for k in range(0, len(FIXTURE), 2)))
+    s.append("mx_pr_origin %d" % pr)
+    s.append('C_HEAD="$(git -C "$MX_REPO" rev-parse HEAD)"')
+    s.append(gh_files_stub(files).rstrip())
+    s.append(podman_stub(calls))
+    s.append("mx_run bin/maintainer-merge %s %d %s guard %s%s" % (verb, pr, head, shlex.quote(mutation), named))
+    return "\n".join(s) + "\n"
+
+
 rnd2 = random.Random(seed + 1)
 vmakers = [
     (lambda i: verify_scenario(i, rnd2, False), "verify", 100),
@@ -589,4 +612,8 @@ for i in range(verify_count):
     fn, name, _ = rnd2.choices(vmakers, vweights)[0]
     with open(os.path.join(out, f"v{i:03d}-{name}.sh"), "w") as f:
         f.write(fn(i))
-print("generated", count, "scenarios and", verify_count, "verify scenarios in", out)
+DIRECTED = ["empty-part", "sed-w", "sed-e", "sed-open", "sed-r"]
+for k, kind in enumerate(DIRECTED):
+    with open(os.path.join(out, f"v{verify_count + k:03d}-directed-{kind}.sh"), "w") as f:
+        f.write(directed_scenario(verify_count + k, kind, rnd2))
+print("generated", count, "scenarios and", verify_count + len(DIRECTED), "verify scenarios in", out)
