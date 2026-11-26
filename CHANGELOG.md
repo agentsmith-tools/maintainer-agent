@@ -10,24 +10,7 @@ middle digit.
 
 ## [Unreleased]
 
-### Changed
-
-- **`tests/run-tests.sh` is a driver plus eleven part files in `tests/suites/`.** One
-  `shellcheck` over the 12,260 line file peaked at 9.2 GB resident (14.4 GB in one run). The sweep
-  reached 9 to 10 GB three times in one day, and systemd-oomd killed the terminal scope once.
-  The cases are the same cases in the same order, run in the same shell: the suite still prints
-  1851 passed, 0 failed (260 source-coupled cases) and the same lines. The driver sources the
-  parts from an explicit list and fails naming any part that is missing, listed twice, without a
-  bash shebang, empty of cases or unlisted, and fails the run if a part ends the shell before the
-  summary. The exact total stays pinned by the `tests` figure in `check_claims.sh`. The largest file now lints at 484 MB.
-  A new case goes into the part that fits its topic. The skip line for a source-coupled block now names the part file and the line in it.
-
-### Fixed
-
-- **The shellcheck sweep cap moves from 12G to 18G.** `shellcheck` on `tests/run-tests.sh`
-  (12,260 lines) peaks at 14.4 GB resident, so the 12G scope killed the linter and every
-  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. The split above
-  is the follow-up that makes no single lint need this much.
+## [0.12.0] — 2026-11-25
 
 ### Security
 
@@ -44,6 +27,24 @@ middle digit.
   `-e EXPR --`, so a mutation starting with a dash is an expression and not an
   option. Suite arguments for the container are read one per line, so a blank
   inside an argument no longer splits it. Cases: `tests/characterization/gate-hardening.sh`.
+
+### Changed
+
+- **`tests/run-tests.sh` is a driver plus eleven part files in `tests/suites/`.** One
+  `shellcheck` over the 12,260 line file peaked at 9.2 GB resident (14.4 GB in one run). The sweep
+  reached 9 to 10 GB three times in one day, and systemd-oomd killed the terminal scope once.
+  The cases are the same cases in the same order, run in the same shell: the suite still prints
+  1851 passed, 0 failed (260 source-coupled cases) and the same lines. The driver sources the
+  parts from an explicit list and fails naming any part that is missing, listed twice, without a
+  bash shebang, empty of cases or unlisted, and fails the run if a part ends the shell before the
+  summary. The exact total stays pinned by the `tests` figure in `check_claims.sh`. The largest file now lints at 484 MB.
+  A new case goes into the part that fits its topic. The skip line for a source-coupled block now names the part file and the line in it.
+
+- **`CONTRIBUTING.md` and `docs/roadmap.md` say that a new backend is a Rust change.** ([#281](https://github.com/agentsmith-tools/maintainer-agent/pull/281))
+  Both told a contributor to write `lib/backends/<name>.sh`. The Rust `run` refuses every backend name
+  outside the four it knows. `CONTRIBUTING.md` now names the crate, the six questions of the `Backend`
+  trait, the registry, the tests and the mutant entries a backend needs, and says that an unknown or
+  path-like `BACKEND` ends the run with exit 64. `docs/roadmap.md` points at the same crate.
 
 ### Added
 
@@ -78,12 +79,73 @@ middle digit.
   (`rust/crates/mx-install/tests/cutover-rollback.sh`). See
   `docs/deploy/cutover.md`.
 
+- **The Rust port of the shell tools is built and proved, and the deployed programs stay bash.**
+  `rust/` now holds `mx-receipt` (receipts that are byte-compatible with the bash gate's, signed
+  and checked in the gate's order), `mx-profile` (profile loader, secret scrubber and failure
+  classifier), `mx-doctor` (`maintainer-doctor`), `mx-repo` (`maintainer-repo`), `mx-checks` (the five
+  repository checks), `mx-install` (`install.sh`, `new-profile.sh` and the platform scripts),
+  `mx-backends` (the four agent backends as plan builders), `run` (the orchestrator of
+  `lib/run.sh`, with `RealPipe`), `mx-suite` and `mx-sandbox` (the suite host, selector and
+  container sandbox of the gate) and `mx-gate` (the `maintainer-merge` engine, its adapters, the
+  `maintainer-merge` binary and `verify-deps`, the dependency-bump receipt checks). Each crate
+  is held to the bash by the same three means: the characterization cases run against both trees,
+  a seeded differential that compares stdout, stderr, exit code and the argv of every stub call, and
+  a table of mutants that each fail a named assertion. Every difference from the bash is a recorded
+  decision with a test that names it; the black boxes list the pinned ones. Examples from the pull
+  requests: `mx-doctor` 3250 comparisons with 0 differences, `mx-install` 613 comparisons with 613
+  identical and 78 of 78 mutants killed, `mx-checks` 220 of 220 characterization cases on both trees
+  and 121 mutants, `mx-sandbox` 2191 comparisons with 0 unexplained. A timeout too large for the platform
+  clock now means no deadline in `RealProc` and `RealPipe`, where it used to panic. `maintainer-merge`
+  in Rust builds the real suite host, selector and sandbox, so `verify`, `verify-part` and a merge or update on a
+  receipt proved in parts run in place of answering `NO_SUITE_HOST`; 305 more differential scenarios
+  and `mx-gate/tests/verify_end_to_end.rs` cover it. Nothing is installed by any of this. The
+  programs on the machine stay bash until `scripts/cutover.sh live` is run. ([#294](https://github.com/agentsmith-tools/maintainer-agent/pull/294))
+
 ### Fixed
+
+- **The shellcheck sweep cap moves from 12G to 18G.** `shellcheck` on `tests/run-tests.sh`
+  (12,260 lines) peaks at 14.4 GB resident, so the 12G scope killed the linter and every
+  commit hook failed on that file. The cap is still `MAGENT_SWEEP_MEM_MAX`. The split above
+  is the follow-up that makes no single lint need this much.
 
 - **`install --rollback` no longer follows or replaces a symbolic link.** A link
   where an installed program, its saved original or `RUST_STAMP` sits is refused
   before anything moves, and a stamp that lists a program twice is refused
   instead of failing half way through.
+
+- **`maintainer start` survives a truncated last-task baseline, and `finish` replaces the baseline atomically.** ([#285](https://github.com/agentsmith-tools/maintainer-agent/pull/285))
+  `finish` wrote `last-<task>.json` with `write_text`, so a kill during the write left truncated JSON, and every later `maintainer start <task>` raised `JSONDecodeError` until someone deleted the file. `start` now treats an unreadable baseline as no previous baseline and adds a note that names the file. `finish` writes a temp file beside the target and `os.replace`s it into place, so an interrupted write leaves the old baseline intact.
+- **`run.sh` tells a lock error from lock contention.** ([#243](https://github.com/agentsmith-tools/maintainer-agent/pull/243))
+  Only `flock` exit 1 is contention (exit 75). A missing `flock`, an invalid `MAINTAINER_LOCK_WAIT` and any other `flock` failure used to exit 75 with "another run held the lock". They now raise a real alert and exit 1. `install.sh` refuses to run without `flock`, and `maintainer-doctor` prints a `flock on PATH` check.
+- **`run.sh --show-prompt` leaves no trace.** ([#246](https://github.com/agentsmith-tools/maintainer-agent/pull/246))
+  The `RETURN` trap never fired on `exit`, so every preview, and every run that left after writing the prompt, kept the full prompt in `TMPDIR`. The file is now removed on exit. A preview that hits a refusal still prints it and keeps its exit code, and it no longer records a failure, raises a toast or runs `MAINTAINER_ALERT_CMD`.
+- **`run.sh` fails closed on prompt assembly errors.** ([#242](https://github.com/agentsmith-tools/maintainer-agent/pull/242))
+  A missing or unreadable common preamble or task prompt used to let the run carry on and send a partial prompt. The run now refuses before the backend starts and reports a prompt assembly error. A maintainer name that holds a backslash, `&` or `|` is escaped for `sed` and stays literal in the prompt.
+- **`install-cron.sh` no longer wipes the crontab when `crontab -l` fails.** ([#231](https://github.com/agentsmith-tools/maintainer-agent/pull/231))
+  The script read `crontab -l` with `|| true`, so a spool error or a permission problem counted as an empty crontab, and the install (and `--remove`) wrote back only the maintainer block, deleting the user's other jobs while reporting success. A failure counts as an empty list only when its message says `no crontab for`; any other failure prints the error and exits 1 before anything is written. The call runs under `LC_ALL=C` so the match holds on a localized system.
+- **The installer removes every artifact on uninstall and leaves foreign files alone.** ([#240](https://github.com/agentsmith-tools/maintainer-agent/pull/240))
+  `uninstall` now removes `maintainer-mcp` and reports all five commands. It removes the maintainer systemd unit files and timer stamps even when no systemd user session answers, and runs `daemon-reload` only when the session is available. Timer stamps that Maintainer Agent did not create survive ([#249](https://github.com/agentsmith-tools/maintainer-agent/pull/249)), unrelated files in the timer directory stay, and the audit trail is kept.
+- **The installer enables a timer only for a deployed profile.** ([#250](https://github.com/agentsmith-tools/maintainer-agent/pull/250))
+  A checkout that carries only one profile (the `magent` profile in the regression test) used to try to enable the timers of profiles it does not have. The installer now enables timers for deployed profiles only and reports each timer unit it skipped. It still refuses when no timer unit can be enabled.
+- **`install.sh` accepts a checkout whose only profile is not `sysknife`.** ([#211](https://github.com/agentsmith-tools/maintainer-agent/pull/211))
+  After copying `profiles/`, the script checked for `profiles/sysknife` and stopped with `profiles did not land where run.sh expects` (exit 1), so the units were never copied and the timers never enabled. The check now needs at least one deployed `profiles/*/profile.env`. The dry-run path is unchanged.
+- **Cron entries append their output to `$STATE_DIR/logs/cron.out`.** ([#212](https://github.com/agentsmith-tools/maintainer-agent/pull/212))
+  The entries sent stdout and stderr to `/dev/null`, so the refusals `run.sh` prints before it opens its own log (unknown profile or task, missing `profiles/`, a task started inside another run) left no trace on a host without a journal. The install step now creates `$STATE_DIR/logs`.
+- **`opencode` receives its prompt on stdin, and `cursor` refuses a prompt over the argument limit.** ([#230](https://github.com/agentsmith-tools/maintainer-agent/pull/230))
+  Both backends passed the whole prompt as one argument. A large context block crosses Linux's 131072-byte limit per argument, the backend never starts, and the alert said only "opencode exited non-zero". `opencode` now reads the prompt from stdin. `cursor` refuses a prompt of 131072 bytes or more before it starts and logs why. The new failure shape `argument-list-too-long` (`needs_human`) names the cause.
+- **`maintainer audit` matches a quoted command whole.** ([#232](https://github.com/agentsmith-tools/maintainer-agent/pull/232))
+  A claim longer than 40 characters passed when only its first 40 characters occurred in the command record, so a quoted `gh pr merge ... --squash --admin` passed against a record that held `--rebase`. An abridged claim with `...` was compared only on the text before the ellipsis. The whole claim must now occur in the record. For an abridged claim, each fragment between the ellipses must occur, in order.
+- **`maintainer claims` reports an unreadable comment thread as `UNREADABLE` and exits 1.** ([#238](https://github.com/agentsmith-tools/maintainer-agent/pull/238))
+  An unreadable thread counted as idle time `-1`, printed as `-1d  active`, and the command exited 0, so the stale-claim check went quiet during an outage. It now prints `UNREADABLE #N`, says the idle time is unknown and exits 1 after the listing. An empty thread still counts as `-1`.
+- **A failed fetch of a pull request head is noted.** ([#237](https://github.com/agentsmith-tools/maintainer-agent/pull/237))
+  `refresh()` discarded the return code of the `refs/pull/N/head:pN` fetch, so a failed fetch left `pN` at its old head and the run reviewed that code as current. A non-zero code now adds `PR #N head not fetched, local pN is stale` to the notes.
+- **The node suite can mutate the README it claims, and its image carries `git`.**
+  The suite claims `packages/setup/*`, which includes the package README, but its mutate glob
+  listed only `*.js`, `*.mjs` and `*.json`. A pull request that changed the README and the test that compares it
+  with `--help` gave the gate no changed file to break, and `maintainer-merge verify` refused to record a
+  receipt for it. The glob now includes `*.md`. The image recipe adds `git`, which
+  `tests/wizard-harness.mjs` runs, and `suite_needs` names it so `maintainer-doctor` checks it inside the
+  image.
 
 ## [0.11.0] — 2026-11-09
 
@@ -1608,7 +1670,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/agentsmith-tools/maintainer-agent/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/agentsmith-tools/maintainer-agent/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/agentsmith-tools/maintainer-agent/releases/tag/v0.12.0
 [0.11.0]: https://github.com/agentsmith-tools/maintainer-agent/releases/tag/v0.11.0
 [0.10.1]: https://github.com/agentsmith-tools/maintainer-agent/releases/tag/v0.10.1
 [0.10.0]: https://github.com/agentsmith-tools/maintainer-agent/releases/tag/v0.10.0
