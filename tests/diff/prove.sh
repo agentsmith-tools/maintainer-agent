@@ -283,7 +283,7 @@ hmutant symlink-ignored compare.sh '( cd "$new/$name" && find . ! -type d -print
     blindspots "a symlink added to one recording exits 1"
 hmutant symlink-not-rejected compare.sh 'if [ -L "$a" ] || [ -L "$b" ]; then' 'if false; then' \
     blindspots "and is named as a symlink"
-hmutant mktemp-dir-any-name normalise.py '(?![a-z]{8}\b)' '' \
+hmutant mktemp-dir-any-name normalise.py '(?!(?:snapshot|baseline)\b)' '' \
     normaliser "two different mktemp-looking verify-work names are random, two words are not"
 hmutant empty-stub-logs-dropped normalise.py \
     'for kind in ("argv", "env", "stdin"):' 'for kind in ("argv",):' \

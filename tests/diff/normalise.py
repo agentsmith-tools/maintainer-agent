@@ -15,6 +15,8 @@ the tree under test and the scratch directory are replaced by literal match.
 """
 import argparse
 import hashlib
+import hmac
+import json
 import os
 import re
 import stat
@@ -85,10 +87,11 @@ RULES = [
          [("<W>/tmp/tmp.aB3dE5gH7j", "<W>/tmp/tmp.<RAND>")],
          ["tmp.short", "tmp.12345678901234"]),
     Rule("mktemp-dir",
-         "verify scratch directories get eight random characters from mktemp -d",
-         r"(verify-work/)(?![a-z]{8}\b)[A-Za-z0-9]{8}\b",
+         "verify scratch directories get eight random characters from mktemp -d, all lowercase letters one time in a thousand; only the two words the tests name themselves stay",
+         r"(verify-work/)(?!(?:snapshot|baseline)\b)[A-Za-z0-9]{8}\b",
          r"\1<RAND>",
-         [("<W>/state/verify-work/Xy12AbCd/tree", "<W>/state/verify-work/<RAND>/tree")],
+         [("<W>/state/verify-work/Xy12AbCd/tree", "<W>/state/verify-work/<RAND>/tree"),
+          ("<W>/state/verify-work/qwertyui/tree", "<W>/state/verify-work/<RAND>/tree")],
          ["verify-work/short", "verify-work/", "verify-work/snapshot", "verify-work/baseline"]),
     Rule("key-file",
          "install.sh mints a random 64 hex receipt key; a file holding only that is a key",
@@ -112,6 +115,35 @@ class Normaliser:
         for rule in RULES:
             s = rule.apply(s)
         return s
+
+
+def selftest_signature():
+    import tempfile
+    n = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        key = os.path.join(tmp, "receipt.key")
+        open(key, "w").write("00" * 32)
+        body = {"pr": 7, "head": "ab", "recorded_at": "2026-01-01T00:00:00+00:00"}
+        good = hmac.new(b"00" * 32, json.dumps(body, indent=2).encode(), hashlib.sha256).hexdigest()
+        signed = json.dumps(dict(body, signature=good), indent=2).encode()
+        edited = signed.replace(b'"head": "ab"', b'"head": "ac"')
+        other = signed.replace(good.encode(), b"f" * 64)
+        cases = [
+            (signed, b'"signature": "<hmac-valid>"'),
+            (edited, b'"signature": "<hmac-invalid>"'),
+            (other, b'"signature": "<hmac-invalid>"'),
+        ]
+        for given, want in cases:
+            got = mark_signature(given, key)
+            if want not in got:
+                raise SystemExit("selftest: mark_signature gave %r, wanted %r in it" % (got, want))
+            n += 1
+        if mark_signature(b'{"pr": 7}', key) != b'{"pr": 7}':
+            raise SystemExit("selftest: a file with no signature was rewritten")
+        if b"<hmac-unchecked>" not in mark_signature(signed, os.path.join(tmp, "missing.key")):
+            raise SystemExit("selftest: a receipt with no key to check it read as valid")
+        n += 2
+    return n
 
 
 def selftest():
@@ -144,6 +176,7 @@ def selftest():
         if got != want:
             raise SystemExit("selftest: path map turned %r into %r, wanted %r" % (given, got, want))
         n += 1
+    n += selftest_signature()
     print("normalise selftest: %d rules, %d checks passed" % (len(RULES), n))
 
 
@@ -214,6 +247,8 @@ def walk(work, path, norm):
         yield rel, "o", mode, "-", None
         return
     data = open(path, "rb").read()
+    if path.endswith(".json") and os.path.basename(os.path.dirname(path)) == "receipts":
+        data = mark_signature(data, os.path.join(work, "receipt.key"))
     try:
         if b"\0" in data:
             raise UnicodeDecodeError("utf-8", b"", 0, 1, "binary")
@@ -226,6 +261,29 @@ def walk(work, path, norm):
 
 def sha(b):
     return hashlib.sha256(b).hexdigest()
+
+
+SIGNATURE = re.compile(rb'("signature": ")[0-9a-f]{64}(")')
+
+
+def mark_signature(data, key_path):
+    """A receipt's signature covers its timestamp, so two runs of the same program write two
+    different 64-hex strings and every receipt would differ. This replaces the string by whether
+    it is the HMAC-SHA256 of the receipt without it (json.dumps, indent 2, under the scenario's key):
+    `<hmac-valid>` or `<hmac-invalid>`. Anything that is not such a receipt is returned unchanged,
+    and a receipt that cannot be checked says `<hmac-unchecked>`, never valid."""
+    if not SIGNATURE.search(data):
+        return data
+    verdict = b"<hmac-unchecked>"
+    try:
+        body = json.loads(data.decode("utf-8"))
+        signature = body.pop("signature")
+        key = open(key_path, "rb").read().strip()
+        want = hmac.new(key, json.dumps(body, indent=2).encode(), hashlib.sha256).hexdigest()
+        verdict = b"<hmac-valid>" if hmac.compare_digest(want, signature) else b"<hmac-invalid>"
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        pass
+    return SIGNATURE.sub(lambda m: m.group(1) + verdict + m.group(2), data)
 
 
 def write(path, text):

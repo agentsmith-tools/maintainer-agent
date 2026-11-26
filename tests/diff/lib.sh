@@ -137,6 +137,32 @@ json.dump(d, open(out, "w"), indent=2)
 PYEOF
 }
 
+# mx_receipt_parts PR HEAD PARTIAL SUITE...: a signed observed receipt proved in parts, as cmd_verify
+# writes one: a `proofs` entry per SUITE (an empty name stays, so a receipt that names no suite can be
+# built), a flat `suite` that joins them, and `partial` true or false. The timestamp is fixed.
+mx_receipt_parts() {
+    mkdir -p "$MX_STATE/receipts"
+    python3 -I - "$MX_STATE/receipts/$1.json" "$1" "$2" "$3" "$MX_KEY" "${@:4}" <<'PYEOF'
+import hashlib, hmac, json, sys
+out, pr, head, partial, key_path = sys.argv[1:6]
+proofs = [{"suite": s, "units_run": "3", "filter": "guard", "mutation": "s/a/b/",
+           "proof": "`guard` passes clean and fails under `s/a/b/` (rc=101)",
+           "observed_failure": "assertion failed"} for s in sys.argv[6:]]
+single = len(proofs) == 1
+d = {"pr": int(pr), "head": head, "kind": "observed", "partial": partial == "true",
+     "suite": " ".join(p["suite"] for p in proofs),
+     "units_run": proofs[0]["units_run"] if single
+                  else ", ".join(f'{p["suite"]}:{p["units_run"]}' for p in proofs),
+     "proof": " AND ".join(p["proof"] for p in proofs),
+     "mutation": "s/a/b/", "filter": "guard", "observed_failure": "assertion failed",
+     "proofs": proofs, "recorded_at": "2026-01-01T00:00:00+00:00", "recorded_by": "mxuser"}
+payload = json.dumps(d, indent=2).encode()
+key = open(key_path).read().strip().encode()
+d["signature"] = hmac.new(key, payload, hashlib.sha256).hexdigest()
+json.dump(d, open(out, "w"), indent=2)
+PYEOF
+}
+
 # mx_commit DIR MESSAGE [FILE CONTENT]...: commit with a date one second after the
 # last commit this scenario made, so the history is the same on every run.
 MX_CLOCK=0
