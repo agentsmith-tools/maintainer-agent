@@ -818,6 +818,76 @@ else
     noenv "and it is not blamed on the guard (needs podman or docker)"
     noenv "a mutation aimed outside the suite's mutate glob is refused as a no-op (needs podman or docker)"
 fi
+echo "== verify with a container runtime that runs the suite command on the host: pinned and unpinned mutations =="
+# The gate needs a container only to run the suite's command in a copy of the tree. This stub
+# runs that command in the directory mounted at /repo, so the whole verify (extraction, the symlink
+# check, the clean run, the mutation, the mutated run, the receipt) runs here against a repository
+# built in this shell, with no image to pull. A test that fails with the mutation applied is
+# pinned and earns a signed receipt; one that still passes is refused by name. The same cases run
+# against the Rust gate when MX_TREE holds one.
+sv="$stub_dir/stubverify"; rm -rf "$sv"; mkdir -p "$sv/profile/verify.d" "$sv/repo" "$sv/bin"
+sv_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$sv/bin/$1"; chmod +x "$sv/bin/$1"; }
+cat > "$sv/profile/verify.d/stub.sh" <<'SUITE'
+suite_covers() { case "$1" in check.sh) return 0 ;; esac; return 1; }
+suite_image() { printf 'docker.io/library/bash:5'; }
+suite_needs() { printf 'bash'; }
+suite_mutate_glob() { printf '%s\n' 'check.sh'; }
+suite_command() { printf 'bash check.sh\n'; }
+suite_ran() { local n; n="$(grep -c '^guard held' "$1" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
+SUITE
+sv_stub podman 'work=""; prev=""; cmd=""
+for a in "$@"; do
+  case "$prev" in -v) case "$a" in *:/repo:z) work="${a%:/repo:z}" ;; esac ;; esac
+  prev="$a"; cmd="$a"
+done
+cd "$work" || exit 125
+exec sh -c "$cmd"'
+sv_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *files*) echo check.sh;;
+esac"
+sr="$sv/repo"
+git -C "$sr" init -q -b main; git -C "$sr" config user.email t@t; git -C "$sr" config user.name t
+git -C "$sr" remote add origin "$sr"
+printf '#!/usr/bin/env bash\nGUARD=on\nif [ "$GUARD" = on ]; then echo "guard held"; exit 0; fi\necho "guard gone"; exit 1\n' > "$sr/check.sh"
+git -C "$sr" add -A; git -C "$sr" commit -qm pinned
+sv_pinned="$(git -C "$sr" rev-parse HEAD)"; git -C "$sr" update-ref refs/pull/51/head "$sv_pinned"
+printf '#!/usr/bin/env bash\nGUARD=on\necho "guard held"; exit 0\n' > "$sr/check.sh"
+git -C "$sr" add -A; git -C "$sr" commit -qm unpinned
+sv_unpinned="$(git -C "$sr" rev-parse HEAD)"; git -C "$sr" update-ref refs/pull/52/head "$sv_unpinned"
+sv_run() {  # $1 = pr, $2 = head, $3 = state suffix
+    PATH="$sv/bin:$stub_dir:$PATH" MAINTAINER_STATE="$sv/state$3" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$sr" PROFILE_DIR="$sv/profile" PROD_GLOBS=check.sh \
+        bash "$mg" verify "$1" "$2" guard 's/GUARD=on/GUARD=off/' stub 2>&1
+}
+out="$(sv_run 51 "$sv_pinned" a)"
+if grep -q "receipt recorded for #51 at ${sv_pinned:0:8} (observed: clean pass, mutated fail)" <<<"$out"; then
+    ok "a test that fails with the mutation applied earns an observed receipt"
+else
+    bad "a pinned mutation earned no receipt: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+fi
+if grep -q '"kind": "observed"' "$sv/statea/receipts/51.json" 2>/dev/null \
+   && grep -q '"observed_failure": "guard gone"' "$sv/statea/receipts/51.json"; then
+    ok "and the receipt records the line the mutated run failed on"
+else
+    bad "the pinned receipt is missing or does not carry the observed failure"
+fi
+out="$(sv_run 52 "$sv_unpinned" b)"
+if grep -q "THE GUARD DOES NOT BITE: 'guard' still passes with the mutation applied." <<<"$out"; then
+    ok "a test that still passes with the mutation applied is refused by name"
+else
+    bad "an unpinned mutation was not refused as one: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+fi
+[ ! -e "$sv/stateb/receipts/52.json" ] \
+    && ok "and no receipt is written for it" \
+    || bad "a receipt exists for a guard that does not bite"
+out="$(sv_run 51 deadbee c)"
+if grep -q "head is $sv_pinned, not the deadbee you named" <<<"$out" && [ ! -e "$sv/statec/receipts/51.json" ]; then
+    ok "a head that is not the pull request's head is refused and nothing is recorded"
+else
+    bad "a wrong head was not refused as one: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+fi
 echo "== a dependency bump can earn a receipt, and the test run still has no network =="
 # #437, #438 and #439 sat six days each. The rust suite runs `cargo test
 # --offline` against the host cache, and a lockfile bump is by definition a

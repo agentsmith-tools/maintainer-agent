@@ -26,5 +26,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[features]
+# The end-to-end test that runs the verify in a real container, with the real podman and an image
+# already on the machine. Off by default: the gate refuses an ignored test, and a test that skips
+# itself reads as green. Run it with
+#   cargo test -p mx-gate --features podman-e2e --test verify_end_to_end
+podman-e2e = []
+
 [lints]
 workspace = true
