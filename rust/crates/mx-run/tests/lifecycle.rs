@@ -209,6 +209,10 @@ impl World {
 
 fn append(path: &Path, text: &str) {
     use std::io::Write;
+    // Only the failed-fold case makes a run's log a directory, on purpose; any other write failure is a setup bug.
+    if path.is_dir() {
+        return;
+    }
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
     file.write_all(text.as_bytes()).unwrap();
 }
@@ -384,7 +388,9 @@ impl Fx {
         }
         let put = |path: PathBuf, text: &str| std::fs::write(path, text).unwrap();
         put(tree.join("lib/profile.sh"), "maintainer_scrub_secret() { :; }\n");
-        std::fs::copy(real_lib("defaults.env"), tree.join("lib/defaults.env")).unwrap();
+        // Read as text and drop CRs: a CRLF checkout would make `GH_TRIES='3\r'` abort the run.
+        let defaults = std::fs::read_to_string(real_lib("defaults.env")).unwrap();
+        put(tree.join("lib/defaults.env"), &defaults.replace("\r\n", "\n"));
         std::fs::copy(real_lib("failure-shapes.json"), tree.join("lib/failure-shapes.json"))
             .unwrap();
         put(
@@ -1247,6 +1253,19 @@ fn an_existing_log_under_the_run_id_is_never_replaced_the_lines_are_appended_to_
     let log = std::fs::read_to_string(fx.logs().join("2026-02-02T02-02-review.log")).unwrap();
     assert!(log.starts_with("an earlier run wrote this\n=== run.sh fx/review"), "{log}");
     assert!(!fx.logs().join(format!("{STAMP}-review.log")).exists());
+}
+
+#[test]
+fn a_failed_fold_keeps_the_pre_lock_log_because_its_lines_were_not_appended() {
+    let _turn = serial();
+    let fx = Fx::new("fold-fails");
+    std::fs::create_dir_all(fx.logs().join("2026-02-02T02-02-review.log")).unwrap();
+    fx.world.fix("maintainer start", reply(0, "=== maintainer 2026-02-02T02-02-review ===\n"));
+    drop(fx.run(&["fx", "review"]));
+    let pre_lock = fx.logs().join(format!("{STAMP}-review.log"));
+    assert!(pre_lock.exists(), "pre-lock log was deleted after its append failed");
+    let kept = std::fs::read_to_string(&pre_lock).unwrap();
+    assert!(kept.starts_with(&format!("=== run.sh fx/review {ISO} ===\n")), "{kept}");
 }
 
 #[test]
@@ -2297,4 +2316,31 @@ fn the_exit_trap_still_clears_the_lease_after_the_pipe_port_has_closed_to_new_st
         "the lease was not cleared"
     );
     assert_eq!(clear.via, "proc", "the exit trap called the helper through the pipe port");
+}
+
+/// The read half of the guard: a pre-lock log that cannot be read is not folded, so it must not be
+/// deleted either. A dangling link stands in for a file that fails to read, and unlike a mode of
+/// 000 it fails for root too.
+#[test]
+fn an_unreadable_pre_lock_log_is_kept_because_nothing_was_appended_from_it() {
+    let _turn = serial();
+    let fx = Fx::new("fold-unreadable");
+    std::fs::create_dir_all(fx.logs()).unwrap();
+    let by_id = fx.logs().join("2026-02-02T02-02-review.log");
+    std::fs::write(&by_id, "an earlier run wrote this\n").unwrap();
+    let pre_lock = fx.logs().join(format!("{STAMP}-review.log"));
+    let replaced = pre_lock.clone();
+    fx.world.on_call(
+        "maintainer start",
+        Box::new(move || {
+            std::fs::remove_file(&replaced).unwrap();
+            std::os::unix::fs::symlink("/nonexistent/pre-lock-log", &replaced).unwrap();
+        }),
+    );
+    fx.world.fix("maintainer start", reply(0, "=== maintainer 2026-02-02T02-02-review ===\n"));
+    drop(fx.run(&["fx", "review"]));
+    assert!(
+        std::fs::symlink_metadata(&pre_lock).is_ok(),
+        "pre-lock log was deleted after its read failed"
+    );
 }
