@@ -125,6 +125,36 @@ Unit=maintainer@magent-review.service
 
 [Install]
 WantedBy=timers.target
+=== ./maintainer@mojo-dllm-issues.timer ===
+[Unit]
+Description=maintainer: mojo-dllm issues (timer)
+
+[Timer]
+# Fires daily. The real cadence is MIN_HOURS_issues in profiles/mojo-dllm/profile.env,
+# which run.sh enforces on every platform.
+OnCalendar=*-*-* 14:17:00
+OnCalendar=*-*-* 19:17:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@mojo-dllm-issues.service
+
+[Install]
+WantedBy=timers.target
+=== ./maintainer@mojo-dllm-review.timer ===
+[Unit]
+Description=maintainer: mojo-dllm review (timer)
+
+[Timer]
+# Fires daily. The real cadence is MIN_HOURS_review in profiles/mojo-dllm/profile.env,
+# which run.sh enforces on every platform.
+OnCalendar=*-*-* 13:17:00
+OnCalendar=*-*-* 18:17:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@mojo-dllm-review.service
+
+[Install]
+WantedBy=timers.target
 === ./maintainer@sysknife-audit.timer ===
 [Unit]
 Description=maintainer: sysknife audit (timer)
