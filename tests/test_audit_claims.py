@@ -109,6 +109,26 @@ class ClaimWholeCommand(unittest.TestCase):
             "gh run list --limit 5 ... --json databaseId,status \\",
             "$ gh run list --limit 5 --json databaseId,status,conclusion"))
 
+    def test_a_redirect_with_a_file_descriptor_ends_the_statement(self):
+        # `make test 2>&1 | tail -5` is how agents run most commands, and a report quotes `make test`.
+        self.assertTrue(self.mod._claim_in("make test", "$ make test 2>&1 | tail -5"))
+        self.assertTrue(self.mod._claim_in("make test", "$ make test 2> err.log"))
+
+    def test_a_statement_inside_a_command_substitution_matches(self):
+        self.assertTrue(self.mod._claim_in("make test", '$ out="$(make test 2>&1)"; echo $?'))
+
+    def test_a_line_of_a_multi_line_command_is_a_statement(self):
+        record = "$ for n in 1 2; do\n  echo $n\n  gh pr merge 77 --squash\ndone\n"
+        self.assertTrue(self.mod._claim_in("gh pr merge 77 --squash", record))
+
+    def test_whitespace_the_agent_typed_in_the_record_is_collapsed(self):
+        self.assertTrue(self.mod._claim_in("gh pr merge 77", "$ gh  pr\tmerge   77\n"))
+
+    def test_ellipsis_fragments_match_across_that_whitespace(self):
+        self.assertTrue(self.mod._claim_in(
+            "gh run list --limit 5 ... --json databaseId",
+            "$ gh  run list  --limit 5 --json  databaseId,status\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

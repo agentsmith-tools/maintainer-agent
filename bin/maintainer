@@ -627,8 +627,8 @@ def _claim_in(claim: str, record: str) -> bool:
     # within each line comparable to the report's normalized claim.
     claim = " ".join(claim.split())
     lines = "\n".join(" ".join(line.split()) for line in record.splitlines())
-    left = r"(?:^|\n|\$ |(?<=[;&|]))[ \t]*"
-    right = r"(?=$|\n|[ \t]*\$ |[ \t]*(?:;|&&|\|\||\||\)|>|<|&))"
+    left = r"(?:^|\n|\$ |(?<=[;&|(]))[ \t]*"
+    right = r"(?=$|\n|[ \t]*\$ |[ \t]*(?:;|\||\)|\d*>|<|&))"
     if re.search(left + re.escape(claim) + right, lines):
         return True
     if "..." not in claim:
