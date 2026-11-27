@@ -619,7 +619,9 @@ def _claim_in(claim: str, record: str) -> bool:
     from the record's (`--squash --admin` against `--rebase`), which is the case
     this check exists to catch.
     """
-    if claim in record:
+    # Whole command: bounded by `$ ` before and ` $ ` or the end after, so `12`
+    # does not match inside `123`, and `--squash` does not match `--squash --admin`.
+    if re.search(r"(?:^|\$ )" + re.escape(claim) + r"(?= \$ |$)", record):
         return True
     if "..." not in claim:
         return False
