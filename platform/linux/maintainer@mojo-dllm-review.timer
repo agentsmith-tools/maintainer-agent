@@ -6,6 +6,7 @@ Description=maintainer: mojo-dllm review (timer)
 # which run.sh enforces on every platform.
 OnCalendar=*-*-* 13:17:00
 OnCalendar=*-*-* 18:17:00
+OnCalendar=*-*-* 21:17:00
 Persistent=true
 RandomizedDelaySec=300
 Unit=maintainer@mojo-dllm-review.service
