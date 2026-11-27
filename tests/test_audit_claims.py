@@ -52,6 +52,13 @@ class ClaimWholeCommand(unittest.TestCase):
         for record in (first, middle, last):
             self.assertTrue(self.mod._claim_in("gh pr merge 77 --squash", record), record)
 
+    def test_claim_starting_mid_command_is_not_a_match(self):
+        self.assertFalse(self.mod._claim_in("merge 77 --squash",
+                                            "$ gh pr merge 77 --squash"))
+
+    def test_claim_that_is_a_prefix_of_extra_arguments_is_not_a_match(self):
+        self.assertFalse(self.mod._claim_in("echo ok", "$ echo ok $HOME"))
+
     def test_ellipsis_abridgement_still_matches(self):
         self.assertTrue(self.mod._claim_in(
             "gh run list --limit 5 ... --json databaseId,status \\",
