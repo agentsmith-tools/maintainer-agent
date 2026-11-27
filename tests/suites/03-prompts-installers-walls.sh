@@ -937,7 +937,9 @@ root = sys.argv[1]
 problems = []
 for f in sorted(glob.glob(os.path.join(root, "platform/linux/maintainer@*.timer"))):
     inst = re.sub(r".*maintainer@(.*)\.timer$", r"\1", f)
-    profile, _, task = inst.partition("-")
+    # The task is the text after the LAST hyphen, as install.sh and run-instance.sh split it:
+    # a profile can be named after a hyphenated repository (mojo-dllm).
+    profile, _, task = inst.rpartition("-")
     env = os.path.join(root, "profiles", profile, "profile.env")
     if not os.path.exists(env):
         problems.append(inst + ": no profiles/" + profile + "/profile.env"); continue

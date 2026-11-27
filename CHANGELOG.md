@@ -10,6 +10,17 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **A profile for dllm-labs/mojo-dllm.** `profiles/mojo-dllm/` runs the `review` and `issues`
+  tasks against a checkout the profile owns, at `POST=off`: every review, comment and issue
+  lands as a draft file and nothing reaches a contributor, because that repository's AGENTS.md
+  lets an agent post only when the person it works for asks in a session. The prompts carry the
+  project's own rules (the Review table in its CONTRIBUTING.md, the `tests/test-count.txt` pin,
+  the `[Unreleased]` CHANGELOG rule, the CODEOWNERS paths) and tell a run to read CI results
+  and run nothing from a pull request. Timers fire at 13:17 and 18:17 (review) and 14:17 and
+  19:17 (issues). The install goldens list the two new timers.
+
 ## [0.12.0] — 2026-11-25
 
 ### Security

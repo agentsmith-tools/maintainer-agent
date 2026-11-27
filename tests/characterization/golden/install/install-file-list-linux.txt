@@ -2,6 +2,8 @@
 -rw- ./.config/systemd/user/maintainer@.service
 -rw- ./.config/systemd/user/maintainer@magent-issues.timer
 -rw- ./.config/systemd/user/maintainer@magent-review.timer
+-rw- ./.config/systemd/user/maintainer@mojo-dllm-issues.timer
+-rw- ./.config/systemd/user/maintainer@mojo-dllm-review.timer
 -rw- ./.config/systemd/user/maintainer@sysknife-audit.timer
 -rw- ./.config/systemd/user/maintainer@sysknife-ci.timer
 -rw- ./.config/systemd/user/maintainer@sysknife-issues.timer

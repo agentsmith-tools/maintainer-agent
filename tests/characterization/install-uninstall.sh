@@ -103,7 +103,8 @@ case_guard_yes() {
     cz_expect_rc 0
     cz_expect_stderr_empty
     ci_expect_calls systemctl.calls "--user show-environment" "--user disable --now maintainer@magent-issues.timer" \
-        "--user disable --now maintainer@magent-review.timer" "--user disable --now maintainer@sysknife-audit.timer" \
+        "--user disable --now maintainer@magent-review.timer" "--user disable --now maintainer@mojo-dllm-issues.timer" \
+        "--user disable --now maintainer@mojo-dllm-review.timer" "--user disable --now maintainer@sysknife-audit.timer" \
         "--user disable --now maintainer@sysknife-ci.timer" "--user disable --now maintainer@sysknife-issues.timer" \
         "--user disable --now maintainer@sysknife-review.timer" "--user daemon-reload"
     cz_expect_no_file "$CZ_SHARE"
@@ -157,7 +158,8 @@ case_removed_systemctl_calls() {
     ci_install --uninstall
     ci_expect_calls systemctl.calls "--user show-environment" "--user list-timers maintainer@\\* --no-pager" \
         "--user show-environment" "--user disable --now maintainer@magent-issues.timer" \
-        "--user disable --now maintainer@magent-review.timer" "--user disable --now maintainer@sysknife-audit.timer" \
+        "--user disable --now maintainer@magent-review.timer" "--user disable --now maintainer@mojo-dllm-issues.timer" \
+        "--user disable --now maintainer@mojo-dllm-review.timer" "--user disable --now maintainer@sysknife-audit.timer" \
         "--user disable --now maintainer@sysknife-ci.timer" "--user disable --now maintainer@sysknife-issues.timer" \
         "--user disable --now maintainer@sysknife-review.timer" "--user daemon-reload"
 }
@@ -323,6 +325,8 @@ case_failed_disable() {
     cz_check "the failed-step list on stderr" "$text" "
   run systemctl --user disable --now maintainer@magent-issues.timer
   run systemctl --user disable --now maintainer@magent-review.timer
+  run systemctl --user disable --now maintainer@mojo-dllm-issues.timer
+  run systemctl --user disable --now maintainer@mojo-dllm-review.timer
   run systemctl --user disable --now maintainer@sysknife-audit.timer
   run systemctl --user disable --now maintainer@sysknife-ci.timer
   run systemctl --user disable --now maintainer@sysknife-issues.timer

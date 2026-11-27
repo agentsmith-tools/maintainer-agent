@@ -283,7 +283,7 @@ make_stub systemctl 'exit 0'
 : > "$CRON_LOG"
 PATH="$stub_dir:$PATH" HOME="$uh2" MAINTAINER_UNINSTALL_YES=1 "$root/install.sh" --uninstall >/dev/null 2>&1
 rm -f "$stub_dir/systemctl"
-[ "$(sort "$CRON_LOG" | paste -sd,)" = "removed for magent,removed for sysknife" ] \
+[ "$(sort "$CRON_LOG" | paste -sd,)" = "removed for magent,removed for mojo-dllm,removed for sysknife" ] \
     && ok "uninstall strips the cron block of every deployed profile, by name" \
     || bad "uninstall's cron removal did not cover each profile: $(paste -sd, "$CRON_LOG")"
 rm -f "$stub_dir/crontab"

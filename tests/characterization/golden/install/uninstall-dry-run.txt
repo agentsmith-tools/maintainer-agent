@@ -1,6 +1,8 @@
   removing the maintainer agent
   would: systemctl --user disable --now maintainer@magent-issues.timer
   would: systemctl --user disable --now maintainer@magent-review.timer
+  would: systemctl --user disable --now maintainer@mojo-dllm-issues.timer
+  would: systemctl --user disable --now maintainer@mojo-dllm-review.timer
   would: systemctl --user disable --now maintainer@sysknife-audit.timer
   would: systemctl --user disable --now maintainer@sysknife-ci.timer
   would: systemctl --user disable --now maintainer@sysknife-issues.timer
@@ -9,6 +11,8 @@
   would: rm -f @HOME@/.config/systemd/user/maintainer@.service
   would: rm -f @HOME@/.config/systemd/user/maintainer@magent-issues.timer
   would: rm -f @HOME@/.config/systemd/user/maintainer@magent-review.timer
+  would: rm -f @HOME@/.config/systemd/user/maintainer@mojo-dllm-issues.timer
+  would: rm -f @HOME@/.config/systemd/user/maintainer@mojo-dllm-review.timer
   would: rm -f @HOME@/.config/systemd/user/maintainer@sysknife-audit.timer
   would: rm -f @HOME@/.config/systemd/user/maintainer@sysknife-ci.timer
   would: rm -f @HOME@/.config/systemd/user/maintainer@sysknife-issues.timer
