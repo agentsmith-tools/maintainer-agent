@@ -35,7 +35,7 @@ fn run_binary(program: &Path, on_path: &Path, root: &Path) -> mx_ports::ProcOutp
         &ProcSpec::command(
             &program.display().to_string(),
             ["verify-deps", "7", SHA],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .env("HOME", root.display().to_string())
         .env("MAINTAINER_SLUG", "owner/repo")
