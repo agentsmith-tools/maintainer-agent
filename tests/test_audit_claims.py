@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -51,6 +52,50 @@ class ClaimWholeCommand(unittest.TestCase):
         last = "$ make lint $ gh pr merge 77 --squash"
         for record in (first, middle, last):
             self.assertTrue(self.mod._claim_in("gh pr merge 77 --squash", record), record)
+
+    def test_complete_statements_match_inside_chains_and_pipelines(self):
+        record = "$ cargo fmt --check && git diff --check | head -20; make test"
+        for claim in ("cargo fmt --check", "git diff --check", "head -20",
+                      "git diff --check | head -20", "make test"):
+            with self.subTest(claim=claim):
+                self.assertTrue(self.mod._claim_in(claim, record))
+
+    def test_shell_separator_boundaries_include_or_redirect_and_background(self):
+        cases = (
+            ("exact", "$ before || exact"),
+            ("exact", "$ before | exact"),
+            ("echo done", "$ echo done > output"),
+            ("echo done", "$ echo done < input"),
+            ("echo done", "$ echo done &"),
+            ("echo done", "$ echo done)"),
+        )
+        for claim, record in cases:
+            with self.subTest(claim=claim, record=record):
+                self.assertTrue(self.mod._claim_in(claim, record))
+
+    def test_line_boundaries_and_write_entries_do_not_hide_bash_calls(self):
+        record = ("$ git status --short\n"
+                  "Write: /tmp/audit-report.md\n"
+                  "$ printf '%s\\n' done\n")
+        self.assertTrue(self.mod._claim_in("git status --short", record))
+        self.assertTrue(self.mod._claim_in("printf '%s\\n' done", record))
+
+    def test_audit_run_preserves_line_boundary_before_write_entry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runs, logs = root / "runs", root / "logs"
+            runs.mkdir()
+            logs.mkdir()
+            run_id = "2026-11-27T00-00-review"
+            (runs / f"{run_id}.md").write_text(
+                "# review\n\n```bash\n$ git status --short\n```\n")
+            (logs / f"{run_id}.commands").write_text(
+                "$ git status --short\nWrite: /tmp/audit-report.md\n")
+            with mock.patch.object(self.mod, "RUNS", runs), \
+                 mock.patch.object(self.mod, "LOGS", logs):
+                verdict, missing, count = self.mod.audit_run(run_id)
+        self.assertEqual(("all 1 quoted command(s) appear in the record", [], 1),
+                         (verdict, missing, count))
 
     def test_claim_starting_mid_command_is_not_a_match(self):
         self.assertFalse(self.mod._claim_in("merge 77 --squash",
