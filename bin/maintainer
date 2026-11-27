@@ -602,7 +602,7 @@ def claimed_commands(report_text: str) -> list[str]:
 
 
 def _claim_in(claim: str, record: str) -> bool:
-    """Is this quoted command in the record, allowing for how reports quote.
+    """Is this quoted shell statement in the record, allowing for report quoting.
 
     Measured against a real report before this existed: 2 of 13 quoted commands
     read as missing and both were artefacts of quoting, not of lying.
@@ -613,13 +613,23 @@ def _claim_in(claim: str, record: str) -> bool:
         inside a harness script the agent wrote and ran. The record holds the
         outer invocation, not each line the script then executed.
 
-    So: a claim carrying an explicit `...` is abridged on purpose, and only its
-    fragments between the ellipses must occur in the record, in order. Anything
-    else must occur whole. A prefix match would pass a claim whose flags differ
-    from the record's (`--squash --admin` against `--rebase`), which is the case
-    this check exists to catch.
+    A Bash record entry can contain several statements, so an exact claim may
+    be one whole statement inside the entry. It is bounded by line or shell
+    statement boundaries, not by the whole tool entry. A claim carrying `...`
+    remains abridged on purpose, and only its non-empty fragments must occur in
+    order. A prefix match would pass a claim whose flags differ from the
+    record's (`--squash --admin` against `--rebase`), which this check catches.
     """
-    if claim in record:
+    # Preserve record lines: Bash calls may contain several statements, and
+    # flattening them makes a command head look like a whole command. Match the
+    # claim as one shell statement, with a boundary at the record/line edge,
+    # another `$ ` tool entry, or a shell statement separator. Keep whitespace
+    # within each line comparable to the report's normalized claim.
+    claim = " ".join(claim.split())
+    lines = "\n".join(" ".join(line.split()) for line in record.splitlines())
+    left = r"(?:^|\n|\$ |(?<=[;&|(]))[ \t]*"
+    right = r"(?=$|\n|[ \t]*\$ |[ \t]*(?:;|\||\)|\d*>|<|&))"
+    if re.search(left + re.escape(claim) + right, lines):
         return True
     if "..." not in claim:
         return False
@@ -642,7 +652,7 @@ def _claim_in(claim: str, record: str) -> bool:
         return False
     pos = 0
     for frag in frags:
-        i = record.find(frag, pos)
+        i = lines.find(frag, pos)
         if i < 0:
             return False
         pos = i + len(frag)
@@ -657,14 +667,14 @@ def audit_run(run_id: str) -> tuple[str, list[str], int]:
     cmds = LOGS / f"{_log_stem(run_id)}.commands"
     if not cmds.exists():
         return "no command record: nothing to compare against", [], 0
+    # Keep line breaks: a claim can match a complete statement inside a
+    # multi-statement shell call, while a prefix at the start of that statement
+    # still fails the exact right-boundary check.
     record = cmds.read_text()
-    # Normalised on both sides. The record stores a Bash call as `$ <command>`
-    # with the agent's own whitespace, and a report re-wraps it.
-    flat = " ".join(record.split())
     claims = claimed_commands(report.read_text())
     if not claims:
         return "the report quotes no executed command", [], 0
-    missing = [c for c in claims if not _claim_in(c, flat)]
+    missing = [c for c in claims if not _claim_in(c, record)]
     if missing:
         return f"{len(missing)} of {len(claims)} quoted command(s) are not in the record", missing, len(claims)
     return f"all {len(claims)} quoted command(s) appear in the record", [], len(claims)

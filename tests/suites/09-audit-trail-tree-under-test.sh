@@ -191,6 +191,14 @@ out="$(aurun 2026-01-13T00-00-review)"
 grep -q 'gha ... --json databaseId' <<<"$out" \
     && ok "the first abridged fragment must also appear" \
     || bad "a claim with a missing first fragment passed the audit"
+# A claim without `...` must equal one whole recorded command, so a prefix of
+# `gh pr merge 123` or a dropped `--admin` is not a match. tests/test_audit_claims.py
+# was written to be run by hand, so nothing ran it: a revert of the fix would have
+# passed CI. MX_TREE makes it judge the tree under test.
+echo "== a quoted command without ... matches one whole recorded command =="
+MX_TREE="$root" python3 -B "$suite_root/tests/test_audit_claims.py" >/dev/null 2>&1 \
+    && ok "a claim without ... is not a prefix of a longer recorded command, and matches whole in any position" \
+    || bad "_claim_in matches a prefix of a recorded command (tests/test_audit_claims.py)"
 
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
