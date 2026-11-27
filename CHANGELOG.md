@@ -38,6 +38,14 @@ middle digit.
   `cat >>` succeeds. `append` returns whether every byte was written, and tests cover a fold that fails on the write side
   and one that fails on the read side. The lifecycle harness strips carriage returns from `defaults.env`, so a CRLF
   checkout no longer fails 87 of the 96 lifecycle tests. Issue #276.
+- **`maintainer audit` accepts a quoted command only as one whole shell statement of the record.** ([#300](https://github.com/agentsmith-tools/maintainer-agent/pull/300))
+  A claim without `...` passed as a substring of the flattened record, so `gh pr merge 12` passed against a run that
+  merged 123, and a claim that dropped a trailing `--admin` passed too. The record now keeps its line breaks, and a
+  claim must sit between statement boundaries: a line start, `$ ` or one of `; & | (` on the left, and a line end,
+  ` $ `, one of `; | ) < &` or a redirect such as `2>&1` on the right. Measured on 2,165 quoted commands from real run
+  reports, the first draft of the rule (whole entries only) rejected 1,251 of the 1,947 claims the old test accepted,
+  mostly commands run in a pipeline or a chain; the rule as merged rejects 9, all abridgements. The `...` branch keeps
+  its substring weakness (issue #303). Issue #290.
 
 ## [0.12.0] — 2026-11-25
 
