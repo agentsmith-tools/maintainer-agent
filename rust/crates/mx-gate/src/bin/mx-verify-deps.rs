@@ -103,20 +103,40 @@ impl Say for Stdout {
     }
 }
 
+/// The `maintainer` beside this program, as `mx-checks` and `mx-doctor` find their tree: the
+/// directory of `argv[0]` when it has a slash (a wrapper in `bin/` runs this binary under its own
+/// path, so `current_exe()` names the `.rust-bin/` copy, which has no helper), then the directory
+/// of the running executable, which covers a symlinked or copied install whose `argv[0]` directory
+/// has no helper.
+fn helper_beside(argv0: &Path) -> Option<PathBuf> {
+    // A relative `argv[0]` (`./mx-verify-deps`, `bin/mx-verify-deps`) names a place under the working
+    // directory, and `RealProc` runs a program with a slash only by its absolute path.
+    let argv_dir = if argv0.components().count() > 1 {
+        std::path::absolute(argv0).ok().and_then(|path| path.parent().map(Path::to_path_buf))
+    } else {
+        None
+    };
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+    argv_dir
+        .into_iter()
+        .chain(exe_dir)
+        .map(|dir| dir.join("maintainer"))
+        .find(|path| path.is_file())
+}
+
 /// `maintainer lease check <pr>`, with the helper found beside this program or on the search path.
 struct LeaseHelper<'a> {
     proc: &'a dyn Proc,
     env: &'a BTreeMap<String, String>,
+    beside: Option<PathBuf>,
 }
 
 impl Helper for LeaseHelper<'_> {
     fn lease_check(&self, pr: &PrNumber) -> Result<LeaseAnswer, HelperMissing> {
-        let beside = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.join("maintainer")))
-            .filter(|path| path.is_file());
-        let program =
-            beside.map_or_else(|| "maintainer".to_string(), |path| path.display().to_string());
+        let program = self
+            .beside
+            .as_ref()
+            .map_or_else(|| "maintainer".to_string(), |path| path.display().to_string());
         let var = |name: &str| self.env.get(name).cloned().unwrap_or_default();
         let spec =
             ProcSpec::command(&program, ["lease", "check", pr.as_arg()], Duration::from_mins(1))
@@ -190,7 +210,8 @@ fn main() -> ExitCode {
                 RealNet::new(&proc, scripts.image_resolver.clone(), scripts.pypi_verifier.clone());
             let classifier = RealClassifier::new(&proc, scripts.classifier.clone());
             let whole = RealWholeFile::new(&proc, scripts.pip_files.clone());
-            let helper = LeaseHelper { proc: &proc, env: &env };
+            let argv0 = PathBuf::from(std::env::args_os().next().unwrap_or_default());
+            let helper = LeaseHelper { proc: &proc, env: &env, beside: helper_beside(&argv0) };
             let now = || stamp_now(&proc, &env);
             let wiring = Wiring {
                 ports: DepsPorts {
