@@ -109,8 +109,13 @@ impl Say for Stdout {
 /// of the running executable, which covers a symlinked or copied install whose `argv[0]` directory
 /// has no helper.
 fn helper_beside(argv0: &Path) -> Option<PathBuf> {
-    let argv_dir =
-        if argv0.components().count() > 1 { argv0.parent().map(Path::to_path_buf) } else { None };
+    // A relative `argv[0]` (`./mx-verify-deps`, `bin/mx-verify-deps`) names a place under the working
+    // directory, and `RealProc` runs a program with a slash only by its absolute path.
+    let argv_dir = if argv0.components().count() > 1 {
+        std::path::absolute(argv0).ok().and_then(|path| path.parent().map(Path::to_path_buf))
+    } else {
+        None
+    };
     let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
     argv_dir
         .into_iter()
