@@ -2317,3 +2317,30 @@ fn the_exit_trap_still_clears_the_lease_after_the_pipe_port_has_closed_to_new_st
     );
     assert_eq!(clear.via, "proc", "the exit trap called the helper through the pipe port");
 }
+
+/// The read half of the guard: a pre-lock log that cannot be read is not folded, so it must not be
+/// deleted either. A dangling link stands in for a file that fails to read, and unlike a mode of
+/// 000 it fails for root too.
+#[test]
+fn an_unreadable_pre_lock_log_is_kept_because_nothing_was_appended_from_it() {
+    let _turn = serial();
+    let fx = Fx::new("fold-unreadable");
+    std::fs::create_dir_all(fx.logs()).unwrap();
+    let by_id = fx.logs().join("2026-02-02T02-02-review.log");
+    std::fs::write(&by_id, "an earlier run wrote this\n").unwrap();
+    let pre_lock = fx.logs().join(format!("{STAMP}-review.log"));
+    let replaced = pre_lock.clone();
+    fx.world.on_call(
+        "maintainer start",
+        Box::new(move || {
+            std::fs::remove_file(&replaced).unwrap();
+            std::os::unix::fs::symlink("/nonexistent/pre-lock-log", &replaced).unwrap();
+        }),
+    );
+    fx.world.fix("maintainer start", reply(0, "=== maintainer 2026-02-02T02-02-review ===\n"));
+    drop(fx.run(&["fx", "review"]));
+    assert!(
+        std::fs::symlink_metadata(&pre_lock).is_ok(),
+        "pre-lock log was deleted after its read failed"
+    );
+}
