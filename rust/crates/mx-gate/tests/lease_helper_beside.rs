@@ -6,10 +6,10 @@
 
 #![cfg(unix)]
 
+use mx_ports::{Proc, ProcExit, ProcSpec, RealProc};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -23,6 +23,28 @@ fn held_stub(answer: &str) -> String {
     format!("#!/bin/sh\necho {answer}\nexit 1\n")
 }
 
+fn run_binary(program: &Path, on_path: &Path, root: &Path) -> mx_ports::ProcOutput {
+    let search_path = std::env::join_paths([
+        on_path.as_os_str(),
+        std::ffi::OsStr::new("/usr/bin"),
+        std::ffi::OsStr::new("/bin"),
+    ])
+    .unwrap();
+    let proc = RealProc::new(search_path, Vec::new());
+    proc.run(
+        &ProcSpec::command(
+            &program.display().to_string(),
+            ["verify-deps", "7", SHA],
+            Duration::from_secs(60),
+        )
+        .env("HOME", root.display().to_string())
+        .env("MAINTAINER_SLUG", "owner/repo")
+        .env("MAINTAINER_STATE", root.join("state").display().to_string())
+        .env("MAINTAINER_CLASSIFY_TIMEOUT", "60"),
+    )
+    .unwrap()
+}
+
 #[test]
 fn the_lease_is_asked_of_the_helper_beside_the_wrapper_and_not_the_one_on_path() {
     let root = std::env::temp_dir().join(format!("lease-beside-{}", std::process::id()));
@@ -34,17 +56,8 @@ fn the_lease_is_asked_of_the_helper_beside_the_wrapper_and_not_the_one_on_path()
 
     // The wrapper's own path as `argv[0]`, as `exec -a "$0"` leaves it.
     let wrapper: PathBuf = tree.join("bin/mx-verify-deps");
-    let out = Command::new(env!("CARGO_BIN_EXE_mx-verify-deps"))
-        .arg0(&wrapper)
-        .args(["verify-deps", "7", SHA])
-        .env_clear()
-        .env("PATH", format!("{}:/usr/bin:/bin", on_path.display()))
-        .env("HOME", &root)
-        .env("MAINTAINER_SLUG", "owner/repo")
-        .env("MAINTAINER_STATE", root.join("state"))
-        .env("MAINTAINER_CLASSIFY_TIMEOUT", "60")
-        .output()
-        .unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_mx-verify-deps"), &wrapper).unwrap();
+    let out = run_binary(&wrapper, &on_path, &root);
     let _ = std::fs::remove_dir_all(&root);
 
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -53,7 +66,7 @@ fn the_lease_is_asked_of_the_helper_beside_the_wrapper_and_not_the_one_on_path()
         "expected the helper beside the wrapper to answer, got stderr: {stderr}"
     );
     assert!(!stderr.contains("held-by-path"), "the helper on PATH was asked: {stderr}");
-    assert_ne!(out.status.code(), Some(0), "a held lease must refuse the verify");
+    assert_ne!(out.exit, ProcExit::Code(0), "a held lease must refuse the verify");
 }
 
 /// A copied binary whose `argv[0]` directory has no helper still finds the one beside its own
@@ -67,22 +80,15 @@ fn a_copied_binary_with_no_helper_beside_argv0_finds_the_one_beside_itself() {
     let copied = tree.join(".rust-bin/mx-verify-deps");
     std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_mx-verify-deps"), &copied).unwrap();
+    std::fs::set_permissions(&copied, std::fs::Permissions::from_mode(0o755)).unwrap();
     write_exec(&tree.join(".rust-bin/maintainer"), &held_stub("held-by-exe-dir"));
     write_exec(&on_path.join("maintainer"), &held_stub("held-by-path"));
 
     // The install's own path as `argv[0]`, in a directory with no helper.
     let argv0: PathBuf = root.join("elsewhere/bin/mx-verify-deps");
-    let out = Command::new(&copied)
-        .arg0(&argv0)
-        .args(["verify-deps", "7", SHA])
-        .env_clear()
-        .env("PATH", format!("{}:/usr/bin:/bin", on_path.display()))
-        .env("HOME", &root)
-        .env("MAINTAINER_SLUG", "owner/repo")
-        .env("MAINTAINER_STATE", root.join("state"))
-        .env("MAINTAINER_CLASSIFY_TIMEOUT", "60")
-        .output()
-        .unwrap();
+    std::fs::create_dir_all(argv0.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&copied, &argv0).unwrap();
+    let out = run_binary(&argv0, &on_path, &root);
     let _ = std::fs::remove_dir_all(&root);
 
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -91,5 +97,5 @@ fn a_copied_binary_with_no_helper_beside_argv0_finds_the_one_beside_itself() {
         "expected the helper beside the executable to answer, got stderr: {stderr}"
     );
     assert!(!stderr.contains("held-by-path"), "the helper on PATH was asked: {stderr}");
-    assert_ne!(out.status.code(), Some(0), "a held lease must refuse the verify");
+    assert_ne!(out.exit, ProcExit::Code(0), "a held lease must refuse the verify");
 }
