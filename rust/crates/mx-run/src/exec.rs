@@ -232,13 +232,14 @@ impl Exec {
     }
 }
 
-/// `>>"$log"`: appends bytes to a file, creating it. A failure is ignored, as a
-/// redirection that fails on a command that has already printed cannot be
-/// reported anywhere better.
-pub fn append(log: &Path, bytes: &[u8]) {
+/// `>>"$log"`: appends bytes to a file, creating it. Returns whether every byte was
+/// written. A failure is otherwise ignored, as a redirection that fails on a command
+/// that has already printed cannot be reported anywhere better.
+pub fn append(log: &Path, bytes: &[u8]) -> bool {
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
-        drop(file.write_all(bytes));
+    match std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        Ok(mut file) => file.write_all(bytes).is_ok(),
+        Err(_) => false,
     }
 }
 
