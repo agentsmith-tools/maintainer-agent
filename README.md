@@ -386,8 +386,8 @@ each one asks you to trust.
 
 ## Where it runs
 
-One machine, eight user timers, <!-- fig:profiles -->3<!-- /fig --> profiles, all acting as `vladimirrott`.
-Two post to GitHub and one writes drafts only.
+One machine, eight user timers, <!-- fig:profiles -->3<!-- /fig --> profiles, each posting to GitHub as
+`vladimirrott`.
 
 | Profile | Repository | Posts | Tasks | Cadence |
 |---|---|---|---|---|
@@ -397,7 +397,7 @@ Two post to GitHub and one writes drafts only.
 | | | | `audit` | every 5 days |
 | `magent` | this repository | on | `review` | daily |
 | | | | `issues` | every 2 days |
-| `mojo-dllm` | [`dllm-labs/mojo-dllm`](https://github.com/dllm-labs/mojo-dllm) | off | `review` | twice a day |
+| `mojo-dllm` | [`dllm-labs/mojo-dllm`](https://github.com/dllm-labs/mojo-dllm) | on | `review` | twice a day |
 | | | | `issues` | every 2 days |
 
 The Posts column is each profile's `POST` default, and a test holds it to
@@ -410,9 +410,9 @@ unattended writers: the review task files its findings through
 `maintainer file-issue`, and the issues task files and places issues on its
 own cadence. `maintainer status` shows each task's last run.
 
-The `mojo-dllm` profile runs at `POST=off`: its reviews, comments and issues land as draft
-files under `~/.local/state/mojo-dllm-maint/drafts` and reach nobody, because that
-repository's AGENTS.md lets an agent post only when the person it works for asks in a session.
+The `mojo-dllm` profile has no verify suite, so it never merges a contributor's pull request:
+it reviews, comments and labels, and reports the ones ready for the maintainer. It runs nothing
+from a pull request and holds back a Dependabot bump of the Mojo toolchain.
 
 Each profile reviews a checkout it owns under
 `~/.local/state/<profile>-maint/checkout`, cloned from `REPO_ORIGIN` on first

@@ -18,7 +18,7 @@
   },
   "05-reserved-issue": {
     "needle": null,
-    "n/a": "no reserved-issue pipeline here: this profile posts nothing, and no issue is held back for a listing"
+    "n/a": "no reserved-issue pipeline here: no issue is held back for a listing: the project holds issues with for:<handle> labels instead"
   },
   "06-publishing-verb": {
     "needle": "cargo publish"
