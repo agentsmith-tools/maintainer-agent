@@ -371,9 +371,7 @@ impl Pass<'_, '_> {
             if by_id.exists() {
                 // Never clobber an existing run's transcript; fold into it instead.
                 // The pre-lock log is removed only once its lines are safely in the run's log.
-                let folded = std::fs::read(&current)
-                    .map(|bytes| append(&by_id, &bytes))
-                    .unwrap_or(false);
+                let folded = std::fs::read(&current).is_ok_and(|bytes| append(&by_id, &bytes));
                 if folded {
                     drop(std::fs::remove_file(&current));
                 }
