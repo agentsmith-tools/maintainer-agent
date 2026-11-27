@@ -2637,7 +2637,10 @@ def cmd_file_issue(args: list[str]) -> None:
         cmd += ["--label", label]
     p = _spawn(tuple(cmd))
     if p.returncode != 0:
-        raise SystemExit(f"maintainer file-issue: gh issue create failed:\n{p.stdout}")
+        # gh writes its reason to stderr; stdout is usually empty on failure.
+        why = (p.stderr or "").strip() or "gh printed no reason on stderr"
+        raise SystemExit(
+            f"maintainer file-issue: gh issue create failed (exit {p.returncode}):\n{why}")
     print((p.stdout or "").strip())
 
 

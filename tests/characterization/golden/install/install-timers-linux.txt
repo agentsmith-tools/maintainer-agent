@@ -5,6 +5,8 @@
   platform: Linux (systemd user units)
   enabled maintainer@magent-issues.timer
   enabled maintainer@magent-review.timer
+  skipped maintainer@mojo-dllm-issues.timer (profile mojo-dllm is not deployed)
+  skipped maintainer@mojo-dllm-review.timer (profile mojo-dllm is not deployed)
   enabled maintainer@sysknife-audit.timer
   enabled maintainer@sysknife-ci.timer
   enabled maintainer@sysknife-issues.timer

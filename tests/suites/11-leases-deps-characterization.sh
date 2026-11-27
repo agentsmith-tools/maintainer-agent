@@ -1147,6 +1147,13 @@ out="$(MX_TREE="$root" python3 "$suite_root/tests/claims-unreadable.py" 2>&1)"; 
     && ok "claims reports an unreadable thread as UNREADABLE and exits 1" \
     || bad "claims counts an unreadable comment thread as an idle claim (rc=$rc): $out"
 
+echo "== file-issue shows gh's stderr and exit code when issue create fails =="
+# A python file under tests/ runs only when a case names it, so this line is the
+# only thing that keeps tests/test_file_issue_stderr.py in the gate.
+MX_TREE="$root" python3 -B "$suite_root/tests/test_file_issue_stderr.py" >/dev/null 2>&1 \
+    && ok "file-issue puts gh's stderr line, its exit code and the empty-stderr fallback in the failure message" \
+    || bad "file-issue drops gh's error when gh issue create fails (tests/test_file_issue_stderr.py)"
+
 echo "== the characterization suite is a gate suite that only a named verify runs =="
 # tests/run-tests.sh does not run the cases that pin the orchestrator, the
 # backends, the classifier, the installers, the doctor and the repo tool. Under

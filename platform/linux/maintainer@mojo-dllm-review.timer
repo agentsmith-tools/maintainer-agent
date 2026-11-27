@@ -1,0 +1,14 @@
+[Unit]
+Description=maintainer: mojo-dllm review (timer)
+
+[Timer]
+# Fires daily. The real cadence is MIN_HOURS_review in profiles/mojo-dllm/profile.env,
+# which run.sh enforces on every platform.
+OnCalendar=*-*-* 13:17:00
+OnCalendar=*-*-* 18:17:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@mojo-dllm-review.service
+
+[Install]
+WantedBy=timers.target

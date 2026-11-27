@@ -32,6 +32,8 @@
   would: cp @TREE@/platform/linux/podman-userns-warmup.service @HOME@/.config/systemd/user/podman-userns-warmup.service
   would: cp @TREE@/platform/linux/maintainer@magent-issues.timer @HOME@/.config/systemd/user/maintainer@magent-issues.timer
   would: cp @TREE@/platform/linux/maintainer@magent-review.timer @HOME@/.config/systemd/user/maintainer@magent-review.timer
+  would: cp @TREE@/platform/linux/maintainer@mojo-dllm-issues.timer @HOME@/.config/systemd/user/maintainer@mojo-dllm-issues.timer
+  would: cp @TREE@/platform/linux/maintainer@mojo-dllm-review.timer @HOME@/.config/systemd/user/maintainer@mojo-dllm-review.timer
   would: cp @TREE@/platform/linux/maintainer@sysknife-audit.timer @HOME@/.config/systemd/user/maintainer@sysknife-audit.timer
   would: cp @TREE@/platform/linux/maintainer@sysknife-ci.timer @HOME@/.config/systemd/user/maintainer@sysknife-ci.timer
   would: cp @TREE@/platform/linux/maintainer@sysknife-issues.timer @HOME@/.config/systemd/user/maintainer@sysknife-issues.timer
@@ -50,6 +52,8 @@
   would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@magent-review.timer
   would: systemctl --user enable --now maintainer@magent-review.timer
   enabled maintainer@magent-review.timer
+  skipped maintainer@mojo-dllm-issues.timer (profile mojo-dllm is not deployed)
+  skipped maintainer@mojo-dllm-review.timer (profile mojo-dllm is not deployed)
   would: mkdir -p @HOME@/.local/share/systemd/timers
   would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-audit.timer
   would: systemctl --user enable --now maintainer@sysknife-audit.timer

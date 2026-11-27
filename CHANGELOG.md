@@ -10,6 +10,35 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **A profile for dllm-labs/mojo-dllm.** `profiles/mojo-dllm/` runs the `review` and `issues`
+  tasks against a checkout the profile owns, at `POST=off`: every review, comment and issue
+  lands as a draft file and nothing reaches a contributor, because that repository's AGENTS.md
+  lets an agent post only when the person it works for asks in a session. The prompts carry the
+  project's own rules (the Review table in its CONTRIBUTING.md, the `tests/test-count.txt` pin,
+  the `[Unreleased]` CHANGELOG rule, the CODEOWNERS paths) and tell a run to read CI results
+  and run nothing from a pull request. Timers fire at 13:17 and 18:17 (review) and 14:17 and
+  19:17 (issues). The install goldens list the two new timers.
+
+### Fixed
+
+- **`maintainer file-issue` shows why `gh issue create` failed.** ([#299](https://github.com/agentsmith-tools/maintainer-agent/pull/299))
+  The failure message printed gh's stdout, which is empty when gh fails, so it ended at the colon. It now carries gh's exit
+  code and stderr, and says so when stderr is empty. `tests/test_file_issue_stderr.py` had no suite case naming it, so CI
+  never ran it; a case in `tests/suites/11-leases-deps-characterization.sh` runs it now, with assertions for the exit code
+  and the empty-stderr fallback. Issue #292.
+- **The Rust `mx-verify-deps` asks the `maintainer` in its own tree about a lease.** ([#301](https://github.com/agentsmith-tools/maintainer-agent/pull/301))
+  It looked beside `current_exe()`, which names the `.rust-bin/` copy under the wrapper layout, so it asked the one on
+  `PATH`. It now looks beside `argv[0]` first, taken as an absolute path because `RealProc` refuses a relative program
+  with a slash, then beside the executable. Tests start it through `RealProc`, with a relative `argv[0]` and with a helper
+  in both directories. Issue #277.
+- **The Rust run keeps the pre-lock log when folding it into the run's log fails.** ([#302](https://github.com/agentsmith-tools/maintainer-agent/pull/302))
+  It removed the log even when the lines had not been appended, which loses them; `lib/run.sh` removes it only after
+  `cat >>` succeeds. `append` returns whether every byte was written, and tests cover a fold that fails on the write side
+  and one that fails on the read side. The lifecycle harness strips carriage returns from `defaults.env`, so a CRLF
+  checkout no longer fails 87 of the 96 lifecycle tests. Issue #276.
+
 ## [0.12.0] — 2026-11-25
 
 ### Security
