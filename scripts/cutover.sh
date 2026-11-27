@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Move this machine from the bash maintainer programs to the Rust builds, and back.
 #
-#   scripts/cutover.sh build    [--out DIR] [--allow-dirty]
+#   scripts/cutover.sh build    [--out DIR] [--allow-dirty] [--only NAME]...
 #   scripts/cutover.sh shadow   [--out DIR] [--accept-skip NAME]... [--timeout SECONDS]
 #   scripts/cutover.sh live     [--build-dir DIR]
 #   scripts/cutover.sh status   [--build-dir DIR]
@@ -11,6 +11,11 @@
 # `install --rust` writes, and needs no Rust binary: this file is bash on purpose
 # (plan decision P4-D23), because the way back must not depend on the thing that
 # may be broken. docs/deploy/cutover.md says what each step proves and what it does not.
+#
+# build compiles the whole workspace. With --only it keeps just the named programs and install (live
+# needs install, so it is added), so a later shadow and live flip only those: the way to cut over in
+# stages. Without --only the directory holds every program. A later build into the same directory
+# replaces what an earlier one wrote, whatever set each one holds.
 #
 # Exit status: 0 done, 1 refused (the line on standard error names what), 64 usage.
 # Every refusal comes before the first change to the machine.
@@ -27,7 +32,7 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 usage() {
     cat >&2 <<'EOF'
-usage: scripts/cutover.sh build    [--out DIR] [--allow-dirty]
+usage: scripts/cutover.sh build    [--out DIR] [--allow-dirty] [--only NAME]...
        scripts/cutover.sh shadow   [--out DIR] [--accept-skip NAME]... [--timeout SECONDS]
        scripts/cutover.sh live     [--build-dir DIR]
        scripts/cutover.sh status   [--build-dir DIR]
@@ -305,13 +310,18 @@ path_free_flags() {
 }
 
 cmd_build() {
-    local out="" allow_dirty=0
+    local out="" allow_dirty=0 only=() o
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --out) [ "$#" -ge 2 ] || usage_die "build: --out needs a directory"; out="$2"; shift 2 ;;
             --allow-dirty) allow_dirty=1; shift ;;
+            --only) [ "$#" -ge 2 ] || usage_die "build: --only needs a program name"; only+=("$2"); shift 2 ;;
             *) usage_die "build: unknown argument $(shown "$1")" ;;
         esac
+    done
+    # A name is checked here, before any tool runs: it is shown in messages and compared with the workspace.
+    for o in ${only[@]+"${only[@]}"}; do
+        [[ "$o" =~ ^[a-z][a-z0-9-]*$ ]] || die "--only $(shown "$o") is not a program name"
     done
     need cargo git python3 sha256sum mktemp stat id sort cp mv rm mkdir chmod
     [ -n "$out" ] || out="$(default_dir)"
@@ -326,6 +336,7 @@ cmd_build() {
         dirty=1
     fi
 
+    local make_out=0
     if [ -e "$out" ] || [ -L "$out" ]; then
         check_dir "$out"
         # Only what an earlier build wrote may be replaced.
@@ -340,9 +351,7 @@ cmd_build() {
             has_name "$known" "$name" || die "$out holds $name, which an earlier build did not write; use an empty directory"
         done
     else
-        mkdir -p -- "$out" || die "cannot create $out"
-        chmod 755 -- "$out" || die "cannot set the mode of $out"
-        check_dir "$out"
+        make_out=1
     fi
 
     local listing
@@ -357,6 +366,36 @@ cmd_build() {
         [[ "$name" =~ ^[a-z][a-z0-9-]*$ ]] || die "the workspace names a binary $(shown "$name"), which is not a plain name"
         pkgs+=("$pkg"); names+=("$name")
     done <<<"$listing"
+
+    # --only: keep the named programs and install. The names are compared with what the workspace builds
+    # before the first compile, so a typo costs nothing. cargo metadata above only reads the manifests.
+    local only_line=""
+    if [ "${#only[@]}" -gt 0 ]; then
+        local all keep_pkgs=() keep_names=() i
+        all="$(printf '%s\n' "${names[@]}")"
+        for o in "${only[@]}"; do
+            has_name "$all" "$o" || die "--only $(shown "$o") is not a program this workspace builds; the programs are: $(printf '%s\n' "${names[@]}" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+        done
+        only_line="$(printf '%s\n' "${only[@]}" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+        has_name "$all" install || die "the workspace builds no install program, which live needs; --only cannot add it"
+        case " $only_line " in
+            *" install "*) ;;
+            *) printf '%s: build: --only adds install, which live needs\n' "$PROG" >&2 ;;
+        esac
+        for i in "${!names[@]}"; do
+            if [ "${names[$i]}" = install ] || case " $only_line " in *" ${names[$i]} "*) true ;; *) false ;; esac; then
+                keep_pkgs+=("${pkgs[$i]}"); keep_names+=("${names[$i]}")
+            fi
+        done
+        pkgs=("${keep_pkgs[@]}"); names=("${keep_names[@]}")
+    fi
+
+    # Every refusal that does not need a compile is behind us: only now does the directory appear.
+    if [ "$make_out" = 1 ]; then
+        mkdir -p -- "$out" || die "cannot create $out"
+        chmod 755 -- "$out" || die "cannot set the mode of $out"
+        check_dir "$out"
+    fi
 
     export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
     export CARGO_TERM_COLOR=never
@@ -402,6 +441,7 @@ cmd_build() {
     printf '%s\n' "$table" > "$out/SHA256SUMS" || die "cannot write $out/SHA256SUMS"
     printf 'head=%s\ndirty=%s\nprograms=%s\n' "$head" "$dirty" "$(table_names "$table" | tr '\n' ' ' | sed 's/ $//')" > "$out/BUILD_INFO" \
         || die "cannot write $out/BUILD_INFO"
+    if [ -n "$only_line" ]; then printf 'only=%s\n' "$only_line" >> "$out/BUILD_INFO" || die "cannot write $out/BUILD_INFO"; fi
     printf 'built %d programs from %s in %s\n' "${#names[@]}" "${head:0:12}" "$out"
     printf '%s\n' "$table"
 }

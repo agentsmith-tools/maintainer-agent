@@ -15,7 +15,7 @@ rollback. A profile or task name with anything but letters, digits, `.`, `_` and
 ## 1. build
 
 ```sh
-scripts/cutover.sh build [--out DIR] [--allow-dirty]
+scripts/cutover.sh build [--out DIR] [--allow-dirty] [--only NAME]...
 ```
 
 Builds every Rust program of the workspace that stands for a program of this repository, as a release
@@ -29,6 +29,13 @@ It refuses a dirty tree unless you pass `--allow-dirty`, and `live` refuses a bu
 writes only `DIR` and the cargo target directory (`CARGO_TARGET_DIR`, `rust/target` by default), replaces
 only what an earlier build wrote, and refuses a `DIR` that is a symbolic link, is writable by everyone or
 holds a file no build wrote.
+
+`--only NAME` (repeatable) keeps just the named programs, and `install`, which `live` needs and `build` adds
+by itself (it says so). The workspace still compiles as before; `DIR`, `SHA256SUMS` and `BUILD_INFO` hold only
+those programs, and `BUILD_INFO` gains an `only=` line with the names you gave. A name that is not a program
+the workspace builds, or not a plain lower-case program name, is refused before the first compile, and the
+refusal lists the valid names. A later build into the same directory, with or without `--only`, replaces the
+programs of the earlier one and removes the ones it does not hold. See "Staged cutover" below.
 
 ## 2. shadow
 
@@ -155,6 +162,26 @@ and refuses an unreadable pair where `install --rollback` reads it as restored a
 `install --rollback` and through `rollback`, and compares the exit status, both streams and every file:
 the two ways back are one way.
 
+## Staged cutover
+
+The cutover goes in two stages (decision of 2026-11-24), and the bash `maintainer-merge` stays live through both.
+`shadow` and `live` work from the files in the build directory, so a build made with `--only` is all it takes.
+
+1. Stage 1, the doctor and the repository tool:
+   `scripts/cutover.sh build --only maintainer-doctor --only maintainer-repo`, then `shadow` with an
+   `--accept-skip` for every program the build lacks (the SKIP lines of the report name them), then `live`.
+   `status` shows those two as `rust` and the other four as `bash`; `RUST_STAMP` lists those two.
+   Shadow compares prompts through the Rust `run`, and writes a marker only when it compared at least one, so
+   a build without `run` gets no marker today: this stage cannot pass `live` until that rule changes.
+2. Stage 2, `run`, `run-instance` and `alert`, after one supervised real run on stage 1: `scripts/cutover.sh rollback`
+   (it puts the bash originals back and removes `RUST_STAMP`; `live` refuses while the stamp exists), then
+   `build --only` with the larger set (`maintainer-doctor`, `maintainer-repo`, `run`, `run-instance`, `alert`),
+   `shadow` and `live` again. The new build replaces the old one in the same directory.
+
+`maintainer-merge` stays bash as long as no build in `DIR` holds it, which a build with `--only` guarantees and a
+build without `--only` does not (it holds every program the workspace builds, the gate among them). `rollback` is
+the same single step at every stage.
+
 ## How long the bash programs stay
 
 The bash programs stay in the tree, and each swapped program keeps its original beside it, until the
@@ -162,4 +189,4 @@ Rust programs have run on the timers for two weeks with `maintainer-doctor` and 
 The gate's own trial is separate: it runs next to the bash gate, and either one refusing means refuse.
 
 `rust/crates/mx-install/tests/cutover-live.sh` runs build, live, status and rollback with the real
-programs in a scratch `HOME`.
+programs in a scratch `HOME`, once for the whole set and once for the two stages above.
