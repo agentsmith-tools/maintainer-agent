@@ -406,6 +406,176 @@ case_out_is_a_file() {
 }
 cu_case "build: an --out that is a file is refused" case_out_is_a_file
 
+# --- build --only NAME: the programs that flip in one stage -----------------------------------------------------------------
+
+only_table() {  # NAME...: the table the build must print for these programs
+    local n
+    for n in "$@"; do printf '%s  %s\n' "$(printf 'rust build of %s\n' "$n" | sha256sum | cut -d' ' -f1)" "$n"; done | LC_ALL=C sort -k2
+}
+dir_listing() { ls -A "$CU_BUILD" | LC_ALL=C sort | tr '\n' ' '; }
+built_calls() { grep '^cargo build' "$CZ_CASE/cargo.calls" 2>/dev/null | sed 's/.*--bin //' | LC_ALL=C sort | tr '\n' ' '; }
+
+case_only_two() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only maintainer-doctor --only run
+    cz_expect_rc 0
+    cz_check "the files in the directory" "$(dir_listing)" "BUILD_INFO SHA256SUMS install maintainer-doctor run "
+    cz_check "the table in SHA256SUMS" "$(cat "$CU_BUILD/SHA256SUMS")" "$(only_table install maintainer-doctor run)"
+    cz_check "BUILD_INFO" "$(cat "$CU_BUILD/BUILD_INFO")" "head=$(cu_head)
+dirty=0
+programs=install maintainer-doctor run
+only=maintainer-doctor run"
+    cz_expect_stdout_has "built 3 programs from $(cu_head | cut -c1-12) in $CU_BUILD"
+    cz_check "the table printed" "$(grep -E '^[0-9a-f]{64}  ' "$CZ_CASE/stdout")" "$(only_table install maintainer-doctor run)"
+    cz_check "the programs cargo was asked to build" "$(built_calls)" "install maintainer-doctor run "
+    cz_expect_stderr_has "build: --only adds install, which live needs"
+}
+cu_case "build --only: two names leave those two and install, with a matching SHA256SUMS and an only= line" case_only_two
+
+case_only_install_named() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only install --only maintainer-repo
+    cz_expect_rc 0
+    cz_check "the files in the directory" "$(dir_listing)" "BUILD_INFO SHA256SUMS install maintainer-repo "
+    cz_expect_lacks stderr "--only adds install"
+}
+cu_case "build --only: naming install adds nothing and prints no note" case_only_install_named
+
+case_only_prefix_names() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only install-cron --only run-evals
+    cz_expect_rc 0
+    cz_check "the files in the directory" "$(dir_listing)" "BUILD_INFO SHA256SUMS install install-cron run-evals "
+    cz_expect_stderr_has "build: --only adds install, which live needs"
+}
+cu_case "build --only: a name that starts like another (run-evals, install-cron) does not pull in run or install by prefix" case_only_prefix_names
+
+case_only_duplicates() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run --only run --only maintainer-doctor --only run
+    cz_expect_rc 0
+    cz_check "the programs cargo was asked to build" "$(built_calls)" "install maintainer-doctor run "
+    cz_check "the only= line" "$(sed -n 4p "$CU_BUILD/BUILD_INFO")" "only=maintainer-doctor run"
+}
+cu_case "build --only: a repeated name is built once and listed once" case_only_duplicates
+
+case_only_unknown() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run --only no-such-program
+    cz_expect_rc 1
+    cz_expect_stdout_empty
+    cz_expect_stderr_first "cutover.sh: --only no-such-program is not a program this workspace builds; the programs are: alert check-claims containment-probe install install-cron maintainer-doctor maintainer-repo run run-evals run-instance shellcheck-sweep verify-action-pins"
+    cz_check "cargo build calls" "$(grep -c '^cargo build' "$CZ_CASE/cargo.calls" 2>/dev/null || true)" 0
+    [ ! -e "$CU_BUILD" ] || cz_note_fail "the directory was created for a refused build"
+}
+cu_case "build --only: a name the workspace does not build is refused, with the valid names, before any build" case_only_unknown
+
+case_only_unknown_keeps_old_build() {
+    fresh
+    cu_run build --out "$CU_BUILD"; cz_expect_rc 0
+    cu_snap "$CU_BUILD" > "$CZ_CASE/build.before"
+    cu_run build --out "$CU_BUILD" --only nope
+    cz_expect_rc 1
+    cu_snap "$CU_BUILD" > "$CZ_CASE/build.after"
+    cu_expect_same_snap "the build directory after a refused --only" "$CZ_CASE/build.before" "$CZ_CASE/build.after"
+}
+cu_case "build --only: a refused name leaves the old build whole" case_only_unknown_keeps_old_build
+
+case_only_hostile() {
+    fresh
+    local bad
+    for bad in '../x' 'a b' '' '-x' 'Run' 'a/b' $'a\nb' 'run;x'; do
+        rm -f "$CZ_CASE/cargo.calls"
+        cu_run build --out "$CU_BUILD" --only "$bad"
+        cz_check "--only $(printf '%q' "$bad") exits" "$CZ_RC" 1
+        cz_expect_stderr_first "cutover.sh: --only $(printf '%q' "$bad") is not a program name"
+        [ ! -e "$CZ_CASE/cargo.calls" ] || cz_note_fail "cargo was called for $(printf '%q' "$bad")"
+        [ ! -e "$CU_BUILD" ] || cz_note_fail "the directory was created for $(printf '%q' "$bad")"
+    done
+}
+cu_case "build --only: a name that is not a plain program name is refused before cargo is called" case_only_hostile
+
+case_only_needs_value() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only
+    cz_expect_rc 64
+    cz_expect_stderr_first "cutover.sh: build: --only needs a program name"
+}
+cu_case "build --only: the flag without a name is a usage error" case_only_needs_value
+
+case_only_without_install_program() {
+    fresh
+    cu_metadata mx-run:run mx-doctor:maintainer-doctor
+    cu_run build --out "$CU_BUILD" --only run
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: the workspace builds no install program, which live needs; --only cannot add it"
+    cz_check "cargo build calls" "$(grep -c '^cargo build' "$CZ_CASE/cargo.calls" 2>/dev/null || true)" 0
+}
+cu_case "build --only: a workspace with no install program is refused, since live could not use the result" case_only_without_install_program
+
+case_full_build_after_only() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run; cz_expect_rc 0
+    printf 'old\n' > "$CU_BUILD/shadow-ok"
+    cu_run build --out "$CU_BUILD"
+    cz_expect_rc 0
+    cz_check "the files after a full build" "$(dir_listing)" "$( { built_names; echo BUILD_INFO; echo SHA256SUMS; } | LC_ALL=C sort | tr '\n' ' ')"
+    cz_check "BUILD_INFO lines" "$(grep -c . "$CU_BUILD/BUILD_INFO")" 3
+    [ -z "$(grep '^only=' "$CU_BUILD/BUILD_INFO")" ] || cz_note_fail "the only= line of the old build survived"
+    cz_check "SHA256SUMS" "$(cat "$CU_BUILD/SHA256SUMS")" "$(expected_table)"
+}
+cu_case "build --only: a later build without it restores every program, drops the only= line and the old marker" case_full_build_after_only
+
+case_only_then_other_set() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run --only maintainer-doctor; cz_expect_rc 0
+    cu_run build --out "$CU_BUILD" --only alert --only maintainer-repo
+    cz_expect_rc 0
+    cz_check "the files after the second build" "$(dir_listing)" "BUILD_INFO SHA256SUMS alert install maintainer-repo "
+    cz_check "the table in SHA256SUMS" "$(cat "$CU_BUILD/SHA256SUMS")" "$(only_table alert install maintainer-repo)"
+    cz_check "the only= line" "$(sed -n 4p "$CU_BUILD/BUILD_INFO")" "only=alert maintainer-repo"
+}
+cu_case "build --only: a second build with another set removes the programs of the first" case_only_then_other_set
+
+case_only_then_larger_set() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only maintainer-doctor --only maintainer-repo; cz_expect_rc 0
+    cu_run build --out "$CU_BUILD" --only maintainer-doctor --only maintainer-repo --only run --only run-instance --only alert
+    cz_expect_rc 0
+    cz_check "the files after the larger build" "$(dir_listing)" "BUILD_INFO SHA256SUMS alert install maintainer-doctor maintainer-repo run run-instance "
+}
+cu_case "build --only: a larger set built into the same directory replaces the smaller one" case_only_then_larger_set
+
+case_only_foreign_file() {
+    fresh
+    mkdir -p "$CU_BUILD"; chmod 755 "$CU_BUILD"; printf 'mine\n' > "$CU_BUILD/notes.txt"
+    cu_run build --out "$CU_BUILD" --only run
+    cz_expect_rc 1
+    cz_expect_stderr_first "cutover.sh: $CU_BUILD holds notes.txt, which an earlier build did not write; use an empty directory"
+    cz_check "the foreign file" "$(cat "$CU_BUILD/notes.txt")" mine
+    [ ! -s "$CZ_CASE/cargo.calls" ] || cz_note_fail "cargo was called"
+}
+cu_case "build --only: a foreign file in the directory is refused and kept" case_only_foreign_file
+
+case_only_failed_compile_keeps_old() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run --only maintainer-doctor; cz_expect_rc 0
+    cu_snap "$CU_BUILD" > "$CZ_CASE/build.before"
+    : > "$CZ_CASE/cargo.fail.alert"
+    cu_run build --out "$CU_BUILD" --only alert --only run
+    cz_expect_rc 1
+    cu_snap "$CU_BUILD" > "$CZ_CASE/build.after"
+    cu_expect_same_snap "the build directory after a failed --only build" "$CZ_CASE/build.before" "$CZ_CASE/build.after"
+}
+cu_case "build --only: a failed compile leaves the earlier --only build whole" case_only_failed_compile_keeps_old
+
+case_only_leaves_no_scratch() {
+    fresh
+    cu_run build --out "$CU_BUILD" --only run
+    cz_check "entries left in the directory besides the programs" "$(cu_dot_entries "$CU_BUILD")" 0
+}
+cu_case "build --only: no scratch entry is left in the directory" case_only_leaves_no_scratch
+
 # --- the two tables that must not drift apart --------------------------------------------------------------------
 
 case_table_matches_assemble_tree() {

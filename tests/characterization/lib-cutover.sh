@@ -295,6 +295,16 @@ cu_build() {
     printf 'head=%s\ndirty=0\nprograms=%s\n' "$(cu_head)" "${names[*]}" > "$CU_BUILD/BUILD_INFO"
 }
 
+# cu_build_only NAME...: the build directory `build --only NAME...` leaves: these programs and install,
+# with the only= line in BUILD_INFO.
+cu_build_only() {
+    local names=("$@") n have_install=0
+    for n in "${names[@]}"; do [ "$n" = install ] && have_install=1; done
+    [ "$have_install" = 1 ] || names+=(install)
+    cu_build "${names[@]}"
+    printf 'only=%s\n' "$(printf '%s\n' "$@" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')" >> "$CU_BUILD/BUILD_INFO"
+}
+
 # The table of the programs now in the build directory, computed here and not by the script.
 cu_table() {
     local f name

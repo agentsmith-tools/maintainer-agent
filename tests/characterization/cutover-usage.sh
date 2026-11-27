@@ -42,6 +42,13 @@ case_help() {
 }
 cu_case "usage: help prints the usage and exits 0" case_help
 
+case_help_names_only_flag() {
+    cu_run help
+    cz_expect_rc 0
+    cz_expect_stderr_has "scripts/cutover.sh build    [--out DIR] [--allow-dirty] [--only NAME]..."
+}
+cu_case "usage: help shows the --only flag of build" case_help_names_only_flag
+
 case_unknown_flag() {
     local sub
     for sub in build shadow live status rollback; do

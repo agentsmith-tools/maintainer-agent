@@ -375,6 +375,69 @@ case_partial_build() {
 }
 cu_case "live: a build without some of the six swaps only the ones it holds" case_partial_build
 
+# --- a build --only directory: the first stage and the second ---------------------------------------------------------
+
+# The programs of the first stage and the machine they leave.
+stage_one() {
+    cu_deploy; cu_build_only maintainer-doctor maintainer-repo
+    cu_fake_install; cu_marker maintainer-merge run run-instance alert
+}
+
+case_staged_swaps_only_named() {
+    stage_one
+    cu_run live --build-dir "$CU_BUILD"
+    cz_expect_rc 0
+    cz_expect_stdout_has "live: read back 2 program(s): each is the Rust build, each bash original is intact, RUST_STAMP lists exactly those"
+    cz_check "RUST_STAMP names" "$(sed 's/^[0-9a-f]*  //' "$CU_SHARE/RUST_STAMP" | tr '\n' ' ')" "$CU_BIN/maintainer-doctor $CU_BIN/maintainer-repo "
+    cu_run status --build-dir "$CU_BUILD"
+    cz_expect_stdout_has "  maintainer-doctor  rust     matches RUST_STAMP"
+    cz_expect_stdout_has "  maintainer-repo    rust     matches RUST_STAMP"
+    local n
+    for n in maintainer-merge run run-instance alert; do
+        cz_expect_stdout_has "  $(printf '%-18s' "$n") bash"
+    done
+    cmp -s "$CU_BIN/maintainer-merge" "$CU_FX/bin/maintainer-merge" || cz_note_fail "maintainer-merge is no longer the bash program"
+    cmp -s "$CU_SHARE/run.sh" "$CU_FX/lib/run.sh" || cz_note_fail "run is no longer the bash program"
+}
+cu_case "live: a build --only directory swaps exactly the named programs and status shows the others as bash" case_staged_swaps_only_named
+
+case_staged_rollback() {
+    stage_one
+    cu_snap "$CU_HOME" > "$CZ_CASE/home.before"
+    cu_run live --build-dir "$CU_BUILD"; cz_expect_rc 0
+    cu_run rollback; cz_expect_rc 0
+    cu_snap "$CU_HOME" > "$CZ_CASE/home.after"
+    cu_expect_same_snap "the machine after the first stage and a rollback" "$CZ_CASE/home.before" "$CZ_CASE/home.after"
+}
+cu_case "live: rollback after a build --only live leaves the machine as it was" case_staged_rollback
+
+case_staged_second_stage() {
+    stage_one
+    cu_run live --build-dir "$CU_BUILD"; cz_expect_rc 0
+    cu_run rollback; cz_expect_rc 0
+    # the second stage: a larger set in the same directory, through the same shadow and live
+    rm -rf -- "${CU_BUILD:?}"
+    cu_build_only maintainer-doctor maintainer-repo run run-instance alert
+    cu_fake_install; cu_marker maintainer-merge
+    cu_run live --build-dir "$CU_BUILD"
+    cz_expect_rc 0
+    cz_expect_stdout_has "live: read back 5 program(s)"
+    cz_check "RUST_STAMP names" "$(sed 's/^[0-9a-f]*  //' "$CU_SHARE/RUST_STAMP" | LC_ALL=C sort | tr '\n' ' ')" "$(printf '%s\n' "$CU_BIN/maintainer-doctor" "$CU_BIN/maintainer-repo" "$CU_SHARE/run.sh" "$CU_SHARE/run-instance.sh" "$CU_SHARE/alert.sh" | LC_ALL=C sort | tr '\n' ' ')"
+    cu_run status --build-dir "$CU_BUILD"
+    cz_expect_stdout_has "  maintainer-merge   bash"
+    cz_expect_stdout_has "  run                rust     matches RUST_STAMP"
+}
+cu_case "live: after a rollback the larger set of the second stage goes live and maintainer-merge stays bash" case_staged_second_stage
+
+case_staged_live_refused_without_rollback() {
+    stage_one
+    cu_run live --build-dir "$CU_BUILD"; cz_expect_rc 0
+    cu_run live --build-dir "$CU_BUILD"
+    cz_expect_rc 1
+    cz_expect_stderr_has "a Rust install is already in place; run scripts/cutover.sh rollback first"
+}
+cu_case "live: the second stage needs a rollback first" case_staged_live_refused_without_rollback
+
 case_not_linux() {
     ready
     printf '#!/usr/bin/env bash\necho Darwin\n' > "$CZ_CASE/bin/uname"; chmod +x "$CZ_CASE/bin/uname"

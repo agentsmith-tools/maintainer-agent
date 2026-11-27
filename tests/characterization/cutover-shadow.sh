@@ -230,6 +230,59 @@ case_accept_skip_bad_name() {
 }
 cu_case "shadow: --accept-skip with something that is not a program name is refused" case_accept_skip_bad_name
 
+# --- a build that holds only the programs named with build --only -------------------------------------------------
+
+# Every program the shadow compares and a build of run and maintainer-doctor does not hold.
+SUBSET_LEFT="maintainer-merge maintainer-repo run-instance alert install-cron check-claims shellcheck-sweep verify-action-pins run-evals containment-probe"
+accept_all_left() { local n; ACCEPTS=(); for n in $SUBSET_LEFT; do ACCEPTS+=(--accept-skip "$n"); done; }
+
+case_subset_accepted() {
+    cu_deploy alpha beta; cu_build_only run maintainer-doctor
+    accept_all_left
+    cu_shadow "${ACCEPTS[@]}"
+    cz_expect_rc 0
+    cu_expect_marker
+    cz_check "the table lines of shadow-ok" "$(grep -v '^#' "$CU_BUILD/shadow-ok")" "$(cu_table)"
+    cz_check "the accepted skips of shadow-ok" "$(grep -c '^# accepted-skip: ' "$CU_BUILD/shadow-ok")" 10
+    cu_expect_report_has "SKIP maintainer-merge show (all receipts): no Rust build of maintainer-merge in $CU_BUILD (the bash program stays)"
+    cu_expect_report_lacks "DIFF "
+    [ "$(cu_report_count SKIP)" -gt 0 ] || cz_note_fail "no comparison was skipped, so the build was not a subset"
+    cz_check "the programs of the directory after shadow" "$(ls -A "$CU_BUILD" | LC_ALL=C sort | tr '\n' ' ')" "BUILD_INFO SHA256SUMS install maintainer-doctor run shadow-ok shadow-report.txt "
+}
+cu_case "shadow: a build --only directory is compared, its absent programs are skipped and a marker is written when each skip is accepted" case_subset_accepted
+
+case_subset_not_accepted() {
+    cu_deploy alpha beta; cu_build_only run maintainer-doctor
+    cu_shadow
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "SKIP maintainer-merge show (all receipts): no Rust build of maintainer-merge"
+    cu_expect_report_has "MARKER not written: 10 program(s) had no Rust build to compare (name one with --accept-skip to go on without it)"
+}
+cu_case "shadow: a build --only directory is refused a marker when its absent programs are not accepted" case_subset_not_accepted
+
+case_subset_one_accept_missing() {
+    cu_deploy alpha beta; cu_build_only run maintainer-doctor
+    accept_all_left
+    local args=() i
+    for ((i = 0; i < ${#ACCEPTS[@]}; i += 2)); do [ "${ACCEPTS[i+1]}" = alert ] || args+=("${ACCEPTS[i]}" "${ACCEPTS[i+1]}"); done
+    cu_shadow "${args[@]}"
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: 1 program(s) had no Rust build to compare"
+}
+cu_case "shadow: leaving one absent program of a build --only directory unaccepted withholds the marker" case_subset_one_accept_missing
+
+case_subset_without_run() {
+    cu_deploy alpha beta; cu_build_only maintainer-doctor maintainer-repo
+    accept_all_left
+    cu_shadow "${ACCEPTS[@]}" --accept-skip run
+    cz_expect_rc 1
+    cu_expect_no_marker
+    cu_expect_report_has "MARKER not written: no prompt was compared"
+}
+cu_case "shadow: a build --only directory without run compares no prompt and gets no marker, whatever is accepted (current rule, see the PR)" case_subset_without_run
+
 # --- nothing to compare -----------------------------------------------------------------------------------------------
 
 case_no_profiles() {
